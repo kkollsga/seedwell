@@ -19,10 +19,10 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use trs_control::client::Client;
-use trs_control::human;
-use trs_control::proto::*;
-use trs_control::types::*;
+use seedwell_control::client::Client;
+use seedwell_control::human;
+use seedwell_control::proto::*;
+use seedwell_control::types::*;
 
 use crate::args::{Opts, Usage, parse_rate, parse_size};
 use crate::commands::{CliError, Global, R, ask, connect, fetch_rows, show};
@@ -230,7 +230,7 @@ fn save_manifest(dir: &Path, m: &Manifest) -> R {
 
 async fn host_call(dir: &Path, req: Value) -> Result<Value, CliError> {
     let sock = dir.join("host.sock");
-    let mut s = trs_control::transport::connect(&sock).await.map_err(|_| CliError { code: 3, message: "no sims are running (start one with `seedwell sim add`)".into(), api_code: Some(ErrorCode::NotFound), data: None })?;
+    let mut s = seedwell_control::transport::connect(&sock).await.map_err(|_| CliError { code: 3, message: "no sims are running (start one with `seedwell sim add`)".into(), api_code: Some(ErrorCode::NotFound), data: None })?;
     s.write_all(format!("{req}\n").as_bytes()).await.map_err(|e| CliError::plain(1, format!("sim host: {e}")))?;
     let mut lines = BufReader::new(s).lines();
     let line = tokio::time::timeout(Duration::from_secs(900), lines.next_line())
@@ -250,7 +250,7 @@ async fn ensure_host(g: &Global, dir: &Path) -> R {
     let exe = std::env::current_exe().map_err(|e| CliError::plain(1, format!("cannot find myself: {e}")))?;
     let log = std::fs::File::create(dir.join("host.log")).map_err(|e| CliError::plain(1, e.to_string()))?;
     // Closing the terminal does not end the host; it ends when the app does.
-    trs_platform::proc::detached_command(&exe)
+    seedwell_platform::proc::detached_command(&exe)
         .args(["sim", "host", "--dir"])
         .arg(dir)
         .arg("--app-socket")
@@ -275,7 +275,7 @@ async fn allowed(g: &Global, c: &mut Client) -> R {
     if g.yes_i_know {
         return Ok(());
     }
-    let (_, s): (_, SettingsDto) = ask(c, Request::SettingsGet(SettingsGetParams { keys: Some(vec!["advanced.developer_mode".into()]) })).await?;
+    let (_, s): (_, SettingsDto) = ask(c, Request::SettingsGet(SettingsGetParams { keys: Some(vec!["advanced.developer_mode".into()]), file: None })).await?;
     if s.settings.get("advanced.developer_mode") == Some(&Value::Bool(true)) {
         return Ok(());
     }
@@ -522,7 +522,7 @@ async fn clear(g: &Global, dir: &Path) -> R {
         }
     let mut folders = 0usize;
     for m in &manifest.sims {
-        if trs_platform::dirs::in_temp_folder(&m.dir) && std::fs::remove_dir_all(&m.dir).is_ok() {
+        if seedwell_platform::dirs::in_temp_folder(&m.dir) && std::fs::remove_dir_all(&m.dir).is_ok() {
             folders += 1;
         }
     }

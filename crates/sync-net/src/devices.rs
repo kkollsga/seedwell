@@ -9,7 +9,7 @@
 //! - **Pairing**: a device makes a one-use link valid for 15 minutes ([`PAIR_LINK_S`]); the other pastes it and
 //!   dials. The device that made the link records the request ([`PairRequest`]) instead of admitting, and its user
 //!   confirms (the two screens show the joining device's id) or refuses. On confirming it signs the new device in as
-//!   an owner and sends it U ([`trs_sync_proto::msg::OwnerKey`]).
+//!   an owner and sends it U ([`seedwell_sync_proto::msg::OwnerKey`]).
 //! - **On all my devices**: a sibling signs a Follow for a folder or channel. Each sibling that does not have it joins
 //!   it by itself: a folder at the default location for joined folders (under a name that is free, never merged into
 //!   one that exists), on demand when it is on demand on the device that put it there ([`FOLLOW_ON_DEMAND`]; in full
@@ -25,7 +25,7 @@
 //!   sibling it finds at Read & write to Admin, never lowers one. These are ordinary statements, which every member
 //!   (also on an older Seedwell) accepts. Matching user names never grant anything.
 //! - **Read only** is the folder's own setting, its owners' (in its membership, [`Body::ReadOnly`]), not the group's:
-//!   the group's old flag ([`trs_sync_proto::members::FOLLOW_READ_ONLY`], 0.1.19, which lowered roles) is read once, to give the roles it
+//!   the group's old flag ([`seedwell_sync_proto::members::FOLLOW_READ_ONLY`], 0.1.19, which lowered roles) is read once, to give the roles it
 //!   lowered back and carry it over ([`SyncHandle::migrate_read_only`]).
 //! - **Removal**: final in the group; the dialog's places (where this device is owner) get the ordinary Remove too.
 //!   Leave deletes the group here; Start Over makes a new one.
@@ -39,14 +39,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use trs_sync_proto::device::DeviceKey;
-use trs_sync_proto::ids::{DeviceId, FolderId};
-use trs_sync_proto::keys::{Access, FolderKey, FolderSecret, Proof};
-use trs_sync_proto::members::{
+use seedwell_sync_proto::device::DeviceKey;
+use seedwell_sync_proto::ids::{DeviceId, FolderId};
+use seedwell_sync_proto::keys::{Access, FolderKey, FolderSecret, Proof};
+use seedwell_sync_proto::members::{
     Body, FOLLOW_ON_DEMAND, FOLLOW_REMOVED, Follow, FollowTarget, Invite, InviteLink, Membership, Role, Signer, Statement, hex,
     new_invite,
 };
-use trs_sync_proto::msg::{DevicesJoin, JoinChannel, Members, Message};
+use seedwell_sync_proto::msg::{DevicesJoin, JoinChannel, Members, Message};
 
 use crate::config::{ChannelEntry, MyDevicesEntry};
 use crate::roles::{Proved, now_s};
@@ -228,22 +228,57 @@ pub(crate) fn effective_follow(ctx: &Ctx, f: &Space) -> Option<Follow> {
     let g = my_group(ctx)?;
     let admits = admitting(f);
     let m = g.membership.read().unwrap_or_else(|e| e.into_inner());
-    if admits.is_empty() { m.follow(&pk_of(f)).cloned() } else { m.follow_by(&pk_of(f), |pk| admits.contains(pk)) }
+    follow_in(&m, &pk_of(f), &admits)
 }
 
-/// The serial and time this device's next Follow for `f` gets: above every one of `f`'s owners and admins (and this
-/// device's own), so a higher serial another device said never holds it back; at the highest serial
-/// ([`trs_sync_proto::members::MAX_FOLLOW_SERIAL`]) a second after the latest of these, so it still ranks above it.
-fn next_serial_for(g: &Space, f: &Space, me: &[u8; 32]) -> (u64, u64) {
-    let admits = admitting(f);
-    let trusted = |pk: &[u8; 32]| admits.contains(pk) || pk == me;
-    let top = g.membership.read().unwrap_or_else(|e| e.into_inner()).follow_by(&pk_of(f), trusted);
-    let serial = top.as_ref().map_or(0, |t| t.serial).saturating_add(1).min(trs_sync_proto::members::MAX_FOLLOW_SERIAL);
+/// [`effective_follow`] in group membership `m`, for target `pk` whose owners and admins are `admits`.
+fn follow_in(m: &Membership, pk: &[u8; 32], admits: &BTreeSet<[u8; 32]>) -> Option<Follow> {
+    if admits.is_empty() { m.follow(pk).cloned() } else { m.follow_by(pk, |p| admits.contains(p)) }
+}
+
+/// The serial and time this device's next Follow for target `pk` gets in group membership `m`: above every one of the
+/// target's owners and admins (`admits`) and this device's own (`me`), so a higher serial another device said never
+/// holds it back; at the highest serial ([`seedwell_sync_proto::members::MAX_FOLLOW_SERIAL`]) a second after the latest of
+/// these, so it still ranks above it.
+fn next_serial_in(m: &Membership, pk: &[u8; 32], admits: &BTreeSet<[u8; 32]>, me: &[u8; 32]) -> (u64, u64) {
+    let top = m.follow_by(pk, |p| admits.contains(p) || p == me);
+    let serial = top.as_ref().map_or(0, |t| t.serial).saturating_add(1).min(seedwell_sync_proto::members::MAX_FOLLOW_SERIAL);
     let at = match &top {
         Some(t) if t.serial >= serial => now_s().max(t.at_s.saturating_add(1)),
         _ => now_s(),
     };
     (serial, at)
+}
+
+/// What [`SyncHandle::removed_everywhere`] says of a folder its owner removes on all devices, taken before it goes here.
+pub(crate) struct EverywhereFollow {
+    pk: [u8; 32],
+    name: String,
+    /// The folder's owners and admins then.
+    admits: BTreeSet<[u8; 32]>,
+}
+
+/// What [`add_follow`]'s `make` decides on: the group as it is when the Follow is added.
+struct FollowNow<'a> {
+    m: &'a Membership,
+    /// The Follow that counts for the target now ([`effective_follow`]).
+    counts: Option<Follow>,
+    /// The serial and time this device's next Follow for it gets ([`next_serial_in`]).
+    next: (u64, u64),
+}
+
+/// Says a Follow of this device's for target `pk` in group `g`, decided on the group as it is
+/// ([`crate::roles::add_decided`]): `make` returns what to say, `None` for nothing. `admits` are the target's owners
+/// and admins, read before (never both memberships locked at once). Two said at once (the user's switch and a change
+/// of Files on demand, or two switches) never take the same serial, and neither is decided on a look from before the
+/// other was added: the user turning it on just after an off was decided said nothing ("it is on already"), and the
+/// off counted. True when the group changed (call `roles::changed`).
+fn add_follow(ctx: &Ctx, g: &Space, pk: [u8; 32], admits: &BTreeSet<[u8; 32]>, make: impl FnOnce(FollowNow<'_>) -> Option<Body>) -> bool {
+    let key: &DeviceKey = &ctx.key;
+    crate::roles::add_decided(g, |m| {
+        let now = FollowNow { m, counts: follow_in(m, &pk, admits), next: next_serial_in(m, &pk, admits, key.public_key()) };
+        make(now).map(|b| Statement::by_device(key, &g.id, b)).into_iter().collect()
+    })
 }
 
 /// `f` is on all the user's devices (the Follow that counts for it is on, [`effective_follow`]).
@@ -377,15 +412,15 @@ pub(crate) fn pair_request(ctx: &Ctx, peer_pk: &[u8; 32], invite: &Invite) -> Pr
 }
 
 /// Why a pairing link does not admit, for the device that pasted it.
-pub(crate) fn refusal(e: trs_sync_proto::members::AdmitError) -> String {
-    use trs_sync_proto::members::AdmitError;
+pub(crate) fn refusal(e: seedwell_sync_proto::members::AdmitError) -> String {
+    use seedwell_sync_proto::members::AdmitError;
     match e {
         AdmitError::Expired => "this link has expired: make a new one on the other device".into(),
         AdmitError::UsedUp => "this link has been used up: make a new one on the other device".into(),
         AdmitError::Revoked => "the pairing was refused on the other device".into(),
         AdmitError::Removed => concat!(
             "this ",
-            trs_platform::computer!(),
+            seedwell_platform::computer!(),
             " left these devices or was removed from them: to pair it again, use Start Over on the other device"
         )
         .into(),
@@ -415,7 +450,7 @@ fn ancestor_proofs(ctx: &Ctx, a: &Space) -> Vec<Proof> {
         _ => false,
     });
     out.extend(moves.map(|st| Proof::Grant(st.to_bytes())));
-    out.truncate(trs_sync_proto::msg::MAX_PROOFS);
+    out.truncate(seedwell_sync_proto::msg::MAX_PROOFS);
     out
 }
 
@@ -604,7 +639,7 @@ impl SyncHandle {
         let ctx = &self.inner.ctx;
         let Some(g) = ctx.registry.devices() else { return };
         for p in ctx.registry.peers() {
-            if !p.has(trs_sync_proto::msg::FEATURE_DEVICES) || p.access(&g.id).is_some() {
+            if !p.has(seedwell_sync_proto::msg::FEATURE_DEVICES) || p.access(&g.id).is_some() {
                 continue;
             }
             let join = own_devices_join(ctx, &[g.id], &p.device_pk, &p.exporter, true);
@@ -713,7 +748,7 @@ impl SyncHandle {
             // Met the device that made the link: its user confirms there.
             let met = ctx.registry.peers().into_iter().find(|p| p.access(&g.id).is_some()).map(|p| p.name.clone());
             out.progress = match met {
-                Some(name) => Some(format!("Confirm on “{name}”: it shows this {}'s id", trs_platform::computer!())),
+                Some(name) => Some(format!("Confirm on “{name}”: it shows this {}'s id", seedwell_platform::computer!())),
                 None => progress,
             };
         }
@@ -748,8 +783,8 @@ impl SyncHandle {
         let me = *ctx.key.public_key();
         let g = match ctx.registry.devices() {
             Some(g) if g.role_of(&me).is_some() => g,
-            Some(g) if lock(&g.invite).is_some() => return Err(invalid(concat!("this ", trs_platform::computer!(), " is joining your devices with a link: wait for that, or leave first"))),
-            Some(_) => return Err(invalid(concat!("this ", trs_platform::computer!(), " was removed from your devices: start over first"))),
+            Some(g) if lock(&g.invite).is_some() => return Err(invalid(concat!("this ", seedwell_platform::computer!(), " is joining your devices with a link: wait for that, or leave first"))),
+            Some(_) => return Err(invalid(concat!("this ", seedwell_platform::computer!(), " was removed from your devices: start over first"))),
             None => self.new_group().await?,
         };
         let now = now_s();
@@ -786,16 +821,16 @@ impl SyncHandle {
         let ctx = self.inner.ctx.clone();
         let me = *ctx.key.public_key();
         if l.invite.issuer == Signer::Device(me) {
-            return Err(invalid(concat!("this link was made on this ", trs_platform::computer!(), ": paste it on the other device")));
+            return Err(invalid(concat!("this link was made on this ", seedwell_platform::computer!(), ": paste it on the other device")));
         }
         let id = l.invite.folder_id();
         if let Some(g) = ctx.registry.devices() {
             let others = group_members(&g.membership.read().unwrap_or_else(|e| e.into_inner()), &me);
             if g.id == id && g.role_of(&me).is_some() {
-                return Err(invalid(concat!("this ", trs_platform::computer!(), " is already one of these devices")));
+                return Err(invalid(concat!("this ", seedwell_platform::computer!(), " is already one of these devices")));
             }
             if g.role_of(&me).is_some() && !others.is_empty() {
-                return Err(invalid(concat!("this ", trs_platform::computer!(), " is paired with other devices: leave them first (Settings › Devices)")));
+                return Err(invalid(concat!("this ", seedwell_platform::computer!(), " is paired with other devices: leave them first (Settings › Devices)")));
             }
             self.drop_group(&g)?;
         }
@@ -851,7 +886,7 @@ impl SyncHandle {
             && p.folders.read().unwrap_or_else(|e| e.into_inner()).is_empty()
         {
             let reason = format!("link: “{}” refused to pair", lock(&ctx.device_name));
-            let _ = p.control.send(Message::Close(trs_sync_proto::msg::Close { reason })).await;
+            let _ = p.control.send(Message::Close(seedwell_sync_proto::msg::Close { reason })).await;
         }
         Ok(())
     }
@@ -1107,24 +1142,24 @@ impl SyncHandle {
     /// Says "On all my devices" for `id` in the group as `on`, when that is not what the group says already.
     async fn say_follow(&self, id: &FolderId, on: bool) -> Result<(), SyncError> {
         let ctx = self.inner.ctx.clone();
-        let g = my_group(&ctx).ok_or_else(|| invalid(concat!("pair this ", trs_platform::computer!(), " with your other devices first (Settings › Devices)")))?;
+        let g = my_group(&ctx).ok_or_else(|| invalid(concat!("pair this ", seedwell_platform::computer!(), " with your other devices first (Settings › Devices)")))?;
         let f = ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
         if on && !f.role_of(ctx.key.public_key()).is_some_and(Role::admits) {
             return Err(invalid(format!("only an owner or admin of this {} can put it on all your devices", crate::roles::noun(&f))));
         }
         let target = if f.kind == SpaceKind::Channel { FollowTarget::Channel } else { FollowTarget::Folder };
         let pk = pk_of(&f);
-        let (now_on, (serial, at_s)) = (followed(&ctx, &f), next_serial_for(&g, &f, ctx.key.public_key()));
-        if now_on == on {
-            return Ok(());
-        }
         let name = lock(&f.name).clone();
         let flags = if on && f.kind == SpaceKind::Folder && self.offers_on_demand(id) { FOLLOW_ON_DEMAND } else { 0 };
-        let st = Statement::by_device(&ctx.key, &g.id, Body::Follow { target, target_pk: pk, name, on, serial, at_s, flags });
-        if on && let Some(e) = lock(&self.inner.cfg).my_devices.as_mut() {
-            e.skip.retain(|s| *s != id.to_string());
-        }
-        if crate::roles::add(&g, [st]) {
+        // Only when the group says otherwise, as it is when the statement is added.
+        let say = |now: FollowNow<'_>| {
+            let (serial, at_s) = now.next;
+            (now.counts.is_some_and(|fl| fl.on) != on).then_some(Body::Follow { target, target_pk: pk, name, on, serial, at_s, flags })
+        };
+        if add_follow(&ctx, &g, pk, &admitting(&f), say) {
+            if on && let Some(e) = lock(&self.inner.cfg).my_devices.as_mut() {
+                e.skip.retain(|s| *s != id.to_string());
+            }
             crate::roles::changed(&ctx, &g).await;
         }
         Ok(())
@@ -1142,15 +1177,18 @@ impl SyncHandle {
         }
         let pk = pk_of(&f);
         let want = if self.offers_on_demand(id) { FOLLOW_ON_DEMAND } else { 0 };
-        let Some(flags) = effective_follow(&ctx, &f).filter(|fl| fl.on).map(|fl| fl.flags) else { return };
-        let (serial, at_s) = next_serial_for(&g, &f, ctx.key.public_key());
-        if flags & FOLLOW_ON_DEMAND == want {
-            return;
-        }
         let name = lock(&f.name).clone();
-        let flags = (flags & !FOLLOW_ON_DEMAND) | want;
-        let st = Statement::by_device(&ctx.key, &g.id, Body::Follow { target: FollowTarget::Folder, target_pk: pk, name, on: true, serial, at_s, flags });
-        if crate::roles::add(&g, [st]) {
+        // Only while it is on, and says otherwise, as the group is when the statement is added (never turning back on
+        // one the user just turned off).
+        let say = |now: FollowNow<'_>| {
+            let flags = now.counts.filter(|fl| fl.on).map(|fl| fl.flags)?;
+            if flags & FOLLOW_ON_DEMAND == want {
+                return None;
+            }
+            let (serial, at_s) = now.next;
+            Some(Body::Follow { target: FollowTarget::Folder, target_pk: pk, name, on: true, serial, at_s, flags: (flags & !FOLLOW_ON_DEMAND) | want })
+        };
+        if add_follow(&ctx, &g, pk, &admitting(&f), say) {
             crate::roles::changed(&ctx, &g).await;
         }
     }
@@ -1177,26 +1215,28 @@ impl SyncHandle {
     }
 
     /// What [`Self::removed_everywhere`] needs of folder `id`, taken before it is removed: `None` when removing it here
-    /// does not remove it on the other devices ([`Self::removes_everywhere`]). With the serial its statement gets (above
-    /// every one of the folder's owners and admins: read while the folder's roles are still here).
-    pub(crate) fn everywhere_follow(&self, id: &FolderId) -> Option<([u8; 32], String, (u64, u64))> {
+    /// does not remove it on the other devices ([`Self::removes_everywhere`]). With the folder's owners and admins, whose
+    /// Follows its statement ranks above (read while the folder's roles are still here).
+    pub(crate) fn everywhere_follow(&self, id: &FolderId) -> Option<EverywhereFollow> {
         if !self.removes_everywhere(id) {
             return None;
         }
-        let ctx = &self.inner.ctx;
-        let f = ctx.registry.user_space(id)?;
+        let f = self.inner.ctx.registry.user_space(id)?;
         let name = lock(&f.name).clone();
-        let serial = next_serial_for(&*my_group(ctx)?, &f, ctx.key.public_key());
-        Some((pk_of(&f), name, serial))
+        Some(EverywhereFollow { pk: pk_of(&f), name, admits: admitting(&f) })
     }
 
-    /// Folder `pk` was removed here by its owner: the group says so ([`FOLLOW_REMOVED`]), and every sibling removes it
-    /// too, keeping its files.
-    pub(crate) async fn removed_everywhere(&self, pk: [u8; 32], name: String, (serial, at_s): (u64, u64)) {
+    /// Folder `ev.pk` was removed here by its owner: the group says so ([`FOLLOW_REMOVED`]), and every sibling removes
+    /// it too, keeping its files. Its serial is taken as it is added ([`add_follow`]).
+    pub(crate) async fn removed_everywhere(&self, ev: EverywhereFollow) {
         let ctx = self.inner.ctx.clone();
         let Some(g) = my_group(&ctx) else { return };
-        let body = Body::Follow { target: FollowTarget::Folder, target_pk: pk, name, on: false, serial, at_s, flags: FOLLOW_REMOVED };
-        if crate::roles::add(&g, [Statement::by_device(&ctx.key, &g.id, body)]) {
+        let EverywhereFollow { pk, name, admits } = ev;
+        let say = |now: FollowNow<'_>| {
+            let (serial, at_s) = now.next;
+            Some(Body::Follow { target: FollowTarget::Folder, target_pk: pk, name, on: false, serial, at_s, flags: FOLLOW_REMOVED })
+        };
+        if add_follow(&ctx, &g, pk, &admits, say) {
             crate::roles::changed(&ctx, &g).await;
         }
     }
@@ -1267,7 +1307,7 @@ impl SyncHandle {
             let fl = match &here {
                 Some(f) => match effective_follow(&ctx, f) {
                     Some(fl) => {
-                        self.restate_follow(&g, f, &fl, &plain).await;
+                        self.restate_follow(&g, f).await;
                         fl
                     }
                     None => continue,
@@ -1552,21 +1592,25 @@ impl SyncHandle {
     /// The latest Follow for `f` of any of the user's devices (`plain`, what a device that does not have `f` yet, or
     /// runs an older Seedwell, goes by) is a member's that says something else than its owners and admins (`fl`): an
     /// owner or admin here says `fl` again, so such a device too joins it, or not, as they said (a sibling's "off" would
-    /// keep a new device from joining). Only with a serial above it: never one statement after another.
-    async fn restate_follow(&self, g: &Arc<Space>, f: &Space, fl: &Follow, plain: &Follow) {
+    /// keep a new device from joining). Only with a serial above it: never one statement after another. Both are read
+    /// as the group is when the statement is added ([`add_follow`]).
+    async fn restate_follow(&self, g: &Arc<Space>, f: &Space) {
         let ctx = &self.inner.ctx;
         let me = *ctx.key.public_key();
         let admits = admitting(f);
-        let same = (plain.on, plain.flags) == (fl.on, fl.flags);
-        if same || admits.contains(&plain.by) || !admits.contains(&me) {
+        if !admits.contains(&me) {
             return;
         }
-        let serial = g.membership.read().unwrap_or_else(|e| e.into_inner()).next_follow_serial(&pk_of(f));
-        if serial <= plain.serial {
-            return;
-        }
-        let body = Body::Follow { target: fl.target, target_pk: fl.target_pk, name: fl.name.clone(), on: fl.on, serial, at_s: now_s(), flags: fl.flags };
-        if crate::roles::add(g, [Statement::by_device(&ctx.key, &g.id, body)]) {
+        let pk = pk_of(f);
+        let say = |now: FollowNow<'_>| {
+            let (fl, plain) = (now.counts?, now.m.follow(&pk)?);
+            if (plain.on, plain.flags) == (fl.on, fl.flags) || admits.contains(&plain.by) {
+                return None;
+            }
+            let serial = now.m.next_follow_serial(&pk);
+            (serial > plain.serial).then(|| Body::Follow { target: fl.target, target_pk: fl.target_pk, name: fl.name, on: fl.on, serial, at_s: now_s(), flags: fl.flags })
+        };
+        if add_follow(ctx, g, pk, &admits, say) {
             crate::roles::changed(ctx, g).await;
         }
     }
@@ -1792,23 +1836,23 @@ impl SyncHandle {
         if !set.is_empty() {
             return Ok(PathBuf::from(set));
         }
-        trs_platform::dirs::home().map(|h| h.join("Seedwell")).ok_or_else(|| invalid("no default location for joined folders is set"))
+        seedwell_platform::dirs::home().map(|h| h.join("Seedwell")).ok_or_else(|| invalid("no default location for joined folders is set"))
     }
 }
 
-/// Under test (a cargo test binary, or `TRS_FORBID_REAL_HOME`; `TRS_ALLOW_REAL_HOME` overrides, the engine's rule):
+/// Under test (a cargo test binary, or `SEEDWELL_FORBID_REAL_HOME`; `SEEDWELL_ALLOW_REAL_HOME` overrides, the engine's rule):
 /// `path` is inside the real home folder (the temporary folder excepted), where nothing is made by itself.
 fn in_real_home_under_test(path: &Path) -> bool {
     let test_binary = std::env::current_exe().ok().and_then(|p| p.parent().and_then(|d| d.file_name()).map(|n| n == "deps")).unwrap_or(false);
-    let guarded = (cfg!(test) || test_binary || std::env::var_os("TRS_FORBID_REAL_HOME").is_some()) && std::env::var_os("TRS_ALLOW_REAL_HOME").is_none();
+    let guarded = (cfg!(test) || test_binary || std::env::var_os("SEEDWELL_FORBID_REAL_HOME").is_some()) && std::env::var_os("SEEDWELL_ALLOW_REAL_HOME").is_none();
     guarded
-        && trs_platform::dirs::home().filter(|h| h.is_absolute() && h.parent().is_some()).is_some_and(|h| path.starts_with(&h))
-        && !trs_platform::dirs::in_temp_folder(path)
+        && seedwell_platform::dirs::home().filter(|h| h.is_absolute() && h.parent().is_some()).is_some_and(|h| path.starts_with(&h))
+        && !seedwell_platform::dirs::in_temp_folder(path)
 }
 
 /// A folder's name from a Follow's name: one path component, or `None`.
 fn folder_name(name: &str) -> Option<String> {
-    let n: String = trs_platform::fs::clean_name(name).chars().take(100).collect();
+    let n: String = seedwell_platform::fs::clean_name(name).chars().take(100).collect();
     let n = n.trim().trim_start_matches('.').trim().to_owned();
     (!n.is_empty()).then_some(n)
 }
@@ -1853,10 +1897,10 @@ mod tests {
 
     #[test]
     fn under_test_nothing_is_made_in_the_real_home_by_itself() {
-        if std::env::var_os("TRS_ALLOW_REAL_HOME").is_some() {
+        if std::env::var_os("SEEDWELL_ALLOW_REAL_HOME").is_some() {
             return;
         }
-        let Some(home) = trs_platform::dirs::home() else { return };
+        let Some(home) = seedwell_platform::dirs::home() else { return };
         assert!(in_real_home_under_test(&home.join("Seedwell")), "the default ~/Seedwell is refused under test");
         assert!(!in_real_home_under_test(&std::env::temp_dir().join("x")), "a temporary folder is not");
     }

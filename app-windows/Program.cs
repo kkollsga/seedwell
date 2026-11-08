@@ -38,7 +38,7 @@ public static class Program
     internal static bool QaControl { get; private set; }
 
     /// <summary>What this launch's command line opens: things to add and seedwell:// links, in order.</summary>
-    internal static uniffi.trs_ffi.LinkRoute[] Routes { get; private set; } = [];
+    internal static uniffi.seedwell_ffi.LinkRoute[] Routes { get; private set; } = [];
 
     [STAThread]
     static int Main(string[] args)
@@ -130,10 +130,10 @@ public static class Program
     /// What a command line opens: the core's rule (command_line_routes: seedwell:// links and what command_line_sources
     /// adds). The QA words after --qa are the QA command's, never links to open.
     /// </summary>
-    internal static uniffi.trs_ffi.LinkRoute[] RoutesIn(string[] args)
+    internal static uniffi.seedwell_ffi.LinkRoute[] RoutesIn(string[] args)
     {
         int qa = Array.IndexOf(args, "--qa");
-        return uniffi.trs_ffi.TrsFfiMethods.CommandLineRoutes(qa >= 0 ? args[..qa] : args);
+        return uniffi.seedwell_ffi.SeedwellFfiMethods.CommandLineRoutes(qa >= 0 ? args[..qa] : args);
     }
 
     /// <summary>A command line split as Windows splits it (quotes, backslashes).</summary>

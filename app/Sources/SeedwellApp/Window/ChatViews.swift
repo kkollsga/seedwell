@@ -98,10 +98,20 @@ struct ChatSidebarRow: View {
     let unread: UInt32
     var online: Bool?
     var tag: SidebarTag?
+    /// What a screen reader says for the icon (a group's: "Sparkles"); nil: the symbol's own.
+    var iconLabel: String?
+    /// The icon in the accent colour: a closed group that holds the channel shown (`SidebarChatGroup.holdsSelection`).
+    var iconAccent = false
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: icon).frame(width: 20).foregroundStyle(.secondary)
+            if iconAccent {
+                SidebarAccentMark { Image(systemName: icon).frame(width: 20).foregroundStyle($0) }
+                    .accessibilityLabel(iconLabel ?? "")
+            } else {
+                let image = Image(systemName: icon).frame(width: 20).foregroundStyle(.secondary)
+                if let iconLabel { image.accessibilityLabel(iconLabel) } else { image }
+            }
             Text(name).lineLimit(1).fontWeight(unread > 0 ? .semibold : .regular)
             if let tag { ChatTagCapsule(text: tag.text, help: tag.help) }
             if let online {

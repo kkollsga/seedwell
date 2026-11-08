@@ -3,7 +3,7 @@
 //! garbage bodies, DNS failure, failure reason, host outages, a global
 //! outage, sleep/wake jumps, network changes, crashes and a crash loop).
 //!
-//! Run: `cargo test --release -p trs-tracker --test simulation -- --nocapture`
+//! Run: `cargo test --release -p seedwell-tracker --test simulation -- --nocapture`
 //!
 //! Asserted: all SPEC 7C.3 invariants continuously (independent Oracle), the
 //! per-host request budget, the per-(torrent,tracker) announce-count bound,
@@ -15,11 +15,11 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use common::*;
-use trs_tracker::crash::CrashLoopGuard;
-use trs_tracker::gate::{GateConfig, GatedRequest};
-use trs_tracker::response::{AnnounceError, ParseError, RetryIn, TransportError};
-use trs_tracker::rng::{Rng, SplitMix64};
-use trs_tracker::{InfoHash20, Millis, clamp_timing};
+use seedwell_tracker::crash::CrashLoopGuard;
+use seedwell_tracker::gate::{GateConfig, GatedRequest};
+use seedwell_tracker::response::{AnnounceError, ParseError, RetryIn, TransportError};
+use seedwell_tracker::rng::{Rng, SplitMix64};
+use seedwell_tracker::{InfoHash20, Millis, clamp_timing};
 
 /// Fixed for reproducibility; `SIM_SEED=n` explores other worlds.
 fn base_seed() -> u64 {
@@ -133,7 +133,7 @@ impl Responder for SimNet {
         }
         // permanent rejection of (torrent, tracker) pairs: "unregistered torrent"
         if self.reject_pairs.contains(&(torrent_no, hi))
-            && params.event != Some(trs_tracker::Event::Stopped)
+            && params.event != Some(seedwell_tracker::Event::Stopped)
         {
             self.faults[1] += 1;
             return Reply::new(

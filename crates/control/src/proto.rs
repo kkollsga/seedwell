@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-pub use trs_state::config::Permission;
+pub use seedwell_state::config::Permission;
 
 /// Protocol version spoken by this build. Bumped only for incompatible changes; new optional
 /// fields and new methods do not bump it.
@@ -650,17 +650,29 @@ pub struct TrackerStatsParams {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsGetParams {
-    /// Dotted keys (`transfers.download_limit`); absent: every allow-listed setting.
+    /// Dotted keys (`transfers.download_limit`, or a table: `transfers.alt`); absent: every setting an agent may read.
     #[serde(default)]
     pub keys: Option<Vec<String>>,
+    /// `rules` or `trackers`: that whole document (`rules.toml`, `trackers.toml`) as JSON, under its name. Absent:
+    /// `config.toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
 }
 
 /// `settings_set`.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsSetParams {
-    /// Dotted key to new value. All changes apply together or not at all.
+    /// Dotted key to new value (a table merges, `null` is the default, a list replaces). All changes apply together
+    /// or not at all.
+    #[serde(default)]
     pub changes: Map<String, Value>,
+    /// `rules` or `trackers`: replace that whole document with `doc` (validated as the file is).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// The new document, the shape `settings_get` with `file` gives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<Value>,
 }
 
 /// `events_subscribe`.
@@ -868,6 +880,53 @@ pub struct UpdateWatchParams {
 pub struct UpdateDevBuildsParams {
     /// On or off. Off while a development build runs goes back to the latest release.
     pub on: bool,
+}
+
+/// `proxy.set`: the torrent proxy on or off, and where the user is (SPEC §7H).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProxySetParams {
+    /// On or off (needs a key installed).
+    #[serde(default)]
+    pub on: Option<bool>,
+    /// An ISO country code, or "" for no preference.
+    #[serde(default)]
+    pub country: Option<String>,
+}
+
+/// `proxy.key`: install a key, tested first. `kind` `nordvpn` takes `user` and `pass` (NordVPN's service credentials);
+/// `custom` takes `host`, `port` and both or neither of `user` and `pass`. Neither is ever logged, echoed or returned.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyKeyParams {
+    /// `nordvpn` or `custom`.
+    pub kind: String,
+    /// The username (secret).
+    #[serde(default)]
+    pub user: Option<String>,
+    /// The password (secret).
+    #[serde(default)]
+    pub pass: Option<String>,
+    /// A custom proxy's host.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// A custom proxy's port.
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+/// Never the key, whatever prints a request.
+impl std::fmt::Debug for ProxyKeyParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let given = |o: &Option<String>| if o.is_some() { "(given)" } else { "(none)" };
+        f.debug_struct("ProxyKeyParams")
+            .field("kind", &self.kind)
+            .field("user", &given(&self.user))
+            .field("pass", &given(&self.pass))
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .finish()
+    }
 }
 
 /// `agents.request`: ask the user for access this agent lacks (SPEC 9A.3 *Asking for access*). It grants nothing: the
@@ -1284,6 +1343,53 @@ pub struct ChatMuteParams {
     pub muted: bool,
 }
 
+/// `chat.group_new`: a group of channels in this Mac's sidebar (SPEC §7G.7 *Groups*), last in the order.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatGroupNewParams {
+    /// Its name (new on this Mac, in any case).
+    pub name: String,
+    /// Its icon (`chat.groups` lists them); absent: the one its name suggests ("Agents": sparkles), else `folder`.
+    #[serde(default)]
+    pub icon: Option<String>,
+}
+
+/// `chat.group_edit`: a group's name, icon or place in the order (each absent: as it is).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatGroupEditParams {
+    /// The group: its id, a prefix of it, or its name.
+    pub group: String,
+    /// Its new name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Its new icon.
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// Its place in the order, from 1 (past the end: last).
+    #[serde(default)]
+    pub position: Option<u32>,
+}
+
+/// `chat.group_delete`: a group (its id, a prefix of it, or its name).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatGroupParams {
+    /// The group.
+    pub group: String,
+}
+
+/// `chat.set_group`: the group a channel is listed under in this Mac's sidebar.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatSetGroupParams {
+    /// The channel.
+    pub channel: String,
+    /// The group (its id, a prefix of it, or its name); absent: none (the plain list).
+    #[serde(default)]
+    pub group: Option<String>,
+}
+
 /// `chat.set_wake`: the command run for each message from another device (while agents may read the channel).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1665,7 +1771,7 @@ methods! {
     TrackerStats(TrackerStatsParams) = "tracker_stats", ReadOnly, false;
     /// The seeding rules.
     Rules(Empty) = "rules", ReadOnly, false;
-    /// Allow-listed settings.
+    /// Settings: every key of `config.toml` an agent may read (all but the denied ones), or `rules.toml` / `trackers.toml` whole.
     SettingsGet(SettingsGetParams) = "settings_get", Full, false;
     /// Start receiving pushed events on this connection.
     EventsSubscribe(EventsSubscribeParams) = "events_subscribe", ReadOnly, false;
@@ -1705,10 +1811,12 @@ methods! {
     Remove(RemoveParams) = "remove", Control, true;
     /// Step 2 of removal: perform the planned removal.
     RemoveConfirm(RemoveConfirmParams) = "remove_confirm", Control, true;
-    /// Change allow-listed settings.
+    /// Change settings: any key of `config.toml` but the denied ones, or replace `rules.toml` or `trackers.toml`.
     SettingsSet(SettingsSetParams) = "settings_set", Full, true;
     /// Developer mode: the newest tracker log entries (requests, answers, schedules, decisions).
     TrackerLog(TrackerLogParams) = "tracker_log", ReadOnly, false;
+    /// Developer mode: delete the tracker log (Settings › Advanced › Developer › Clear).
+    TrackerLogClear(Empty) = "tracker_log_clear", Full, true;
     /// The agent activity log.
     Activity(ActivityParams) = "activity", Full, false;
     /// Keep the Mac awake while an agent works, or let it sleep again (not in the activity log: it changes nothing Seedwell keeps).
@@ -1725,6 +1833,18 @@ methods! {
     UpdateDevBuilds(UpdateDevBuildsParams) = "update.dev_builds", Full, true;
     /// Check for the latest release now and install it when it is newer (Settings' Check Now, then Install); with development builds allowed and a folder watched, that folder's newest build.
     UpdateNow(Empty) = "update.now", Full, true;
+    /// Quit the app and open it again with the same state, as an update's installer quits and reopens it; the answer comes first. The app only (a daemon is restarted by whoever started it).
+    Restart(Empty) = "restart", Full, true;
+    /// The torrent proxy: on or off, which, the country, whether a key is installed (never the key).
+    ProxyStatus(Empty) = "proxy.status", Full, false;
+    /// The torrent proxy on or off, or the country its servers are chosen by.
+    ProxySet(ProxySetParams) = "proxy.set", Full, true;
+    /// Install the proxy's key (NordVPN's, or a proxy of the user's own), tested first, and switch it on. The key is never logged or returned.
+    ProxyKey(ProxyKeyParams) = "proxy.key", Full, true;
+    /// Forget the proxy's key and switch the proxy off.
+    ProxyRemoveKey(Empty) = "proxy.remove_key", Full, true;
+    /// Test the proxy's servers now and use the best.
+    ProxyFaster(Empty) = "proxy.faster", Full, true;
     /// Ask the user for access this agent lacks (a level, a channel opened to agents, private messages, development builds). It grants nothing; only the user answers, in the app or with a reply in chat. Logged.
     AgentsRequest(AgentsRequestParams) = "agents.request", ReadOnly, true;
     /// The requests for access and what became of them.
@@ -1875,6 +1995,17 @@ methods! {
     ChatMute(ChatMuteParams) = "chat.mute", Control, true;
     /// Channels: a channel's name on this Mac.
     ChatRename(ChatRenameParams) = "chat.rename", Control, true;
+    /// Channels: the groups of this Mac's sidebar (in their order, with the channels open to agents in each) and the
+    /// icons a group can have.
+    ChatGroups(Empty) = "chat.groups", ReadOnly, false;
+    /// Channels: a new group in this Mac's sidebar.
+    ChatGroupNew(ChatGroupNewParams) = "chat.group_new", Control, true;
+    /// Channels: a group's name, icon or place in the order.
+    ChatGroupEdit(ChatGroupEditParams) = "chat.group_edit", Control, true;
+    /// Channels: delete a group (its channels go back to the plain list).
+    ChatGroupDelete(ChatGroupParams) = "chat.group_delete", Control, true;
+    /// Channels: the group a channel is listed under (or none).
+    ChatSetGroup(ChatSetGroupParams) = "chat.set_group", Control, true;
     /// Channels: the wake-up command of a channel.
     ChatSetWake(ChatWakeParams) = "chat.set_wake", Full, true;
     /// Channels: leave a channel on this Mac (its messages here go; other members keep theirs).

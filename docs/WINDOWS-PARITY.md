@@ -48,12 +48,12 @@ C# (bundles in `Seedwell Sync/builds`, patches in `from-pc/`, messages in "Seedw
 8. **Tracker Info page and favorite editing (M)** — Rust side ready (build 42): `tracker_page.rs`, `favorite_editor.rs`;
    `Core::tracker_info_read`, `FavoriteEditor` (its `tracker_info_page` and `tracker_info_run`), `tracker_header_model`.
    See `docs/build-42-tracker-play-ffi.md`.
-9. **Play (M)** — Rust side ready (build 42): `trs_platform::players` (Windows: App Paths, registered handlers, `PATH`;
+9. **Play (M)** — Rust side ready (build 42): `seedwell_platform::players` (Windows: App Paths, registered handlers, `PATH`;
    unverified until Windows CI and the PC run it), `player.rs`: `Core::play` → `PlayStart`, `play_offer`, `play_players`,
    `play_with_choices`.
 10. **Platform (L–XL):**
     - The key vault: done in Rust (build 42). Without a vault passed, `secret_store` uses DPAPI-sealed files in
-      `<state>/sync/vault` (`trs_sync_net::secrets::open`, `trs_platform::secrets::Dpapi`) and copies the 0600 file
+      `<state>/sync/vault` (`seedwell_sync_net::secrets::open`, `seedwell_platform::secrets::Dpapi`) and copies the 0600 file
       `sync/secrets` into it (each key put, read back and compared; a key the vault holds keeps the vault's value,
       a different plain one is kept aside). The plain file is erased only once all match and this release has
       started fine before (`launch-ok`), so an older build the installer goes back to still has its keys. When DPAPI

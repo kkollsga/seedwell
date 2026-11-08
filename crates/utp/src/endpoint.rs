@@ -600,7 +600,7 @@ impl Endpoint {
             .map(|c| c.stats())
     }
 
-    /// Print a state line for every busy connection (opt-in trace; see `TRS_UTP_TRACE`).
+    /// Print a state line for every busy connection (opt-in trace; see `SEEDWELL_UTP_TRACE`).
     pub(crate) fn trace_dump(&self, now: u64) {
         let ms = crate::trace::wall_ms();
         eprintln!("utp {} ep txq={} timers={} live={}", ms, self.tx_queue.len(), self.timers.len(), self.n_live);

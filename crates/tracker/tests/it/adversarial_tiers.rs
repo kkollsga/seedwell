@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use adversarial_support::*;
-use trs_tracker::{Event, TorrentEvent};
+use seedwell_tracker::{Event, TorrentEvent};
 
 #[test]
 fn healthy_first_tracker_means_failovers_stay_silent_for_days_and_tiers_run_alone() {

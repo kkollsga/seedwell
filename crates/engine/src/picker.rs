@@ -25,8 +25,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
-use trs_stream::{Priority as HintPriority, UrgentRange};
-use trs_wire::{BLOCK_SIZE, Bitfield, BlockRequest};
+use seedwell_stream::{Priority as HintPriority, UrgentRange};
+use seedwell_wire::{BLOCK_SIZE, Bitfield, BlockRequest};
 
 use crate::util::Rng;
 

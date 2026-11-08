@@ -12,6 +12,15 @@ import Testing
         }
     }
 
+    /// A sidebar group's icon (SPEC 7G.7 Groups) whose SF Symbol name is wrong draws nothing where the icon belongs.
+    @Test func everyGroupIconIsASymbolTheSystemHas() {
+        let all: [ChatGroupIcon] = [.sparkles, .folder, .briefcase, .house, .people, .star, .hammer, .book, .gameController, .heart, .globe, .tray]
+        for icon in all {
+            #expect(NSImage(systemSymbolName: SidebarSymbols.group(icon), accessibilityDescription: nil) != nil, "\(icon)")
+            #expect(!chatGroupIconLabel(icon: icon).isEmpty, "\(icon) has a spoken name")
+        }
+    }
+
     @Test func aMessageOfFilesAloneIsPreviewedByTheirNamesAndSizes() {
         let film = ChatFileCard(hash: "cd", name: "Film.mov", sizeText: "1.2 GB", icon: .video, state: .available,
                                 status: "1.2 GB · Not downloaded", progress: nil, path: nil,

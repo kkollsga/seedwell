@@ -496,7 +496,7 @@ impl Writer {
         let len = buf.len() as u64;
         let file = self.act.file.clone();
         let (mut buf, res) = blocking(move || {
-            let r = trs_platform::fs::write_all_at(&file, &buf, off);
+            let r = seedwell_platform::fs::write_all_at(&file, &buf, off);
             (buf, r)
         })
         .await?;
@@ -1065,7 +1065,7 @@ async fn hash_file(act: &Arc<Active>, stop: &Stop, total: u64) -> Result<[u8; 32
         let want = BLOCK.min((total - off) as usize);
         let (h, res) = blocking(move || {
             let mut buf = vec![0u8; want];
-            let r = trs_platform::fs::read_exact_at(&file, &mut buf, off);
+            let r = seedwell_platform::fs::read_exact_at(&file, &mut buf, off);
             if r.is_ok() {
                 hasher.update(&buf);
             }
@@ -1110,9 +1110,9 @@ fn move_into_place(part: &Path, dest_dir: &Path, name: &str, sidecar: &Path) -> 
                 match fs::rename(part, &target) {
                     Ok(()) => break target,
                     Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
-                        let tmp = dest_dir.join(format!(".{cand}.trs-tmp"));
+                        let tmp = dest_dir.join(format!(".{cand}.seedwell-tmp"));
                         fs::copy(part, &tmp)?;
-                        trs_platform::fs::sync_file(&tmp)?;
+                        seedwell_platform::fs::sync_file(&tmp)?;
                         fs::rename(&tmp, &target)?;
                         fs::remove_file(part)?;
                         break target;
@@ -1122,7 +1122,7 @@ fn move_into_place(part: &Path, dest_dir: &Path, name: &str, sidecar: &Path) -> 
             }
         }
     };
-    let _ = trs_platform::fs::sync_dir(dest_dir);
+    let _ = seedwell_platform::fs::sync_dir(dest_dir);
     let _ = fs::remove_file(sidecar);
     Ok(final_path)
 }

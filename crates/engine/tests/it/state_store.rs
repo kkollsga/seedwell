@@ -5,11 +5,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
-use trs_engine::persist::{Batch, LifetimeCounters, Placed, Placement, ResumeRecord, StatDelta, Store, StoredState, TorrentRecord};
-use trs_engine::*;
-use trs_state::{Day, StatsScope};
+use seedwell_engine::persist::{Batch, LifetimeCounters, Placed, Placement, ResumeRecord, StatDelta, Store, StoredState, TorrentRecord};
+use seedwell_engine::*;
+use seedwell_state::{Day, StatsScope};
 
-/// A file fingerprint as trs-storage encodes it: size, mtime seconds, mtime nanoseconds.
+/// A file fingerprint as seedwell-storage encodes it: size, mtime seconds, mtime nanoseconds.
 fn fp(size: u64, secs: i64, nanos: u32) -> [u8; 20] {
     let mut b = [0u8; 20];
     b[0..8].copy_from_slice(&size.to_le_bytes());
@@ -269,7 +269,7 @@ async fn an_older_builds_pause_loads_as_running_and_a_new_one_is_kept() {
     assert!(got[1].record.pending_start && got[1].record.pending_stopped, "the stopped countdown is kept");
     // The same record as an older build wrote it: `PAUSED` without the mark.
     let mut old = store.state().get_torrent(t.id).unwrap().unwrap();
-    assert!(old.flags.has(trs_state::TorrentFlags::PAUSED) && old.pause_kept);
+    assert!(old.flags.has(seedwell_state::TorrentFlags::PAUSED) && old.pause_kept);
     old.pause_kept = false;
     store.state().put_torrent(t.id, &old).unwrap();
     store.state().flush_now().unwrap();
@@ -352,7 +352,7 @@ async fn resume_data_and_placements_round_trip() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stat_deltas_are_bucketed_by_profile_and_local_day() {
     let state = tempfile::tempdir().unwrap();
-    let opened = trs_state::Store::open(state.path()).unwrap();
+    let opened = seedwell_state::Store::open(state.path()).unwrap();
     // A zone 2 hours ahead of UTC: 23:30 UTC is already the next local day.
     let store = StateStore::with_time_zone(opened.store, |_| 7200);
     let at = 1_791_000_000 - (1_791_000_000 % 86_400) + 23 * 3600 + 1800; // 23:30 UTC
@@ -404,7 +404,7 @@ async fn launch_history_feeds_the_crash_loop_guard() {
 /// announces, a crash loop still does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn graceful_relaunches_do_not_trip_the_crash_loop_guard() {
-    use trs_tracker::{Millis, crash::CrashLoopGuard};
+    use seedwell_tracker::{Millis, crash::CrashLoopGuard};
     let state = tempfile::tempdir().unwrap();
     let guard = CrashLoopGuard::default();
     let now = 1_791_000_000_000u64;
@@ -428,7 +428,7 @@ async fn graceful_relaunches_do_not_trip_the_crash_loop_guard() {
 /// The tracker's `completed_sent` is durable and shared with the engine's timing store.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tracker_timing_goes_through_the_durable_handle() {
-    use trs_tracker::store::{TimingKey, TimingRecord};
+    use seedwell_tracker::store::{TimingKey, TimingRecord};
     let state = tempfile::tempdir().unwrap();
     let (store, _) = StateStore::open(state.path()).unwrap();
     let key = TimingKey { info_hash: [3; 20], tracker_url: "http://x.example/a".into() };
@@ -527,7 +527,7 @@ async fn quick_remove_and_readd_survives_a_restart() {
 /// record after a restart, and goes when the condition is switched off or the torrent removed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_inactive_condition_history_survives_a_restart() {
-    use trs_engine::idle::IdleRing;
+    use seedwell_engine::idle::IdleRing;
     let t = standard_torrent(0, None, false, 262);
     let state = tempfile::tempdir().unwrap();
     let dl = tempfile::tempdir().unwrap();

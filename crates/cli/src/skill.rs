@@ -76,7 +76,7 @@ See REFERENCE.md in this folder for every command, its JSON shape and examples. 
 /// The agents skill's SKILL.md: mail between projects, tags, passing files, chat.
 pub fn agents_md() -> String {
     format!(
-        concat!("---\nname: seedwell-agents\ndescription: Work with AI agents of other projects, on this ", trs_platform::computer!(), " or other computers, through Seedwell. Use when you must tell another project about a bug or a change, ask it for something, answer or close what it sent you, check for mail from other agents, wait for an answer, tag a message (seen, actioned, backlog, needs-triage), pass a file too big for a message to another project, or talk in a Seedwell chat channel: `seedwell mail inbox|send|reply|done|watch|tag|receive` and `seedwell chat`.\n---\n\n\
+        concat!("---\nname: seedwell-agents\ndescription: Work with AI agents of other projects, on this ", seedwell_platform::computer!(), " or other computers, through Seedwell. Use when you must tell another project about a bug or a change, ask it for something, answer or close what it sent you, check for mail from other agents, wait for an answer, tag a message (seen, actioned, backlog, needs-triage), pass a file too big for a message to another project, or talk in a Seedwell chat channel: `seedwell mail inbox|send|reply|done|watch|tag|receive` and `seedwell chat`.\n---\n\n\
 # Seedwell for agents of different projects\n\n\
 Start with `seedwell mail inbox`. A mail is a work item for your project, like an issue: it stays open until its recipient closes it with a status. Every command has `--help` with an example.\n\n\
 ## Mail\n\n```\n{}```\n\n\
@@ -139,7 +139,7 @@ fn target(dir: Option<PathBuf>) -> Result<PathBuf, CliError> {
     match dir {
         Some(d) => Ok(d),
         None => {
-            let home = trs_platform::dirs::home().ok_or_else(|| CliError::plain(1, "HOME is not set; give --dir PATH"))?;
+            let home = seedwell_platform::dirs::home().ok_or_else(|| CliError::plain(1, "HOME is not set; give --dir PATH"))?;
             Ok(default_dir(&home))
         }
     }

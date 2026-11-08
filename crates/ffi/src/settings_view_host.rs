@@ -39,7 +39,7 @@ pub(crate) fn find_cli(path_env: Option<&OsStr>, link_folders: &[PathBuf]) -> Op
 
 /// A file that runs: a file (through links), with an execute bit where the system has them.
 fn is_program(p: &Path) -> bool {
-    std::fs::metadata(p).is_ok_and(|m| m.is_file() && trs_platform::fs::unix_mode(&m).is_none_or(|mode| mode & 0o111 != 0))
+    std::fs::metadata(p).is_ok_and(|m| m.is_file() && seedwell_platform::fs::unix_mode(&m).is_none_or(|mode| mode & 0o111 != 0))
 }
 
 /// Both skills' `SKILL.md` in `~/.claude/skills`, through links and junctions.
@@ -103,7 +103,7 @@ impl Core {
     /// Looks at this computer again (the disk), keeps what it found for [`Core::settings_host_facts`] and returns it.
     /// Exported `async` (`async_calls`), run on a thread of its own.
     pub(crate) fn refresh_settings_host_facts(&self) -> SettingsHostFacts {
-        self.host_facts.set(look(trs_platform::dirs::home().as_deref(), std::env::var_os("PATH").as_deref()));
+        self.host_facts.set(look(seedwell_platform::dirs::home().as_deref(), std::env::var_os("PATH").as_deref()));
         self.host_facts.get()
     }
 }

@@ -7,13 +7,13 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use common::{TempDir, fast, id, open};
-use trs_classify::Category;
-use trs_state::record::{FileStamp, PartialPiece};
-use trs_state::rules::{Priority, SeedingGoal};
-use trs_state::store::{Migration, Schema};
-use trs_state::{Counters, Day, OpenOptions, ResumeData, StateError, StatsBucket, StatsScope, Store, TorrentRecord};
-use trs_tracker::store::{TimingKey, TimingRecord, TimingStore};
-use trs_tracker::time::Millis;
+use seedwell_classify::Category;
+use seedwell_state::record::{FileStamp, PartialPiece};
+use seedwell_state::rules::{Priority, SeedingGoal};
+use seedwell_state::store::{Migration, Schema};
+use seedwell_state::{Counters, Day, OpenOptions, ResumeData, StateError, StatsBucket, StatsScope, Store, TorrentRecord};
+use seedwell_tracker::store::{TimingKey, TimingRecord, TimingStore};
+use seedwell_tracker::time::Millis;
 
 fn record(n: u32) -> TorrentRecord {
     let mut r = TorrentRecord::new(format!("Torrent number {n}"), 1_000_000 * u64::from(n + 1), 1_791_000_000 + i64::from(n));
@@ -87,7 +87,7 @@ fn everything_survives_a_reopen() {
 #[test]
 fn writes_are_debounced_then_committed_without_a_flush() {
     let dir = TempDir::new("debounce");
-    let o = Store::open_with(dir.path(), &trs_state::OpenOptions { debounce: Duration::from_millis(200), ..Default::default() }).unwrap();
+    let o = Store::open_with(dir.path(), &seedwell_state::OpenOptions { debounce: Duration::from_millis(200), ..Default::default() }).unwrap();
     let s = o.store;
     s.put_torrent(id(5), &record(5)).unwrap();
     assert_eq!(s.pending_calls(), 1);
@@ -266,8 +266,8 @@ fn background_retry_succeeds_without_a_caller() {
 /// removing the favorite never changes the history (SPEC 7E.2).
 #[test]
 fn favorite_keeps_the_trackers_history_and_unfavorite_too() {
-    use trs_state::stats::scopes_for;
-    use trs_state::trackers::TrackerProfiles;
+    use seedwell_state::stats::scopes_for;
+    use seedwell_state::trackers::TrackerProfiles;
     let dir = TempDir::new("fav-stats");
     let s = open(dir.path()).store;
     let today = Day::from_ymd(2026, 10, 11).unwrap();

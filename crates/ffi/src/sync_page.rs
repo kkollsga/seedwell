@@ -13,8 +13,8 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
 
-use trs_control::display as d;
-use trs_platform::{computer, file_manager};
+use seedwell_control::display as d;
+use seedwell_platform::{computer, file_manager};
 
 use crate::chat_text::named;
 use crate::host::{has, HostFeature, HostWindow};
@@ -295,6 +295,16 @@ pub struct SyncPageModel {
     pub conflicts_refresh_ms: u32,
     /// Changes whenever anything above does: the host may skip redrawing a page it has drawn.
     pub signature: String,
+    /// Changes whenever anything but the page's values does. While it stays the same, a host may update the elements it
+    /// drew in place instead of building the page again. The values are:
+    /// - a folder row's title, subtitle, badge and accessibility label;
+    /// - the page's title, place, badge and status, and the texts of its error and note (not whether they are there);
+    /// - a member's name, line, transfer text (not whether there is one), transfer tooltip, role and role menu title;
+    /// - a conflict's title and line, an issue's reason, and a gone device's line.
+    ///
+    /// They change about twice a second while a folder is being added. Rebuilding the page each time made Windows
+    /// collect its garbage in a blocking pass of 50–70 ms every few draws (PC, win-100).
+    pub structure: String,
 }
 
 /// What Reveal does with a folder ([`sync_reveal`]).
@@ -563,7 +573,7 @@ fn page(i: &SyncPageInput, f: &SyncFolder, removal: Option<SyncMenuConfirm>, clo
         folder_id: f.id.clone(),
         title: f.name.clone(),
         buttons: header_buttons(f, &i.channels, host),
-        place: sync_place_line(f.clone(), trs_platform::dirs::shown(Path::new(&f.path))),
+        place: sync_place_line(f.clone(), seedwell_platform::dirs::shown(Path::new(&f.path))),
         reveal: SyncPageButton { accessibility_label: Some(format!(concat!("Show {} in ", file_manager!()), f.name)), ..button(REVEAL, REVEAL, SyncPageCommand::Reveal) },
         badge: badge(f),
         status: status_line(f, now_s, clock),
@@ -647,10 +657,64 @@ pub fn sync_page_model(
         members_refresh_ms: MEMBERS_REFRESH_MS,
         conflicts_refresh_ms: CONFLICTS_REFRESH_MS,
         signature: String::new(),
+        structure: String::new(),
     };
+    m.signature = digest(&m);
+    m.structure = digest(&without_values(m.clone()));
+    m
+}
+
+fn digest(m: &SyncPageModel) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     format!("{m:?}").hash(&mut h);
-    m.signature = format!("{:016x}", h.finish());
+    format!("{:016x}", h.finish())
+}
+
+/// `m` with its values (see [`SyncPageModel::structure`]) blanked: what is left is its structure.
+fn without_values(mut m: SyncPageModel) -> SyncPageModel {
+    fn blank(s: &mut String) {
+        s.clear();
+    }
+    fn blank_some(s: &mut Option<String>) {
+        if let Some(s) = s {
+            s.clear();
+        }
+    }
+    blank(&mut m.signature);
+    for r in &mut m.folders {
+        blank(&mut r.title);
+        blank(&mut r.subtitle);
+        blank(&mut r.accessibility_label);
+        r.badge = SyncBadge::UpToDate;
+    }
+    if let Some(p) = &mut m.page {
+        blank(&mut p.title);
+        blank(&mut p.place);
+        blank(&mut p.status);
+        blank_some(&mut p.error);
+        blank_some(&mut p.note);
+        p.badge = SyncBadge::UpToDate;
+        for r in &mut p.members.rows {
+            blank(&mut r.name);
+            blank(&mut r.line);
+            blank_some(&mut r.transfer);
+            blank(&mut r.transfer_help);
+            blank(&mut r.role);
+            if let Some(menu) = &mut r.role_menu {
+                blank(&mut menu.title);
+            }
+        }
+        for r in p.conflicts.iter_mut().flat_map(|c| &mut c.rows) {
+            blank(&mut r.title);
+            blank(&mut r.line);
+        }
+        for r in p.issues.iter_mut().flat_map(|i| &mut i.rows) {
+            blank(&mut r.reason);
+        }
+        for g in &mut p.gone {
+            blank(&mut g.line);
+        }
+    }
     m
 }
 
@@ -659,7 +723,9 @@ pub fn sync_page_model(
 /// it (the Mac: its File Provider domain's root), `None` when it has none.
 #[uniffi::export]
 pub fn sync_reveal(folder: SyncFolder, on_demand_place: Option<String>) -> SyncReveal {
-    let path = if folder.on_demand { on_demand_place } else { Path::new(&folder.path).exists().then_some(folder.path) };
+    // From the folder as the core last saw it (one whose place is gone is `Missing`), never from the disk: the hosts call
+    // this on their UI thread, and a look at a disk that sleeps or is gone can take seconds.
+    let path = if folder.on_demand { on_demand_place } else { (folder.state != SyncState::Missing).then_some(folder.path) };
     path.map_or(SyncReveal::Page, |path| SyncReveal::Show { path })
 }
 

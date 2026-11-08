@@ -1357,6 +1357,356 @@ dependencies = [
 ]
 
 [[package]]
+name = "seedwell-bencode"
+version = "0.1.21"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
+name = "seedwell-buildsig"
+version = "0.1.21"
+dependencies = [
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "seedwell-classify"
+version = "0.1.21"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
+name = "seedwell-cli"
+version = "0.1.21"
+dependencies = [
+ "seedwell-control",
+ "seedwell-devlog",
+ "seedwell-engine",
+ "seedwell-platform",
+ "seedwell-state",
+ "seedwell-storage",
+ "seedwell-sync-net",
+ "seedwell-sync-proto",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "seedwell-control"
+version = "0.1.21"
+dependencies = [
+ "getrandom 0.4.3",
+ "seedwell-classify",
+ "seedwell-devlog",
+ "seedwell-dht",
+ "seedwell-engine",
+ "seedwell-media",
+ "seedwell-platform",
+ "seedwell-socks",
+ "seedwell-state",
+ "seedwell-sync",
+ "seedwell-sync-net",
+ "seedwell-sync-proto",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "seedwell-devlog"
+version = "0.1.21"
+dependencies = [
+ "seedwell-platform",
+ "seedwell-state",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "seedwell-dht"
+version = "0.1.21"
+dependencies = [
+ "proptest",
+ "seedwell-bencode",
+ "sha1",
+ "tokio",
+]
+
+[[package]]
+name = "seedwell-engine"
+version = "0.1.21"
+dependencies = [
+ "bytes",
+ "getrandom 0.4.3",
+ "libc",
+ "seedwell-bencode",
+ "seedwell-classify",
+ "seedwell-devlog",
+ "seedwell-dht",
+ "seedwell-http",
+ "seedwell-metainfo",
+ "seedwell-platform",
+ "seedwell-portmap",
+ "seedwell-socks",
+ "seedwell-state",
+ "seedwell-storage",
+ "seedwell-stream",
+ "seedwell-tracker",
+ "seedwell-utp",
+ "seedwell-wire",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "seedwell-ffi"
+version = "0.1.21"
+dependencies = [
+ "seedwell-buildsig",
+ "seedwell-classify",
+ "seedwell-control",
+ "seedwell-devlog",
+ "seedwell-engine",
+ "seedwell-fswatch",
+ "seedwell-http",
+ "seedwell-media",
+ "seedwell-platform",
+ "seedwell-rendezvous",
+ "seedwell-socks",
+ "seedwell-state",
+ "seedwell-storage",
+ "seedwell-stream",
+ "seedwell-sync",
+ "seedwell-sync-net",
+ "seedwell-sync-proto",
+ "seedwell-tracker",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "uniffi",
+]
+
+[[package]]
+name = "seedwell-fswatch"
+version = "0.1.21"
+dependencies = [
+ "libc",
+ "proptest",
+ "tempfile",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "seedwell-http"
+version = "0.1.21"
+dependencies = [
+ "bytes",
+ "http-body-util",
+ "httpdate",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "seedwell-platform",
+ "seedwell-socks",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tower-service",
+]
+
+[[package]]
+name = "seedwell-media"
+version = "0.1.21"
+dependencies = [
+ "image",
+ "resvg",
+]
+
+[[package]]
+name = "seedwell-metainfo"
+version = "0.1.21"
+dependencies = [
+ "getrandom 0.4.3",
+ "proptest",
+ "seedwell-bencode",
+ "sha1",
+ "sha2",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "seedwell-platform"
+version = "0.1.21"
+dependencies = [
+ "libc",
+ "objc2",
+ "objc2-foundation",
+ "socket2",
+ "tempfile",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "seedwell-portmap"
+version = "0.1.21"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
+name = "seedwell-rendezvous"
+version = "0.1.21"
+dependencies = [
+ "ring",
+ "seedwell-http",
+ "seedwell-rendezvous",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "seedwell-socks"
+version = "0.1.21"
+dependencies = [
+ "seedwell-socks",
+ "tokio",
+]
+
+[[package]]
+name = "seedwell-state"
+version = "0.1.21"
+dependencies = [
+ "proptest",
+ "redb 2.6.4",
+ "redb 4.4.0",
+ "seedwell-classify",
+ "seedwell-platform",
+ "seedwell-tracker",
+ "serde",
+ "toml 1.2.0+spec-1.1.0",
+]
+
+[[package]]
+name = "seedwell-storage"
+version = "0.1.21"
+dependencies = [
+ "crossbeam-channel",
+ "libc",
+ "proptest",
+ "seedwell-platform",
+ "sha1",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "seedwell-stream"
+version = "0.1.21"
+dependencies = [
+ "getrandom 0.4.3",
+ "seedwell-platform",
+ "tokio",
+]
+
+[[package]]
+name = "seedwell-sync"
+version = "0.1.21"
+dependencies = [
+ "libc",
+ "proptest",
+ "redb 4.4.0",
+ "seedwell-platform",
+ "seedwell-sync-proto",
+ "sha2",
+ "tempfile",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "seedwell-sync-net"
+version = "0.1.21"
+dependencies = [
+ "flate2",
+ "image",
+ "ring",
+ "rustls",
+ "seedwell-fswatch",
+ "seedwell-media",
+ "seedwell-platform",
+ "seedwell-rendezvous",
+ "seedwell-sync",
+ "seedwell-sync-proto",
+ "seedwell-utp",
+ "serde",
+ "serde_json",
+ "socket2",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "toml 1.2.0+spec-1.1.0",
+]
+
+[[package]]
+name = "seedwell-sync-proto"
+version = "0.1.21"
+dependencies = [
+ "proptest",
+ "ring",
+ "x25519-dalek",
+]
+
+[[package]]
+name = "seedwell-tracker"
+version = "0.1.21"
+dependencies = [
+ "bytes",
+ "flate2",
+ "getrandom 0.4.3",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "proptest",
+ "seedwell-bencode",
+ "seedwell-socks",
+ "sha1",
+ "stateright",
+ "tokio",
+ "tower-service",
+]
+
+[[package]]
+name = "seedwell-utp"
+version = "0.1.21"
+dependencies = [
+ "libc",
+ "tokio",
+]
+
+[[package]]
+name = "seedwell-wire"
+version = "0.1.21"
+dependencies = [
+ "bytes",
+ "proptest",
+ "sha1",
+]
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1787,7 +2137,7 @@ dependencies = [
 
 [[package]]
 name = "tracker-probe"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1803,356 +2153,6 @@ dependencies = [
  "serde_json",
  "sha1",
  "tokio",
-]
-
-[[package]]
-name = "trs-bencode"
-version = "0.1.20"
-dependencies = [
- "proptest",
-]
-
-[[package]]
-name = "trs-buildsig"
-version = "0.1.20"
-dependencies = [
- "ring",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
-]
-
-[[package]]
-name = "trs-classify"
-version = "0.1.20"
-dependencies = [
- "proptest",
-]
-
-[[package]]
-name = "trs-cli"
-version = "0.1.20"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "trs-control",
- "trs-devlog",
- "trs-engine",
- "trs-platform",
- "trs-state",
- "trs-storage",
- "trs-sync-net",
- "trs-sync-proto",
-]
-
-[[package]]
-name = "trs-control"
-version = "0.1.20"
-dependencies = [
- "getrandom 0.4.3",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "trs-classify",
- "trs-devlog",
- "trs-dht",
- "trs-engine",
- "trs-media",
- "trs-platform",
- "trs-socks",
- "trs-state",
- "trs-sync",
- "trs-sync-net",
- "trs-sync-proto",
-]
-
-[[package]]
-name = "trs-devlog"
-version = "0.1.20"
-dependencies = [
- "serde_json",
- "tempfile",
- "trs-platform",
- "trs-state",
-]
-
-[[package]]
-name = "trs-dht"
-version = "0.1.20"
-dependencies = [
- "proptest",
- "sha1",
- "tokio",
- "trs-bencode",
-]
-
-[[package]]
-name = "trs-engine"
-version = "0.1.20"
-dependencies = [
- "bytes",
- "getrandom 0.4.3",
- "libc",
- "serde_json",
- "tempfile",
- "tokio",
- "trs-bencode",
- "trs-classify",
- "trs-devlog",
- "trs-dht",
- "trs-http",
- "trs-metainfo",
- "trs-platform",
- "trs-portmap",
- "trs-socks",
- "trs-state",
- "trs-storage",
- "trs-stream",
- "trs-tracker",
- "trs-utp",
- "trs-wire",
-]
-
-[[package]]
-name = "trs-ffi"
-version = "0.1.20"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "trs-buildsig",
- "trs-classify",
- "trs-control",
- "trs-devlog",
- "trs-engine",
- "trs-fswatch",
- "trs-http",
- "trs-media",
- "trs-platform",
- "trs-rendezvous",
- "trs-socks",
- "trs-state",
- "trs-storage",
- "trs-stream",
- "trs-sync",
- "trs-sync-net",
- "trs-sync-proto",
- "trs-tracker",
- "uniffi",
-]
-
-[[package]]
-name = "trs-fswatch"
-version = "0.1.20"
-dependencies = [
- "libc",
- "proptest",
- "tempfile",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "trs-http"
-version = "0.1.20"
-dependencies = [
- "bytes",
- "http-body-util",
- "httpdate",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "sha2",
- "tempfile",
- "tokio",
- "tower-service",
- "trs-platform",
- "trs-socks",
-]
-
-[[package]]
-name = "trs-media"
-version = "0.1.20"
-dependencies = [
- "image",
- "resvg",
-]
-
-[[package]]
-name = "trs-metainfo"
-version = "0.1.20"
-dependencies = [
- "getrandom 0.4.3",
- "proptest",
- "sha1",
- "sha2",
- "trs-bencode",
- "unicode-normalization",
-]
-
-[[package]]
-name = "trs-platform"
-version = "0.1.20"
-dependencies = [
- "libc",
- "objc2",
- "objc2-foundation",
- "socket2",
- "tempfile",
- "tokio",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "trs-portmap"
-version = "0.1.20"
-dependencies = [
- "tokio",
-]
-
-[[package]]
-name = "trs-rendezvous"
-version = "0.1.20"
-dependencies = [
- "ring",
- "serde_json",
- "tokio",
- "trs-http",
- "trs-rendezvous",
-]
-
-[[package]]
-name = "trs-socks"
-version = "0.1.20"
-dependencies = [
- "tokio",
- "trs-socks",
-]
-
-[[package]]
-name = "trs-state"
-version = "0.1.20"
-dependencies = [
- "proptest",
- "redb 2.6.4",
- "redb 4.4.0",
- "serde",
- "toml 1.2.0+spec-1.1.0",
- "trs-classify",
- "trs-platform",
- "trs-tracker",
-]
-
-[[package]]
-name = "trs-storage"
-version = "0.1.20"
-dependencies = [
- "crossbeam-channel",
- "libc",
- "proptest",
- "sha1",
- "sha2",
- "tempfile",
- "trs-platform",
-]
-
-[[package]]
-name = "trs-stream"
-version = "0.1.20"
-dependencies = [
- "getrandom 0.4.3",
- "tokio",
- "trs-platform",
-]
-
-[[package]]
-name = "trs-sync"
-version = "0.1.20"
-dependencies = [
- "libc",
- "proptest",
- "redb 4.4.0",
- "sha2",
- "tempfile",
- "trs-platform",
- "trs-sync-proto",
- "unicode-normalization",
-]
-
-[[package]]
-name = "trs-sync-net"
-version = "0.1.20"
-dependencies = [
- "flate2",
- "image",
- "ring",
- "rustls",
- "serde",
- "serde_json",
- "socket2",
- "tempfile",
- "tokio",
- "tokio-rustls",
- "toml 1.2.0+spec-1.1.0",
- "trs-fswatch",
- "trs-media",
- "trs-platform",
- "trs-rendezvous",
- "trs-sync",
- "trs-sync-proto",
- "trs-utp",
-]
-
-[[package]]
-name = "trs-sync-proto"
-version = "0.1.20"
-dependencies = [
- "proptest",
- "ring",
- "x25519-dalek",
-]
-
-[[package]]
-name = "trs-tracker"
-version = "0.1.20"
-dependencies = [
- "bytes",
- "flate2",
- "getrandom 0.4.3",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "proptest",
- "sha1",
- "stateright",
- "tokio",
- "tower-service",
- "trs-bencode",
- "trs-socks",
-]
-
-[[package]]
-name = "trs-utp"
-version = "0.1.20"
-dependencies = [
- "libc",
- "tokio",
-]
-
-[[package]]
-name = "trs-wire"
-version = "0.1.20"
-dependencies = [
- "bytes",
- "proptest",
- "sha1",
 ]
 
 [[package]]

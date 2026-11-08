@@ -31,7 +31,7 @@ pub fn fixture(kind: Fx, secs: u32) -> Option<PathBuf> {
         return None;
     }
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("trs-stream-fixtures");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("seedwell-stream-fixtures");
     std::fs::create_dir_all(&dir).unwrap();
     let (name, ext, extra): (&str, &str, &[&str]) = match kind {
         Fx::Mp4End => ("mp4end", "mp4", &[]),

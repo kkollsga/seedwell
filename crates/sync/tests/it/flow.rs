@@ -4,18 +4,18 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use trs_sync::clock::Clock;
-use trs_sync::folder::{FolderConfig, FolderCore, RemoteIndex};
-use trs_sync::fs::{Fs, MemFs, MemFsOptions, read_all, write_all};
-use trs_sync::ignore::Ignore;
-use trs_sync::index::MemStore;
-use trs_sync::pull::{ChunkRequest, ChunkSource, FetchError};
-use trs_sync_proto::device::DeviceKey;
-use trs_sync_proto::ids::ShortId;
-use trs_sync::folder::RemoteError;
-use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::keys::{Access, FolderSecret};
-use trs_sync_proto::sign::Writer;
+use seedwell_sync::clock::Clock;
+use seedwell_sync::folder::{FolderConfig, FolderCore, RemoteIndex};
+use seedwell_sync::fs::{Fs, MemFs, MemFsOptions, read_all, write_all};
+use seedwell_sync::ignore::Ignore;
+use seedwell_sync::index::MemStore;
+use seedwell_sync::pull::{ChunkRequest, ChunkSource, FetchError};
+use seedwell_sync_proto::device::DeviceKey;
+use seedwell_sync_proto::ids::ShortId;
+use seedwell_sync::folder::RemoteError;
+use seedwell_sync_proto::ids::FolderId;
+use seedwell_sync_proto::keys::{Access, FolderSecret};
+use seedwell_sync_proto::sign::Writer;
 
 /// What a device holds of the test folder: its public key and its access. In the driver both come from the
 /// folder's membership; here a test hands them out.
@@ -105,9 +105,9 @@ fn dev_on(fs: MemFs, name: &'static str, seed: u8, key: &Key) -> Dev {
         me: dk.device_id(),
         folder_pk: *key.public_key(),
         access: key.access(),
-        case_insensitive: trs_sync::path::probe_case_insensitive(&fs).unwrap(),
+        case_insensitive: seedwell_sync::path::probe_case_insensitive(&fs).unwrap(),
         byte_exact_names: false,
-        exec_bits: trs_sync::path::probe_exec_bits(&fs).unwrap(),
+        exec_bits: seedwell_sync::path::probe_exec_bits(&fs).unwrap(),
         archive: true,
         on_demand: false,
     };
@@ -143,11 +143,11 @@ fn send(from: &Dev, to: &mut Dev) {
     to.core.apply_remote(short(from), RemoteIndex { index_id, full: true, done: true, entries }).unwrap();
 }
 
-fn pull(to: &mut Dev, from: &[&Dev]) -> trs_sync::pull::PullReport {
+fn pull(to: &mut Dev, from: &[&Dev]) -> seedwell_sync::pull::PullReport {
     let source = Disks(from.iter().map(|d| &d.fs).collect());
     let names: Vec<(ShortId, &str)> = from.iter().map(|d| (short(d), d.name)).collect();
     let name = move |id: ShortId| names.iter().find(|(s, _)| *s == id).map_or("?", |(_, n)| n).to_string();
-    let mut total = trs_sync::pull::PullReport::default();
+    let mut total = seedwell_sync::pull::PullReport::default();
     loop {
         let r = to.core.pull(&source, &name, 64 << 20).unwrap();
         total.done += r.done;
@@ -298,7 +298,7 @@ fn an_entry_with_a_path_this_version_refuses_is_skipped_not_the_batch() {
     let mut info = odd.file.info.clone();
     info.path = "../outside.txt".into();
     // Signed by a real writer: only the path is wrong.
-    odd.file = trs_sync_proto::sign::sign_file(&DeviceKey::from_seed(&[1; 32]), &a.core.folder_id(), info);
+    odd.file = seedwell_sync_proto::sign::sign_file(&DeviceKey::from_seed(&[1; 32]), &a.core.folder_id(), info);
     learn_writers(&mut b.core, &a.core.writers()).unwrap();
     let (index_id, _) = a.core.index_state().unwrap();
     let stored = b.core.apply_remote(short(&a), RemoteIndex { index_id, full: true, done: true, entries }).unwrap();
@@ -319,7 +319,7 @@ fn an_entry_with_a_path_this_version_refuses_is_skipped_not_the_batch() {
 fn a_file_deleted_in_the_pass_through_folder_is_not_archived() {
     let key = rw();
     let (mut a, mut b) = (dev("A", 1, &key), dev("B", 2, &key));
-    let p = format!("{}/kglite/2026-10-26 08.05 from api/graph.bin", trs_sync::PASS_THROUGH);
+    let p = format!("{}/kglite/2026-10-26 08.05 from api/graph.bin", seedwell_sync::PASS_THROUGH);
     let mut dir = String::new();
     for part in ["Seedwell Pass-Through", "kglite", "2026-10-26 08.05 from api"] {
         dir = if dir.is_empty() { part.to_string() } else { format!("{dir}/{part}") };
@@ -337,7 +337,7 @@ fn a_file_deleted_in_the_pass_through_folder_is_not_archived() {
     pull(&mut a, &[&b]);
     assert!(a.fs.lstat(&p).unwrap().is_none(), "the delete reached A");
     assert!(a.fs.read_dir(".seedwell/Archive").map_or(true, |l| l.entries.is_empty()), "nothing archived");
-    assert!(trs_sync::in_pass_through(trs_sync::PASS_THROUGH) && !trs_sync::in_pass_through("Seedwell Pass-Through 2/x"));
+    assert!(seedwell_sync::in_pass_through(seedwell_sync::PASS_THROUGH) && !seedwell_sync::in_pass_through("Seedwell Pass-Through 2/x"));
 }
 
 #[test]
@@ -447,7 +447,7 @@ fn a_missing_marker_stops_the_scan_and_deletes_nothing() {
     a.core.scan("").unwrap();
     a.fs.remove_file("f").unwrap();
     a.fs.remove_dir(".seedwell").unwrap();
-    assert!(matches!(a.core.scan(""), Err(trs_sync::scan::ScanError::FolderMissing)));
+    assert!(matches!(a.core.scan(""), Err(seedwell_sync::scan::ScanError::FolderMissing)));
     assert!(!a.core.store().local("f").unwrap().unwrap().file.info.deleted);
 }
 
@@ -599,16 +599,16 @@ fn a_read_only_devices_own_change_is_kept_under_its_own_name() {
 }
 
 /// A FolderCore over a real folder on this system's disk.
-fn core_on_disk(fs: trs_sync::fs::StdFs, seed: u8, key: &Key) -> FolderCore {
+fn core_on_disk(fs: seedwell_sync::fs::StdFs, seed: u8, key: &Key) -> FolderCore {
     fs.create_dir(".seedwell").unwrap();
     let dk = Arc::new(DeviceKey::from_seed(&[seed; 32]));
     let cfg = FolderConfig {
         me: dk.device_id(),
         folder_pk: *key.public_key(),
         access: key.access(),
-        case_insensitive: trs_sync::path::probe_case_insensitive(&fs).unwrap(),
+        case_insensitive: seedwell_sync::path::probe_case_insensitive(&fs).unwrap(),
         byte_exact_names: false,
-        exec_bits: trs_sync::path::probe_exec_bits(&fs).unwrap(),
+        exec_bits: seedwell_sync::path::probe_exec_bits(&fs).unwrap(),
         archive: true,
         on_demand: false,
     };
@@ -637,7 +637,7 @@ fn names_the_disk_cannot_hold_are_issues_and_the_rest_arrives() {
     a.core.scan("").unwrap();
 
     let t = tempfile::tempdir().unwrap();
-    let disk = trs_sync::fs::StdFs::new(t.path());
+    let disk = seedwell_sync::fs::StdFs::new(t.path());
     let mut b = core_on_disk(disk.clone(), 2, &key);
     learn_writers(&mut b, &a.core.writers()).unwrap();
     let (index_id, _) = a.core.index_state().unwrap();
@@ -654,7 +654,7 @@ fn names_the_disk_cannot_hold_are_issues_and_the_rest_arrives() {
         let mut got: Vec<&str> = first.unsupported.iter().map(|u| u.path.as_str()).collect();
         got.sort_unstable();
         assert_eq!(got, bad);
-        assert!(first.unsupported.iter().all(|u| u.why == trs_platform::fs::NAME_NOT_ALLOWED), "{:?}", first.unsupported);
+        assert!(first.unsupported.iter().all(|u| u.why == seedwell_platform::fs::NAME_NOT_ALLOWED), "{:?}", first.unsupported);
         assert_eq!(b.need_totals().unwrap(), (0, 0), "the folder settles: nothing left to wait for");
         let mut on_disk: Vec<String> = std::fs::read_dir(t.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         on_disk.sort_unstable();
@@ -689,7 +689,7 @@ fn a_temp_file_nobody_will_finish_is_removed_by_the_next_scan() {
     a.core.scan("").unwrap();
     send(&a, &mut b);
     // B's pull stopped half way: a partial temp of each (as a crash or a quit leaves them).
-    let temps: Vec<String> = paths.iter().map(|p| trs_sync::pull::temp_path(p)).collect();
+    let temps: Vec<String> = paths.iter().map(|p| seedwell_sync::pull::temp_path(p)).collect();
     assert!(temps[1].len() < 60, "the long name has a hashed temp name: {}", temps[1]);
     for t in &temps {
         write_all(&b.fs, t, b"da").unwrap();
@@ -718,7 +718,7 @@ fn a_temp_file_nobody_will_finish_is_removed_by_the_next_scan() {
 }
 
 /// Runs a scan in steps as the folder's driver does: each step on its own, the big files hashed in between.
-fn scan_in_steps(d: &mut Dev, job: &mut trs_sync::scan::ScanJob) -> (usize, usize) {
+fn scan_in_steps(d: &mut Dev, job: &mut seedwell_sync::scan::ScanJob) -> (usize, usize) {
     let (mut steps, mut apart) = (0, 0);
     while !d.core.scan_step(job).unwrap() {
         steps += 1;
@@ -732,7 +732,7 @@ fn scan_in_steps(d: &mut Dev, job: &mut trs_sync::scan::ScanJob) -> (usize, usiz
 
 #[test]
 fn a_scan_in_steps_records_what_one_scan_does_with_big_files_hashed_apart() {
-    use trs_sync::scan::ScanJob;
+    use seedwell_sync::scan::ScanJob;
     let key = rw();
     let (mut a, mut b) = (dev("A", 1, &key), dev("B", 2, &key));
     for d in [&a, &b] {
@@ -773,7 +773,7 @@ fn a_scan_in_steps_records_what_one_scan_does_with_big_files_hashed_apart() {
 
 #[test]
 fn a_big_file_that_changes_while_hashed_apart_is_scanned_again_not_recorded() {
-    use trs_sync::scan::ScanJob;
+    use seedwell_sync::scan::ScanJob;
     let key = rw();
     let mut a = dev("A", 1, &key);
     write_all(&a.fs, "big.bin", &vec![1u8; 200_000]).unwrap();
@@ -885,7 +885,7 @@ fn under_read_only_members_relay_the_owners_versions_and_only_the_owner_vouches_
 }
 
 /// A regression guard (the puller has always checked this; the network source's own check, which stops asking such a
-/// device, has its test in `trs-sync-net`'s `source.rs`): a chunk from any peer is used only if it hashes to the chunk
+/// device, has its test in `seedwell-sync-net`'s `source.rs`): a chunk from any peer is used only if it hashes to the chunk
 /// hash the version's signer signed, so a member serving bytes that differ (its own copy changed, or corrupted on the
 /// way) gives nothing, and the file stays as it was until a device serves the right bytes. Fails when a corrupted chunk
 /// is written into a file.

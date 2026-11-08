@@ -1,4 +1,4 @@
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
@@ -61,7 +61,7 @@ static class CoreCalls
     /// <summary>The core's sentence for an error (any other exception's message).</summary>
     public static string Message(Exception e) => e switch
     {
-        CoreException ce => TrsFfiMethods.CoreErrorMessage(ce),
+        CoreException ce => SeedwellFfiMethods.CoreErrorMessage(ce),
         AggregateException { InnerException: Exception inner } => Message(inner),
         _ => e.Message,
     };

@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, oneshot};
-use trs_storage::{DiskConfig, DiskIo};
-use trs_tracker::Millis;
-use trs_tracker::crash::CrashLoopGuard;
-use trs_wire::{HANDSHAKE_LEN, Handshake};
+use seedwell_storage::{DiskConfig, DiskIo};
+use seedwell_tracker::Millis;
+use seedwell_tracker::crash::CrashLoopGuard;
+use seedwell_wire::{HANDSHAKE_LEN, Handshake};
 
 use crate::api::*;
 use crate::config::{AfterAdd, EncryptionPolicy, EngineConfig};
@@ -43,8 +43,8 @@ pub struct EngineHandle {
 /// Runtime sized as ENGINE.md 1 says: `min(4, performance cores)` workers.
 pub fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(trs_storage::perf_core_count().clamp(1, 4))
-        .thread_name("trs-rt")
+        .worker_threads(seedwell_storage::perf_core_count().clamp(1, 4))
+        .thread_name("seedwell-rt")
         .enable_all()
         .build()
 }
@@ -98,9 +98,9 @@ impl Engine {
         let launches: Vec<Millis> = launches.into_iter().map(Millis).collect();
         let hold = CrashLoopGuard::default().evaluate(&launches, Millis(now_ms));
 
-        let _ = trs_storage::raise_nofile_limit(8192);
+        let _ = seedwell_storage::raise_nofile_limit(8192);
         let hash_threads = if config.hash_threads == 0 {
-            trs_storage::perf_core_count().saturating_sub(1).max(1)
+            seedwell_storage::perf_core_count().saturating_sub(1).max(1)
         } else {
             config.hash_threads
         };
@@ -113,7 +113,7 @@ impl Engine {
         }));
         let (stx, srx) = mpsc::channel(4096);
         let (events, _) = broadcast::channel(1024);
-        let our_id = trs_metainfo::PeerId::generate().0;
+        let our_id = seedwell_metainfo::PeerId::generate().0;
         let key = random_key();
         let cfg_copy = config.clone();
         let sh = Arc::new(Shared::new(config, disk, store.clone(), our_id, events.clone(), stx.clone()));
@@ -212,17 +212,17 @@ impl Engine {
 }
 
 /// Every DHT datagram is a sign that the network works (SPEC 7C.4c).
-pub(crate) fn alive_of(sh: &Arc<Shared>) -> trs_dht::Alive {
+pub(crate) fn alive_of(sh: &Arc<Shared>) -> seedwell_dht::Alive {
     let sh = sh.clone();
-    trs_dht::Alive(Arc::new(move || sh.net.alive()))
+    seedwell_dht::Alive(Arc::new(move || sh.net.alive()))
 }
 
-fn dht_config(cfg: &EngineConfig, store: &dyn Store, alive: trs_dht::Alive, state: Option<Vec<u8>>) -> trs_dht::DriverConfig {
-    let mut dc = trs_dht::DriverConfig {
+fn dht_config(cfg: &EngineConfig, store: &dyn Store, alive: seedwell_dht::Alive, state: Option<Vec<u8>>) -> seedwell_dht::DriverConfig {
+    let mut dc = seedwell_dht::DriverConfig {
         bind: cfg.dht_bind,
         saved_state: state.or_else(|| store.load_dht_state().ok().flatten()),
         alive: Some(alive),
-        ..trs_dht::DriverConfig::default()
+        ..seedwell_dht::DriverConfig::default()
     };
     dc.core.allow_local_addrs = cfg.dht_allow_local;
     if !cfg.dht_bootstrap.is_empty() {
@@ -231,8 +231,8 @@ fn dht_config(cfg: &EngineConfig, store: &dyn Store, alive: trs_dht::Alive, stat
     dc
 }
 
-async fn spawn_dht(cfg: &EngineConfig, store: &dyn Store, alive: trs_dht::Alive) -> Option<trs_dht::DhtHandle> {
-    trs_dht::spawn(dht_config(cfg, store, alive, None)).await.ok()
+async fn spawn_dht(cfg: &EngineConfig, store: &dyn Store, alive: seedwell_dht::Alive) -> Option<seedwell_dht::DhtHandle> {
+    seedwell_dht::spawn(dht_config(cfg, store, alive, None)).await.ok()
 }
 
 /// The DHT on the uTP socket: every datagram that is not uTP arrives on `feed` and the node
@@ -240,11 +240,11 @@ async fn spawn_dht(cfg: &EngineConfig, store: &dyn Store, alive: trs_dht::Alive)
 pub(crate) fn spawn_dht_shared(
     cfg: &EngineConfig,
     store: &dyn Store,
-    sock: trs_utp::UtpSocket,
-    mut feed: mpsc::Receiver<trs_utp::ForeignDatagram>,
-    alive: trs_dht::Alive,
+    sock: seedwell_utp::UtpSocket,
+    mut feed: mpsc::Receiver<seedwell_utp::ForeignDatagram>,
+    alive: seedwell_dht::Alive,
     state: Option<Vec<u8>>,
-) -> trs_dht::DhtHandle {
+) -> seedwell_dht::DhtHandle {
     let (tx, rx) = mpsc::channel(256);
     // The DHT is IPv4 only; the pump drops anything else.
     tokio::spawn(async move {
@@ -256,17 +256,17 @@ pub(crate) fn spawn_dht_shared(
         }
     });
     let out = sock.clone();
-    let send: trs_dht::SharedSend = Arc::new(move |to, data| {
+    let send: seedwell_dht::SharedSend = Arc::new(move |to, data| {
         let _ = out.try_send_foreign(SocketAddr::V4(to), data);
     });
-    let io = trs_dht::SharedIo { incoming: rx, send, local: sock.local_addr() };
-    trs_dht::spawn_shared(dht_config(cfg, store, alive, state), io)
+    let io = seedwell_dht::SharedIo { incoming: rx, send, local: sock.local_addr() };
+    seedwell_dht::spawn_shared(dht_config(cfg, store, alive, state), io)
 }
 
 pub(crate) struct Bound {
     pub listener: TcpListener,
     pub port: u16,
-    pub utp: Option<(trs_utp::UtpSocket, mpsc::Receiver<trs_utp::ForeignDatagram>)>,
+    pub utp: Option<(seedwell_utp::UtpSocket, mpsc::Receiver<seedwell_utp::ForeignDatagram>)>,
     pub fallback: Option<PortFallback>,
 }
 
@@ -307,8 +307,8 @@ pub(crate) async fn bind_ports(cfg: &EngineConfig, wanted: u16, strict: bool) ->
         // A seeder of hundreds of torrents has one connection per torrent from the same remote
         // IP (the library default of 32 per IP would refuse them); the engine's own budget
         // still caps the total.
-        let ucfg = trs_utp::Config { max_per_ip: 256, ..trs_utp::Config::default() };
-        match trs_utp::UtpSocket::bind_with_foreign(bind, ucfg, ftx).await {
+        let ucfg = seedwell_utp::Config { max_per_ip: 256, ..seedwell_utp::Config::default() };
+        match seedwell_utp::UtpSocket::bind_with_foreign(bind, ucfg, ftx).await {
             Ok(sock) => return Ok(Bound { listener, port, utp: Some((sock, frx)), fallback }),
             // The OS chose the TCP port and somebody has the same UDP port: choose again.
             Err(_) if want == 0 && attempt < 7 => continue,
@@ -318,7 +318,7 @@ pub(crate) async fn bind_ports(cfg: &EngineConfig, wanted: u16, strict: bool) ->
                 break;
             }
             Err(e) => {
-                eprintln!("trs-engine: uTP disabled, cannot bind UDP {bind}: {e}");
+                eprintln!("seedwell-engine: uTP disabled, cannot bind UDP {bind}: {e}");
                 return Ok(Bound { listener, port, utp: None, fallback });
             }
         }
@@ -346,7 +346,7 @@ pub(crate) async fn accept_loop(listener: TcpListener, sh: Arc<Shared>) {
 }
 
 /// Accept uTP peers from the shared UDP socket (when `network.utp` is off they are dropped).
-pub(crate) async fn utp_accept_loop(sock: trs_utp::UtpSocket, sh: Arc<Shared>) {
+pub(crate) async fn utp_accept_loop(sock: seedwell_utp::UtpSocket, sh: Arc<Shared>) {
     loop {
         match sock.accept().await {
             Ok((stream, addr)) => {
@@ -363,6 +363,7 @@ pub(crate) async fn utp_accept_loop(sock: trs_utp::UtpSocket, sh: Arc<Shared>) {
 /// the socket to the session, which finds the torrent and wakes it if it is Cold. Both
 /// transports share the budget, so uTP cannot exceed the connection caps.
 fn admit(sh: &Arc<Shared>, stream: PeerIo, addr: SocketAddr) {
+    let addr = crate::net::canonical(addr);
     // Somebody reached us: the network works (and, during an outage, worth a probe).
     sh.net.alive();
     let Some(permit) = sh.budget.try_connection() else {
@@ -614,7 +615,7 @@ impl EngineHandle {
                 .load_torrent_file(&id)
                 .map_err(|e| EngineError::Store(e.to_string()))?
                 .ok_or(EngineError::NoMetadata)?;
-            let mi = trs_metainfo::Metainfo::from_bytes(&bytes).map_err(|e| EngineError::Invalid(e.to_string()))?;
+            let mi = seedwell_metainfo::Metainfo::from_bytes(&bytes).map_err(|e| EngineError::Invalid(e.to_string()))?;
             let cfg = sh.cfg();
             if job.awaiting {
                 let pol = sh.policy();
@@ -768,14 +769,14 @@ impl EngineHandle {
                 let p = self.prepare(bytes.clone(), &opts, true, false).await?;
                 let dup = self.call(|reply| Cmd::Exists(p.id, reply)).await?.is_some();
                 tokio::task::spawn_blocking(move || {
-                    let mi = trs_metainfo::Metainfo::from_bytes(&bytes).map_err(|e| EngineError::Invalid(e.to_string()))?;
+                    let mi = seedwell_metainfo::Metainfo::from_bytes(&bytes).map_err(|e| EngineError::Invalid(e.to_string()))?;
                     Ok(organize::preview(&p, &mi, dup))
                 })
                 .await
                 .map_err(|e| EngineError::Io(e.to_string()))?
             }
             AddSource::Magnet(uri) => {
-                let m = trs_metainfo::Magnet::parse(&uri).map_err(|e| EngineError::Invalid(e.to_string()))?;
+                let m = seedwell_metainfo::Magnet::parse(&uri).map_err(|e| EngineError::Invalid(e.to_string()))?;
                 let id = m.info_hash.swarm_id().ok_or_else(|| EngineError::Invalid("no info hash".into()))?;
                 let dup = self.call(|reply| Cmd::Exists(id, reply)).await?.is_some();
                 let pol = self.sh.policy();
@@ -789,7 +790,7 @@ impl EngineHandle {
                     total_bytes: 0,
                     file_count: 0,
                     private: false,
-                    tracker_host: m.trackers.first().and_then(|u| trs_tracker::TrackerUrl::parse(u).ok()).map(|u| u.host().to_owned()).unwrap_or_default(),
+                    tracker_host: m.trackers.first().and_then(|u| seedwell_tracker::TrackerUrl::parse(u).ok()).map(|u| u.host().to_owned()).unwrap_or_default(),
                     bucket,
                     category: opts.category.unwrap_or(Category::Other),
                     detected: Category::Other,
@@ -977,7 +978,7 @@ impl EngineHandle {
     /// Apply a freshly loaded `config.toml`. Limits, the alt-speed schedule, queue, connection
     /// caps, watch folders, locations and port mapping take effect at once; the returned list
     /// names the settings that need a restart.
-    pub async fn apply_settings(&self, cfg: &trs_state::Config) -> Result<Vec<String>, EngineError> {
+    pub async fn apply_settings(&self, cfg: &seedwell_state::Config) -> Result<Vec<String>, EngineError> {
         let cur = self.config().await?;
         let new = crate::config_map::engine_config(cfg, &cur);
         let restart = crate::config_map::restart_required(&cur, &new);
@@ -1095,9 +1096,9 @@ impl EngineHandle {
             token: None,
             file_index,
             file_len: f.length,
-            content_type: trs_stream::mime::content_type(&name).to_owned(),
-            container: trs_stream::mime::container_of(&name).into(),
-            is_mp4_family: trs_stream::mime::is_mp4_family(&name),
+            content_type: seedwell_stream::mime::content_type(&name).to_owned(),
+            container: seedwell_stream::mime::container_of(&name).into(),
+            is_mp4_family: seedwell_stream::mime::is_mp4_family(&name),
             file_name: name,
             complete: f.done >= f.length,
             selected: false,
@@ -1135,13 +1136,13 @@ impl EngineHandle {
     }
 
     /// The session's loopback streaming server, started on first use.
-    async fn stream_server(&self) -> Result<Arc<trs_stream::StreamServer>, EngineError> {
+    async fn stream_server(&self) -> Result<Arc<seedwell_stream::StreamServer>, EngineError> {
         let rt = self.rt.clone();
         self.sh
             .streams
             .get_or_try_init(|| async move {
                 // The server spawns its accept loop on the runtime it starts on: the engine's.
-                rt.spawn(async { trs_stream::StreamServer::start(trs_stream::Config::default()).await })
+                rt.spawn(async { seedwell_stream::StreamServer::start(seedwell_stream::Config::default()).await })
                     .await
                     .map_err(|e| EngineError::Io(e.to_string()))?
                     .map(Arc::new)
@@ -1183,7 +1184,7 @@ impl EngineHandle {
     }
 
     /// The developer log (SPEC 8.7): path, clear, drop counter.
-    pub fn devlog(&self) -> Arc<trs_devlog::DevLog> {
+    pub fn devlog(&self) -> Arc<seedwell_devlog::DevLog> {
         self.sh.devlog.clone()
     }
 
@@ -1249,7 +1250,7 @@ impl EngineHandle {
     /// lends it DHT lookups and a port mapping, nothing else). `None` while the DHT is off or the
     /// engine is shutting down. The handle may go stale after a live port change (the node moves to
     /// the new socket): ask again for each lookup.
-    pub async fn public_dht(&self) -> Option<trs_dht::DhtHandle> {
+    pub async fn public_dht(&self) -> Option<seedwell_dht::DhtHandle> {
         self.call(Cmd::PublicDht).await.ok().flatten()
     }
 
@@ -1325,10 +1326,10 @@ fn read_torrent_file(path: &std::path::Path) -> Result<Vec<u8>, EngineError> {
     use std::io::Read;
     let f = std::fs::File::open(path).map_err(|e| EngineError::Io(format!("{}: {e}", path.display())))?;
     let mut buf = Vec::new();
-    f.take(trs_state::store::MAX_TORRENT_FILE as u64 + 1)
+    f.take(seedwell_state::store::MAX_TORRENT_FILE as u64 + 1)
         .read_to_end(&mut buf)
         .map_err(|e| EngineError::Io(e.to_string()))?;
-    if buf.len() > trs_state::store::MAX_TORRENT_FILE {
+    if buf.len() > seedwell_state::store::MAX_TORRENT_FILE {
         return Err(EngineError::Invalid("the .torrent file is larger than 16 MiB".into()));
     }
     Ok(buf)

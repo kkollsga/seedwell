@@ -3,7 +3,7 @@ import SwiftUI
 
 /// Settings › Devices (SPEC §7G.1 "Your devices", §7G.5): this Mac's own devices, pairing with a link that the device
 /// which made it confirms, removing one for good, and leaving or starting over. Every word, state and choice is the
-/// core's (trs-ffi `devices_text.rs`); this draws them and calls back. Only the user's own clicks reach these calls:
+/// core's (seedwell-ffi `devices_text.rs`); this draws them and calls back. Only the user's own clicks reach these calls:
 /// agents can neither pair, confirm, remove nor leave.
 @MainActor @Observable final class DevicesModel {
     /// What is open over the tab.

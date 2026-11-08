@@ -6,12 +6,12 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use trs_sync::ondemand::{ItemState, ROOT_ID};
-use trs_sync_net::secrets::FileSecrets;
-use trs_sync_net::status::FolderState;
-use trs_sync_net::{Options, SyncHandle};
-use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::members::Role;
+use seedwell_sync::ondemand::{ItemState, ROOT_ID};
+use seedwell_sync_net::secrets::FileSecrets;
+use seedwell_sync_net::status::FolderState;
+use seedwell_sync_net::{Options, SyncHandle};
+use seedwell_sync_proto::ids::FolderId;
+use seedwell_sync_proto::members::Role;
 
 struct Device {
     h: SyncHandle,
@@ -19,12 +19,12 @@ struct Device {
 }
 
 async fn device(name: &str) -> Device {
-    device_with(name, trs_sync_proto::msg::FEATURES).await
+    device_with(name, seedwell_sync_proto::msg::FEATURES).await
 }
 
 /// The feature bits of Seedwell 0.1.11 (it knows none of the on-demand messages, and ignores a Join for a folder it
 /// shares already).
-const FEATURES_0_1_11: u64 = trs_sync_proto::msg::FEATURE_CHAT | trs_sync_proto::msg::FEATURE_DIRECT;
+const FEATURES_0_1_11: u64 = seedwell_sync_proto::msg::FEATURE_CHAT | seedwell_sync_proto::msg::FEATURE_DIRECT;
 
 /// [`device`] offering `features` (an earlier build's, to play one).
 async fn device_with(name: &str, features: u64) -> Device {
@@ -53,8 +53,42 @@ async fn until(secs: u64, what: &str, mut ok: impl FnMut() -> bool) {
     panic!("timed out waiting for: {what}");
 }
 
+/// Runs `fut` (which must not finish yet) until `ok` holds after a poll of it. For a state only `fut` changes: as
+/// nothing else runs it, a state it passes through is never missed between looks, however late they are.
+async fn drive_until<F: std::future::Future + Unpin>(fut: &mut F, what: &str, mut ok: impl FnMut() -> bool)
+where
+    F::Output: std::fmt::Debug,
+{
+    let end = Instant::now() + Duration::from_secs(30);
+    loop {
+        tokio::select! {
+            biased;
+            r = &mut *fut => panic!("finished before {what}: {r:?}"),
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+        }
+        if ok() {
+            return;
+        }
+        assert!(Instant::now() < end, "timed out waiting for: {what}");
+    }
+}
+
+/// Until a free of `path` on `d` would ask `other` (and only it) whether it holds the files: `other`'s index entries
+/// for them have reached `d` over their own session. Connected and linked is not enough.
+async fn until_asks(d: &Device, id: &FolderId, path: &str, other: &str) {
+    let end = Instant::now() + Duration::from_secs(30);
+    loop {
+        let askees = d.h.test_hold_askees(id, path).await.unwrap();
+        if askees == [other] {
+            return;
+        }
+        assert!(Instant::now() < end, "a free would ask {askees:?}, not {other}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// The value of a future that is ready at once (a call that does not wait on anything).
-fn futures_now<T>(f: impl std::future::Future<Output = Result<T, trs_sync_net::SyncError>>) -> T {
+fn futures_now<T>(f: impl std::future::Future<Output = Result<T, seedwell_sync_net::SyncError>>) -> T {
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f)).unwrap()
 }
 
@@ -91,7 +125,7 @@ async fn pair() -> (Device, Device, tempfile::TempDir, tempfile::TempDir, Folder
 
 /// [`pair`], the on-demand device with `role`.
 async fn pair_as(role: Role) -> (Device, Device, tempfile::TempDir, tempfile::TempDir, FolderId) {
-    pair_with(role, trs_sync_proto::msg::FEATURES).await
+    pair_with(role, seedwell_sync_proto::msg::FEATURES).await
 }
 
 /// [`pair_as`], the full device offering `features`.
@@ -118,7 +152,7 @@ async fn an_on_demand_member_lists_fetches_keeps_and_lets_go() {
     let root = b.h.od_children(&id, ROOT_ID, None, 100).unwrap().unwrap();
     let names: Vec<&str> = root.items.iter().map(|i| i.name.as_str()).collect();
     assert_eq!(names, ["big.bin", "docs"]);
-    assert!(root.items.iter().all(|i| i.state == ItemState::OnlineOnly || i.kind == trs_sync_proto::model::FileKind::Dir));
+    assert!(root.items.iter().all(|i| i.state == ItemState::OnlineOnly || i.kind == seedwell_sync_proto::model::FileKind::Dir));
     assert!(!fb.path().join("Shared").exists(), "the place is the host's");
     assert!(!b.h.od_cache_path(&id, "big.bin").unwrap().exists());
     let st = &b.h.snapshot().folders[0];
@@ -262,7 +296,7 @@ async fn a_refused_change_leaves_the_cache_as_it_was_and_a_read_only_delete_free
 
     // Delete on a read-only member: the content is freed, the items stay, the pin is gone (and saved).
     let d = b.h.od_delete(&id, "docs").await.unwrap();
-    assert!(matches!(&d, trs_sync::ondemand::Deleted::Freed(e) if e.files == 2), "{d:?}");
+    assert!(matches!(&d, seedwell_sync::ondemand::Deleted::Freed(e) if e.files == 2), "{d:?}");
     assert!(!cached.exists());
     let i = b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap();
     assert_eq!((i.state, i.pinned), (ItemState::OnlineOnly, false));
@@ -284,7 +318,7 @@ async fn a_download_is_freed_only_while_a_device_that_has_it_is_connected() {
     until(30, "B saw A go", || b.h.snapshot().devices.is_empty()).await;
     let e = b.h.od_evict(&id, "docs/old/c.txt").await.unwrap();
     assert_eq!((e.files, e.kept), (0, 1));
-    assert_eq!(e.kept_why[0].1, trs_sync::ondemand::NOT_HELD_ELSEWHERE);
+    assert_eq!(e.kept_why[0].1, seedwell_sync::ondemand::NOT_HELD_ELSEWHERE);
     assert!(b.h.od_cache_path(&id, "docs/old/c.txt").unwrap().exists());
     b.h.shutdown().await;
 }
@@ -476,15 +510,7 @@ async fn two_on_demand_devices_freeing_at_once_keep_a_copy() {
     // is not enough: under load each had listed the file from A's index only, so neither asked the other and both kept
     // their copy, one after the other (rightly: no other copy was known).
     for (d, other) in [(&b, "Gamma"), (&c, "Beta")] {
-        let end = Instant::now() + Duration::from_secs(30);
-        loop {
-            let askees = d.h.test_hold_askees(&id, "x.txt").await.unwrap();
-            if askees == [other] {
-                break;
-            }
-            assert!(Instant::now() < end, "a free would ask {askees:?}, not {other}");
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        until_asks(d, &id, "x.txt", other).await;
     }
     // Both let go at once, each asking the other: a device freeing a file holds nothing for others meanwhile, and the
     // higher id never relies on the lower, so at least one keeps it.
@@ -519,7 +545,7 @@ async fn a_holder_that_removed_the_folder_or_does_not_answer_holds_nothing() {
     b.h.test_hold_wait(Duration::from_millis(500));
     let e = b.h.od_evict(&id, "docs/a.txt").await.unwrap();
     assert_eq!((e.files, e.kept), (0, 1), "{e:?}");
-    assert_eq!(e.kept_why[0].1, trs_sync::ondemand::NOT_HELD_ELSEWHERE);
+    assert_eq!(e.kept_why[0].1, seedwell_sync::ondemand::NOT_HELD_ELSEWHERE);
     a.h.test_silent_ondemand(false);
     assert_eq!(b.h.od_evict(&id, "docs/a.txt").await.unwrap().files, 1, "it answers now");
 
@@ -767,13 +793,13 @@ async fn a_conflict_on_demand_is_resolved_through_the_core_with_both_versions_he
 
     // The original online only here: refused, nothing changes.
     assert_eq!(b.h.od_evict(&id, "docs/a.txt").await.unwrap().files, 1);
-    let e = b.h.resolve_conflict(&id, &copy, trs_sync_net::Keep::Copy).await.unwrap_err();
+    let e = b.h.resolve_conflict(&id, &copy, seedwell_sync_net::Keep::Copy).await.unwrap_err();
     assert!(e.to_string().contains("Download both versions first"), "{e}");
     assert!(b.h.od_item_at(&id, &copy).unwrap().is_some());
 
     // Both here: the copy wins, everywhere; what went is kept in the archive.
     b.h.od_fetch(&id, "docs/a.txt", Duration::from_secs(30)).await.unwrap();
-    b.h.resolve_conflict(&id, &copy, trs_sync_net::Keep::Copy).await.unwrap();
+    b.h.resolve_conflict(&id, &copy, seedwell_sync_net::Keep::Copy).await.unwrap();
     assert!(b.h.od_item_at(&id, &copy).unwrap().is_none());
     assert_eq!(read(&b.h.od_cache_path(&id, "docs/a.txt").unwrap()).as_deref(), Some(&b"B's edit"[..]));
     until(30, "A took it", || read(&fa.path().join("docs/a.txt")).as_deref() == Some(&b"B's edit"[..]) && !fa.path().join(&copy).exists()).await;
@@ -791,13 +817,13 @@ async fn a_conflict_on_demand_is_resolved_through_the_core_with_both_versions_he
     std::fs::write(&src, b"B's second").unwrap();
     let copy = b.h.od_write(&id, "docs/a.txt", &src, Some(&base)).await.unwrap();
     until(30, "A has the copy", || fa.path().join(&copy).exists()).await;
-    b.h.resolve_conflict(&id, &copy, trs_sync_net::Keep::Both).await.unwrap();
+    b.h.resolve_conflict(&id, &copy, seedwell_sync_net::Keep::Both).await.unwrap();
     until(30, "A took it, no conflict listed", || !fa.path().join(&copy).exists() && futures_now(a.h.conflicts(&id)).is_empty()).await;
     assert!(b.h.conflicts(&id).await.unwrap().is_empty());
     let kept: Vec<String> = std::fs::read_dir(fa.path().join("docs")).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).filter(|n| n.contains("a (")).collect();
     assert_eq!(kept.len(), 1, "{kept:?}");
     // A resolve of the old copy name finds nothing to act on: the kept file stays.
-    a.h.resolve_conflict(&id, &copy, trs_sync_net::Keep::Original).await.unwrap();
+    a.h.resolve_conflict(&id, &copy, seedwell_sync_net::Keep::Original).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(read(&fa.path().join("docs").join(&kept[0])).as_deref(), Some(&b"B's second"[..]));
     a.h.shutdown().await;
@@ -806,7 +832,7 @@ async fn a_conflict_on_demand_is_resolved_through_the_core_with_both_versions_he
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn changes_made_while_a_folder_was_closed_here_still_arrive_from_new_and_earlier_builds() {
-    for features in [trs_sync_proto::msg::FEATURES, FEATURES_0_1_11] {
+    for features in [seedwell_sync_proto::msg::FEATURES, FEATURES_0_1_11] {
         let owner = device_with("Owner", features).await;
         let (files, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         std::fs::write(files.path().join("a.txt"), b"a").unwrap();
@@ -918,7 +944,7 @@ async fn again(d: Device, name: &str, features: u64) -> Device {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_folder_closed_while_a_session_is_set_up_links_once_it_opens() {
-    for features in [trs_sync_proto::msg::FEATURES, FEATURES_0_1_11] {
+    for features in [seedwell_sync_proto::msg::FEATURES, FEATURES_0_1_11] {
         // Review 12, #1: A's core is held while B dials (A's answer waits on it); A pauses meanwhile, B writes x, A
         // resumes, B writes y. Both arrive.
         let work = tempfile::tempdir().unwrap();
@@ -943,7 +969,7 @@ async fn a_folder_closed_while_a_session_is_set_up_links_once_it_opens() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_folder_closed_when_a_peer_dials_links_once_it_opens() {
-    for features in [trs_sync_proto::msg::FEATURES, FEATURES_0_1_11] {
+    for features in [seedwell_sync_proto::msg::FEATURES, FEATURES_0_1_11] {
         // Review 12, #2: A's folder is paused when B dials (B offers it, A leaves it out); B writes x; A resumes: x
         // arrives, and so do later changes both ways.
         let work = tempfile::tempdir().unwrap();
@@ -976,7 +1002,7 @@ async fn a_folder_closed_when_a_peer_dials_links_once_it_opens() {
 /// the owner, the joiner, the owner's and the joiner's place of F, F's and G's ids. `g_first`: G's id sorts before F's
 /// (each device takes them in that order), or after.
 async fn two_folders(work: &std::path::Path, g_first: bool) -> (Device, Device, std::path::PathBuf, std::path::PathBuf, FolderId, FolderId) {
-    two_folders_with(work, g_first, trs_sync_proto::msg::FEATURES, trs_sync_proto::msg::FEATURES).await
+    two_folders_with(work, g_first, seedwell_sync_proto::msg::FEATURES, seedwell_sync_proto::msg::FEATURES).await
 }
 
 /// [`two_folders`], the owner and the joiner offering these features. (The joiner dials the owner.)
@@ -1049,7 +1075,7 @@ async fn a_folder_that_opens_while_its_session_is_dialled_links_on_it() {
         let work = tempfile::tempdir().unwrap();
         let (a, b, af, bf, id, gid) = two_folders(work.path(), g_first).await;
         b.h.set_paused(&id, true).await.unwrap();
-        let a = again(a, "Alpha", trs_sync_proto::msg::FEATURES).await;
+        let a = again(a, "Alpha", seedwell_sync_proto::msg::FEATURES).await;
         b.h.test_lock_core(&gid, Duration::from_secs(6));
         tokio::time::sleep(Duration::from_secs(2)).await;
         b.h.set_paused(&id, false).await.unwrap();
@@ -1132,7 +1158,7 @@ async fn a_held_folder_an_earlier_build_named_links_once_it_opens() {
     // Final review, #1: X's F is held back at start (a move cut off, its disk away), so not open and not stopped
     // either; P (0.1.11) dials X and names F. Once X's disk is back and F opens, P's changes of F reach X.
     let work = tempfile::tempdir().unwrap();
-    let (p, x, pf, xf, id, _gid) = two_folders_with(work.path(), true, FEATURES_0_1_11, trs_sync_proto::msg::FEATURES).await;
+    let (p, x, pf, xf, id, _gid) = two_folders_with(work.path(), true, FEATURES_0_1_11, seedwell_sync_proto::msg::FEATURES).await;
     x.h.shutdown().await;
     let to = work.path().join("Moved");
     mark(&to);
@@ -1171,13 +1197,13 @@ async fn a_folder_an_earlier_build_offers_later_is_answered() {
     // does not. P resumes F (an earlier build offers nothing then) and moves it: its Join offers F, and waits for
     // ours. A answers; then A's change of F reaches P.
     let work = tempfile::tempdir().unwrap();
-    let (p, a, pf, af, id, _gid) = two_folders_with(work.path(), true, FEATURES_0_1_11, trs_sync_proto::msg::FEATURES).await;
+    let (p, a, pf, af, id, _gid) = two_folders_with(work.path(), true, FEATURES_0_1_11, seedwell_sync_proto::msg::FEATURES).await;
     p.h.set_paused(&id, true).await.unwrap();
     // A dials P (P starts again while A is away: its own dial fails and waits).
     a.h.shutdown().await;
     let p = again(p, "Alpha", FEATURES_0_1_11).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
-    let a = again(a, "Beta", trs_sync_proto::msg::FEATURES).await;
+    let a = again(a, "Beta", seedwell_sync_proto::msg::FEATURES).await;
     // (P listens on a new port now.)
     a.h.add_address(&id, addr(&p)).unwrap();
     until(30, "A connected", || a.h.snapshot().devices.len() == 1).await;
@@ -1272,7 +1298,7 @@ async fn an_earlier_build_is_never_asked_what_it_cannot_answer() {
     let t = Instant::now();
     // A is the only holder, and does not know the questions: refused at once, not after waiting.
     let e = b.h.od_rename(&id, "big.bin", "moved.bin").await.unwrap_err();
-    assert!(e.to_string().contains(trs_sync::folder::RENAME_NEEDS_HOLDER), "{e}");
+    assert!(e.to_string().contains(seedwell_sync::folder::RENAME_NEEDS_HOLDER), "{e}");
     let ev = b.h.od_evict(&id, "docs/a.txt").await.unwrap();
     assert_eq!((ev.files, ev.kept), (0, 1), "{ev:?}");
     assert!(t.elapsed() < Duration::from_secs(3), "nothing waited for an answer: {:?}", t.elapsed());
@@ -1318,7 +1344,7 @@ async fn a_rename_without_the_files_needs_a_device_that_has_them() {
     a.h.shutdown().await;
     until(30, "B sees A gone", || b.h.snapshot().devices.is_empty()).await;
     let e = b.h.od_rename(&id, "big.bin", "docs/moved.bin").await.unwrap_err();
-    assert!(e.to_string().contains(trs_sync::folder::RENAME_NEEDS_HOLDER), "{e}");
+    assert!(e.to_string().contains(seedwell_sync::folder::RENAME_NEEDS_HOLDER), "{e}");
     assert!(b.h.od_item_at(&id, "big.bin").unwrap().is_some() && b.h.od_item_at(&id, "docs/moved.bin").unwrap().is_none());
     // A back: it makes the rename, as its own change, and the call ends when the result is here.
     let secrets = Arc::new(FileSecrets::new(a_state.path().join("secrets")));
@@ -1339,6 +1365,8 @@ async fn a_rename_without_the_files_needs_a_device_that_has_them() {
     b.h.shutdown().await;
 }
 
+/// The failures: a device freeing a file answers yes when asked whether it holds it (each lets go relying on the other,
+/// and no copy is left); and a free whose caller is dropped stops saying no before its work has run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_holder_freeing_a_file_says_no_and_its_free_ends_with_the_work_not_the_caller() {
     let (a, b, _fa, fb, id) = pair().await;
@@ -1355,30 +1383,38 @@ async fn a_holder_freeing_a_file_says_no_and_its_free_ends_with_the_work_not_the
     c.h.od_fetch(&id, "x.txt", Duration::from_secs(30)).await.unwrap();
     a.h.shutdown().await;
     until(30, "B and C connected, A gone", || b.h.snapshot().devices.len() == 1 && c.h.snapshot().devices.len() == 1).await;
+    // And each knows the other holds it, so a free on either asks the other. Without this wait, a free that knew of no
+    // other copy asked nobody and was over at once, and "the higher is freeing it" was never seen (PC 2026-11-06, and
+    // here 1 run of 240 under load: its index entry for the file had not come yet).
+    until_asks(&b, &id, "x.txt", "Gamma").await;
+    until_asks(&c, &id, "x.txt", "Beta").await;
     // The higher is freeing x.txt (it asked the lower, who does not answer); asked meanwhile by the lower, it says no.
     // The higher one: its answer to the lower would be yes, but for its own free in progress.
     let (lo, hi) = if b.h.device_id().short().0 > c.h.device_id().short().0 { (&c, &b) } else { (&b, &c) };
     lo.h.test_silent_ondemand(true);
-    hi.h.test_hold_wait(Duration::from_secs(10));
-    let freeing = { let h = hi.h.clone(); tokio::spawn(async move { h.od_evict(&id, "x.txt").await }) };
-    // (Its free under way: on a loaded machine it can take seconds to get there, a pull round on the core before it;
-    // it then waits 10 s for the lower's answer, so the window to see it freeing is wide even under load: a 2 s look
-    // into a 3 s wait failed once beside a Rust build on the PC, 2026-11-06.)
-    until(8, "the higher is freeing it", || hi.h.test_freeing(&id) == 1).await;
-    lo.h.test_hold_wait(Duration::from_secs(1));
+    hi.h.test_hold_wait(Duration::from_secs(1));
+    // Its free is run here, not spawned: once its question is out it is left waiting (not polled) while the lower asks,
+    // so it is freeing for as long as that takes, however slow the machine.
+    let mut freeing = Box::pin(hi.h.od_evict(&id, "x.txt"));
+    drive_until(&mut freeing, "the higher asked the lower", || hi.h.test_holds_waiting() == 1).await;
+    assert_eq!(hi.h.test_freeing(&id), 1, "freeing from before its question");
+    // (Ends with the higher's answer: the wait is only the limit.)
+    lo.h.test_hold_wait(Duration::from_secs(30));
     let e = lo.h.od_evict(&id, "x.txt").await.unwrap();
     assert_eq!(e.files, 0, "the other is freeing it: no: {e:?}");
-    let _ = freeing.await;
+    let e = freeing.await.unwrap();
+    assert_eq!(e.files, 0, "the lower did not answer: the higher keeps its copy: {e:?}");
     assert_eq!(hi.h.test_freeing(&id), 0);
     // A caller dropped while the free waits for the core (after asking): the free still runs, and ends with it.
-    hi.h.test_hold_wait(Duration::from_secs(1));
-    let (h2, id2) = (hi.h.clone(), id);
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        h2.test_lock_core(&id2, Duration::from_secs(2));
-    });
-    assert!(tokio::time::timeout(Duration::from_millis(1500), hi.h.od_evict(&id, "x.txt")).await.is_err());
+    // (Boxed, so that dropping it drops the call itself, and what it held: `pin!` would keep it until the test ends.)
+    let mut evict = Box::pin(hi.h.od_evict(&id, "x.txt"));
+    drive_until(&mut evict, "the higher asked again", || hi.h.test_holds_waiting() == 1).await;
+    // The core held (as a long pull does) from before its wait ends: the free then waits for it.
+    let core = hi.h.test_hold_core(&id).unwrap();
+    drive_until(&mut evict, "the wait for an answer is over", || hi.h.test_holds_waiting() == 0).await;
+    drop(evict);
     assert_eq!(hi.h.test_freeing(&id), 1, "still freeing: the blocking work has not run yet");
+    drop(core);
     until(10, "the free ended with its work", || hi.h.test_freeing(&id) == 0).await;
     b.h.shutdown().await;
     c.h.shutdown().await;
@@ -1679,7 +1715,7 @@ struct Hook {
     refuse: std::sync::atomic::AtomicBool,
 }
 
-impl trs_sync_net::OnDemandHost for Hook {
+impl seedwell_sync_net::OnDemandHost for Hook {
     fn release(&self, folder: &str, name: &str, place: &std::path::Path) -> Result<(), String> {
         self.calls.lock().unwrap().push(format!("release {folder} {name} {}", place.display()));
         if self.refuse.load(std::sync::atomic::Ordering::Relaxed) { Err("the Finder said no".into()) } else { Ok(()) }
@@ -1740,11 +1776,11 @@ async fn a_folder_changed_below_since_it_was_seen_is_not_deleted() {
     until(30, "B has the new version", || b.h.od_item_at(&id, "docs/a.txt").ok().flatten().is_some_and(|i| i.content_version != before)).await;
     let now = b.h.od_newest_below(&id, "docs").unwrap();
     assert!(now > seen, "the folder's version moved");
-    let e = b.h.od_delete_seen(&id, "docs", Some(trs_sync_net::DeleteSeen::Folder(seen))).await.unwrap_err();
-    assert!(matches!(e, trs_sync_net::SyncError::OnDemand(trs_sync_net::OnDemandError::Changed, _)), "{e}");
+    let e = b.h.od_delete_seen(&id, "docs", Some(seedwell_sync_net::DeleteSeen::Folder(seen))).await.unwrap_err();
+    assert!(matches!(e, seedwell_sync_net::SyncError::OnDemand(seedwell_sync_net::OnDemandError::Changed, _)), "{e}");
     assert!(b.h.od_item_at(&id, "docs/a.txt").unwrap().is_some(), "nothing deleted");
     // Seen as it is now: deleted.
-    b.h.od_delete_seen(&id, "docs", Some(trs_sync_net::DeleteSeen::Folder(now))).await.unwrap();
+    b.h.od_delete_seen(&id, "docs", Some(seedwell_sync_net::DeleteSeen::Folder(now))).await.unwrap();
     assert!(b.h.od_item_at(&id, "docs").unwrap().is_none());
     a.h.shutdown().await;
     b.h.shutdown().await;
@@ -1802,7 +1838,7 @@ async fn this_devices_own_changes_below_a_folder_do_not_refuse_its_delete() {
     b.h.od_write(&id, "docs/tmp/t.bin", &src, None).await.unwrap();
     b.h.od_delete(&id, "docs/tmp").await.unwrap();
     assert!(b.h.od_newest_below(&id, "docs").unwrap() > seen, "the folder changed, by this device");
-    b.h.od_delete_seen(&id, "docs", Some(trs_sync_net::DeleteSeen::Folder(seen))).await.unwrap();
+    b.h.od_delete_seen(&id, "docs", Some(seedwell_sync_net::DeleteSeen::Folder(seen))).await.unwrap();
     assert!(b.h.od_item_at(&id, "docs").unwrap().is_none());
     a.h.shutdown().await;
     b.h.shutdown().await;
@@ -1817,10 +1853,10 @@ async fn a_file_changed_since_it_was_seen_is_not_deleted() {
     std::fs::write(fa.path().join("docs/a.txt"), b"alpha, changed").unwrap();
     a.h.rescan(&id).unwrap();
     until(30, "B has the new version", || b.h.od_item_at(&id, "docs/a.txt").ok().flatten().is_some_and(|i| i.content_version != before)).await;
-    let e = b.h.od_delete_seen(&id, "docs/a.txt", Some(trs_sync_net::DeleteSeen::File(before))).await.unwrap_err();
-    assert!(matches!(e, trs_sync_net::SyncError::OnDemand(trs_sync_net::OnDemandError::Changed, _)), "{e}");
+    let e = b.h.od_delete_seen(&id, "docs/a.txt", Some(seedwell_sync_net::DeleteSeen::File(before))).await.unwrap_err();
+    assert!(matches!(e, seedwell_sync_net::SyncError::OnDemand(seedwell_sync_net::OnDemandError::Changed, _)), "{e}");
     let now = b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap().content_version;
-    b.h.od_delete_seen(&id, "docs/a.txt", Some(trs_sync_net::DeleteSeen::File(now))).await.unwrap();
+    b.h.od_delete_seen(&id, "docs/a.txt", Some(seedwell_sync_net::DeleteSeen::File(now))).await.unwrap();
     assert!(b.h.od_item_at(&id, "docs/a.txt").unwrap().is_none());
     a.h.shutdown().await;
     b.h.shutdown().await;
@@ -1870,7 +1906,7 @@ async fn a_folder_kept_in_place_stores_each_file_once_in_its_placeholder() {
     assert!(b.h.od_held_in_place(&id, "docs/a.txt"));
     assert_eq!(read(&place.join("docs/a.txt")).as_deref(), Some(&b"alpha"[..]));
     assert_eq!(b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap().state, ItemState::Downloaded);
-    assert_eq!(b.h.od_local_change(&id, "docs/a.txt").await.unwrap(), trs_sync_net::LocalChange::Unchanged);
+    assert_eq!(b.h.od_local_change(&id, "docs/a.txt").await.unwrap(), seedwell_sync_net::LocalChange::Unchanged);
     // Told again: nothing more to do.
     b.h.od_hydrated(&id, "docs/a.txt", &cv).await.unwrap();
 
@@ -1888,7 +1924,7 @@ async fn a_folder_kept_in_place_stores_each_file_once_in_its_placeholder() {
     until(60, "B frees it", || futures_now(b.h.od_evict(&id, "docs/a.txt")).files == 1).await;
     assert!(!b.h.od_held_in_place(&id, "docs/a.txt"));
     assert_eq!(b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap().state, ItemState::OnlineOnly);
-    assert_eq!(b.h.od_local_change(&id, "docs/a.txt").await.unwrap(), trs_sync_net::LocalChange::Stale, "let go of: the host may dehydrate it");
+    assert_eq!(b.h.od_local_change(&id, "docs/a.txt").await.unwrap(), seedwell_sync_net::LocalChange::Stale, "let go of: the host may dehydrate it");
     std::fs::remove_file(place.join("docs/a.txt")).unwrap();
 
     // Fetched again, filled again.
@@ -1900,7 +1936,7 @@ async fn a_folder_kept_in_place_stores_each_file_once_in_its_placeholder() {
     std::fs::write(place.join("docs/a.txt"), b"alpha, edited on B").unwrap();
     let base = b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap().content_version;
     let change = b.h.od_local_change(&id, "docs/a.txt").await.unwrap();
-    assert_eq!(change, trs_sync_net::LocalChange::Modified { base: Some(base.clone()) });
+    assert_eq!(change, seedwell_sync_net::LocalChange::Modified { base: Some(base.clone()) });
     b.h.od_write(&id, "docs/a.txt", &place.join("docs/a.txt"), Some(&base)).await.unwrap();
     let edited = b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap();
     assert!(edited.content_version != base && edited.state == ItemState::ModifiedHere, "{edited:?}");
@@ -1921,7 +1957,7 @@ async fn a_folder_kept_in_place_stores_each_file_once_in_its_placeholder() {
     })
     .await;
     assert!(!b.h.od_held_in_place(&id, "docs/a.txt"));
-    assert_eq!(b.h.od_local_change(&id, "docs/a.txt").await.unwrap(), trs_sync_net::LocalChange::Stale);
+    assert_eq!(b.h.od_local_change(&id, "docs/a.txt").await.unwrap(), seedwell_sync_net::LocalChange::Stale);
     std::fs::remove_file(place.join("docs/a.txt")).unwrap();
     fill_placeholder(&b.h, &id, &place, "docs/a.txt").await;
 
@@ -1929,7 +1965,7 @@ async fn a_folder_kept_in_place_stores_each_file_once_in_its_placeholder() {
     b.h.od_rename(&id, "docs/a.txt", "docs/b.txt").await.unwrap();
     assert!(b.h.od_held_in_place(&id, "docs/b.txt") && !b.h.od_cache_path(&id, "docs/b.txt").unwrap().exists());
     std::fs::rename(place.join("docs/a.txt"), place.join("docs/b.txt")).unwrap();
-    assert_eq!(b.h.od_local_change(&id, "docs/b.txt").await.unwrap(), trs_sync_net::LocalChange::Unchanged);
+    assert_eq!(b.h.od_local_change(&id, "docs/b.txt").await.unwrap(), seedwell_sync_net::LocalChange::Unchanged);
     until(30, "A took the rename", || read(&fa.path().join("docs/b.txt")).as_deref() == Some(&b"alpha, then A again"[..])).await;
 
     // Switched to full: the content comes back from the placeholders (the host let go of them), and the place is the
@@ -1953,7 +1989,7 @@ const HOST_RETRY: Duration = Duration::from_millis(100);
 async fn host_looks(h: &SyncHandle, id: &FolderId, place: &std::path::Path, path: &str, from_feed: bool) -> Vec<String> {
     let mut copies = Vec::new();
     match h.od_local_change(id, path).await.unwrap() {
-        trs_sync_net::LocalChange::Modified { base } => {
+        seedwell_sync_net::LocalChange::Modified { base } => {
             let at = h.od_write(id, path, &place.join(path), base.as_deref()).await.unwrap();
             if at == path {
                 let cv = h.od_item_at(id, path).unwrap().unwrap().content_version;
@@ -1962,7 +1998,7 @@ async fn host_looks(h: &SyncHandle, id: &FolderId, place: &std::path::Path, path
                 copies.push(at);
             }
         }
-        trs_sync_net::LocalChange::Stale if from_feed => {
+        seedwell_sync_net::LocalChange::Stale if from_feed => {
             std::fs::remove_file(place.join(path)).unwrap();
             let state = h.od_item_at(id, path).unwrap().unwrap().state;
             if matches!(state, ItemState::Downloaded | ItemState::ModifiedHere | ItemState::Downloading) {
@@ -2015,7 +2051,7 @@ async fn met_in_place(write: &[u8]) -> Met {
     .await;
     // The host applies the feed up to here: its update of the item asks the core, which says the placeholder is stale ...
     let anchor = b.h.od_anchor(&id).unwrap();
-    assert_eq!(b.h.od_local_change(&id, P).await.unwrap(), trs_sync_net::LocalChange::Stale);
+    assert_eq!(b.h.od_local_change(&id, P).await.unwrap(), seedwell_sync_net::LocalChange::Stale);
     // ... a program's write lands before the host's update, which Cloud Files refuses: the write stays.
     std::thread::sleep(Duration::from_millis(20));
     std::fs::write(place.join(P), write).unwrap();
@@ -2027,7 +2063,7 @@ struct Looked {
     /// The paths its reports returned that are not the item (a conflict copy each, or one made already).
     copies: Vec<String>,
     /// `sync_local_change`'s last answer.
-    last: Option<trs_sync_net::LocalChange>,
+    last: Option<seedwell_sync_net::LocalChange>,
     /// How often the feed named each path.
     fed: std::collections::BTreeMap<String, usize>,
 }
@@ -2085,7 +2121,7 @@ async fn a_write_meeting_another_devices_version_in_place_makes_one_conflict_cop
     let Looked { copies: more, last, fed } = host_rounds(&mut m).await;
     copies.extend(more);
     assert_eq!(copies, std::slice::from_ref(&copy), "no copy after the first");
-    assert_eq!(last, Some(trs_sync_net::LocalChange::Unchanged), "the name holds the recorded version again");
+    assert_eq!(last, Some(seedwell_sync_net::LocalChange::Unchanged), "the name holds the recorded version again");
     // The feed named the item once (let go of the placeholder), the copy at most twice (new, then held elsewhere).
     assert_eq!(fed.get(p), Some(&1), "nothing repeats: {fed:?}");
     assert!(fed.values().all(|&n| n <= 2), "nothing repeats: {fed:?}");
@@ -2115,12 +2151,12 @@ async fn a_later_different_edit_after_the_copy_is_reported_and_copied_again() {
     assert_eq!(first.len(), 1);
     std::thread::sleep(Duration::from_millis(20));
     std::fs::write(m.place.join(P), b"from C").unwrap();
-    assert!(matches!(m.b.h.od_local_change(&m.id, P).await.unwrap(), trs_sync_net::LocalChange::Modified { .. }), "a new edit");
+    assert!(matches!(m.b.h.od_local_change(&m.id, P).await.unwrap(), seedwell_sync_net::LocalChange::Modified { .. }), "a new edit");
     let second = host_looks(&m.b.h, &m.id, &m.place, P, false).await;
     assert_eq!(second.len(), 1);
     assert_ne!(first, second, "a copy of its own");
     let l = host_rounds(&mut m).await;
-    assert_eq!(l.last, Some(trs_sync_net::LocalChange::Unchanged), "{:?}", l.copies);
+    assert_eq!(l.last, Some(seedwell_sync_net::LocalChange::Unchanged), "{:?}", l.copies);
     let mut copies = copies_of(&m.b.h, &m.id).await;
     copies.sort();
     let mut want = vec![first[0].clone(), second[0].clone()];
@@ -2145,7 +2181,7 @@ async fn an_edit_from_the_current_version_that_equals_a_copy_is_the_new_version_
     let now = m.b.h.od_item_at(&m.id, P).unwrap().unwrap().content_version;
     std::thread::sleep(Duration::from_millis(20));
     std::fs::write(m.place.join(P), b"from B").unwrap();
-    assert_eq!(m.b.h.od_local_change(&m.id, P).await.unwrap(), trs_sync_net::LocalChange::Modified { base: Some(now) });
+    assert_eq!(m.b.h.od_local_change(&m.id, P).await.unwrap(), seedwell_sync_net::LocalChange::Modified { base: Some(now) });
     assert!(host_looks(&m.b.h, &m.id, &m.place, P, false).await.is_empty(), "written at the name");
     until(30, "A has it at the name", || read(&m.fa.path().join(P)).as_deref() == Some(&b"from B"[..])).await;
     assert_eq!(copies_of(&m.b.h, &m.id).await.len(), 1);
@@ -2164,7 +2200,7 @@ async fn a_copy_this_device_let_go_of_is_taken_from_the_report_and_settles() {
     until(60, "B frees the copy", || futures_now(m.b.h.od_evict(&m.id, &copy)).files == 1).await;
     assert_eq!(m.b.h.od_item_at(&m.id, &copy).unwrap().unwrap().state, ItemState::OnlineOnly);
     let l = host_rounds(&mut m).await;
-    assert_eq!(l.last, Some(trs_sync_net::LocalChange::Unchanged), "settled: {:?}", l.copies);
+    assert_eq!(l.last, Some(seedwell_sync_net::LocalChange::Unchanged), "settled: {:?}", l.copies);
     assert!(l.copies.iter().all(|c| *c == copy), "{:?}", l.copies);
     assert!(l.copies.len() <= 1, "reported once: {:?}", l.copies);
     assert_eq!(read(&m.place.join(P)).as_deref(), Some(&b"from A"[..]));
@@ -2186,7 +2222,7 @@ async fn a_write_while_the_core_reads_the_placeholder_is_never_taken_for_the_cop
     std::fs::write(m.place.join(P), b"from B").unwrap();
     let at = m.place.join(P);
     let w = at.clone();
-    trs_sync_net::placed::test_after_reading(
+    seedwell_sync_net::placed::test_after_reading(
         &at,
         Some(Box::new(move || {
             std::thread::sleep(Duration::from_millis(20));
@@ -2194,9 +2230,9 @@ async fn a_write_while_the_core_reads_the_placeholder_is_never_taken_for_the_cop
         })),
     );
     let answer = m.b.h.od_local_change(&m.id, P).await.unwrap();
-    trs_sync_net::placed::test_after_reading(&at, None);
-    assert!(matches!(answer, trs_sync_net::LocalChange::Modified { .. }), "{answer:?}");
-    assert!(matches!(m.b.h.od_local_change(&m.id, P).await.unwrap(), trs_sync_net::LocalChange::Modified { .. }), "a new edit");
+    seedwell_sync_net::placed::test_after_reading(&at, None);
+    assert!(matches!(answer, seedwell_sync_net::LocalChange::Modified { .. }), "{answer:?}");
+    assert!(matches!(m.b.h.od_local_change(&m.id, P).await.unwrap(), seedwell_sync_net::LocalChange::Modified { .. }), "a new edit");
     m.a.h.shutdown().await;
     m.b.h.shutdown().await;
 }
@@ -2342,7 +2378,7 @@ async fn an_edit_made_while_stopped_that_the_scan_records_first_is_no_conflict_a
 
     let l = host_start_and_rounds(&mut s).await;
     assert!(l.copies.is_empty(), "B's own edit is no conflict: {:?}", l.copies);
-    assert_eq!(l.last, Some(trs_sync_net::LocalChange::Unchanged), "the placeholder holds the version at the name");
+    assert_eq!(l.last, Some(seedwell_sync_net::LocalChange::Unchanged), "the placeholder holds the version at the name");
     assert_eq!(read(&s.place.join(P)).as_deref(), Some(edit), "never let go of: it is the only copy here");
     assert_eq!(read_on_host(&s.b.h, &s.id, &s.place, P).await.as_deref(), Some(edit), "readable on B");
     let item = s.b.h.od_item_at(&s.id, P).unwrap().unwrap();
@@ -2375,7 +2411,7 @@ async fn an_edit_of_a_version_the_scan_recorded_from_the_placeholder_is_never_le
     std::fs::write(m.place.join(P), b"from B").unwrap();
 
     let l = host_rounds(&mut m).await;
-    assert_eq!(l.last, Some(trs_sync_net::LocalChange::Unchanged), "{:?}", l.copies);
+    assert_eq!(l.last, Some(seedwell_sync_net::LocalChange::Unchanged), "{:?}", l.copies);
     assert!(l.copies.is_empty(), "an edit at the name: {:?}", l.copies);
     assert_eq!(read(&m.place.join(P)).as_deref(), Some(&b"from B"[..]), "never let go of");
     until(30, "A has it at the name", || read(&m.fa.path().join(P)).as_deref() == Some(&b"from B"[..])).await;
@@ -2409,7 +2445,7 @@ async fn an_edit_on_both_devices_while_one_was_stopped_makes_one_copy_readable_e
         until(30, "the core's conflict copy on both devices", || !full_copies(&s.a.h, &s.id).is_empty() && !copy_items(&s.b.h, &s.id).is_empty()).await;
 
         let l = host_start_and_rounds(&mut s).await;
-        assert_eq!(l.last, Some(trs_sync_net::LocalChange::Unchanged), "B wins: {b_wins}; settled: {:?}", l.copies);
+        assert_eq!(l.last, Some(seedwell_sync_net::LocalChange::Unchanged), "B wins: {b_wins}; settled: {:?}", l.copies);
         tokio::time::sleep(Duration::from_secs(1)).await;
         let copies = copy_items(&s.b.h, &s.id);
         assert_eq!(copies.len(), 1, "B wins: {b_wins}; one edit, one copy: {copies:?} (the host's reports returned {:?})", l.copies);
@@ -2446,8 +2482,8 @@ async fn the_hosts_anchor_is_kept_with_the_folder() {
     b.h.shutdown().await;
 }
 
-fn not_here_yet(e: &trs_sync_net::SyncError) -> bool {
-    matches!(e, trs_sync_net::SyncError::OnDemand(trs_sync_net::OnDemandError::NotHereYet, _))
+fn not_here_yet(e: &seedwell_sync_net::SyncError) -> bool {
+    matches!(e, seedwell_sync_net::SyncError::OnDemand(seedwell_sync_net::OnDemandError::NotHereYet, _))
 }
 
 /// A fetch says itself when it cannot get further (SPEC §7G.11): a file only an offline device has fails at once past
@@ -2483,7 +2519,7 @@ async fn a_fetch_only_an_offline_device_can_serve_fails_at_once_and_one_waits_wh
     let ha = crate::chat::start_at(state_a.path(), "Alpha", |_| {}).await;
     b.h.add_address(&id, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ha.port())).unwrap();
     match fetch.await.unwrap().unwrap() {
-        trs_sync_net::service::FetchWait::Here(f) => assert_eq!(read(&f.path).as_deref(), Some(&b"alpha"[..])),
+        seedwell_sync_net::service::FetchWait::Here(f) => assert_eq!(read(&f.path).as_deref(), Some(&b"alpha"[..])),
         other => panic!("not here: {other:?}"),
     }
     ha.shutdown().await;
@@ -2509,15 +2545,15 @@ async fn a_fetch_from_a_connected_device_says_it_is_coming_until_it_is_here() {
     loop {
         assert!(Instant::now() < end, "not here after 60 s");
         match b.h.od_fetch_wait(&id, "big.bin", Duration::from_millis(100)).await.unwrap() {
-            trs_sync_net::service::FetchWait::Here(f) => {
+            seedwell_sync_net::service::FetchWait::Here(f) => {
                 assert_eq!(read(&f.path).map(|d| d.len()), Some(2_000_000));
                 break;
             }
-            trs_sync_net::service::FetchWait::Coming { from, .. } if from.is_empty() => {
+            seedwell_sync_net::service::FetchWait::Coming { from, .. } if from.is_empty() => {
                 assert_eq!(named, 0, "once named, always named while it comes");
                 unnamed += 1;
             }
-            trs_sync_net::service::FetchWait::Coming { from, .. } => {
+            seedwell_sync_net::service::FetchWait::Coming { from, .. } => {
                 assert_eq!(from, ["Alpha"]);
                 named += 1;
             }
@@ -2570,7 +2606,7 @@ async fn slow_pair(len: usize, down_kib: u32) -> (Device, Device, tempfile::Temp
     let st = a.h.add_folder(fa.path().to_path_buf()).await.unwrap();
     let id: FolderId = st.id.parse().unwrap();
     b.h.test_limit_lan(true);
-    b.h.set_settings(trs_sync_net::config::Settings { down_kib, ..b.h.settings() }).unwrap();
+    b.h.set_settings(seedwell_sync_net::config::Settings { down_kib, ..b.h.settings() }).unwrap();
     let link = a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link;
     b.h.join_folder_on_demand(&link, fb.path().join("Shared")).await.unwrap();
     b.h.add_address(&id, addr(&a)).unwrap();
@@ -2600,12 +2636,12 @@ async fn a_slow_fetch_answers_each_wait_in_time_and_shows_how_far_it_is() {
         let p = b.h.od_progress(&id, "slow.bin").unwrap();
         assert_eq!(p.total, LEN as u64);
         match got {
-            trs_sync_net::service::FetchWait::Here(f) => {
+            seedwell_sync_net::service::FetchWait::Here(f) => {
                 assert!(p.here && p.done == LEN as u64, "{p:?}");
                 assert!(read(&f.path) == Some(data.clone()), "the file is whole and the same");
                 break;
             }
-            trs_sync_net::service::FetchWait::Coming { .. } => done.push(p.done),
+            seedwell_sync_net::service::FetchWait::Coming { .. } => done.push(p.done),
         }
     }
     assert!(done.windows(2).all(|w| w[0] <= w[1]), "never goes back: {done:?}");
@@ -2641,7 +2677,7 @@ async fn a_fetch_while_the_core_is_busy_answers_in_time_and_asks_once_it_is_free
     // further.
     b.h.test_fetch_times(Duration::ZERO, Duration::from_millis(500));
     let wait = Duration::from_millis(300);
-    let coming = |r: &trs_sync_net::service::FetchWait| matches!(r, trs_sync_net::service::FetchWait::Coming { .. });
+    let coming = |r: &seedwell_sync_net::service::FetchWait| matches!(r, seedwell_sync_net::service::FetchWait::Coming { .. });
 
     // Cancelled while its request waits for the core: never asked for.
     b.h.test_lock_core(&id, Duration::from_secs(2));
@@ -2725,7 +2761,7 @@ async fn a_save_by_replace_reaches_the_other_device_as_one_edit() {
     let src = fb.path().join("saved.txt");
     std::fs::write(&src, b"alpha, saved by replace").unwrap();
     let temp = b.h.od_write(&id, "docs/~WRD0001.tmp", &src, None).await;
-    assert!(matches!(temp, Err(trs_sync_net::SyncError::OnDemand(trs_sync_net::OnDemandError::Ignored, _))), "{temp:?}");
+    assert!(matches!(temp, Err(seedwell_sync_net::SyncError::OnDemand(seedwell_sync_net::OnDemandError::Ignored, _))), "{temp:?}");
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert_eq!(b.h.od_write(&id, "docs/a.txt", &src, None).await.unwrap(), "docs/a.txt");
     let now = b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap();
@@ -2752,19 +2788,19 @@ async fn words_save_and_a_plain_delete_reach_the_other_device_as_they_should() {
     let doc = b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap();
     let watch = Watch::new(fa.path().join("docs/a.txt"));
     let aside = b.h.od_rename(&id, "docs/a.txt", "docs/~WRL0001.tmp").await;
-    assert!(matches!(&aside, Err(trs_sync_net::SyncError::OnDemand(trs_sync_net::OnDemandError::Ignored, _))), "{aside:?}");
+    assert!(matches!(&aside, Err(seedwell_sync_net::SyncError::OnDemand(seedwell_sync_net::OnDemandError::Ignored, _))), "{aside:?}");
     assert!(b.h.od_item_at(&id, "docs/a.txt").unwrap().is_none(), "it left the folder");
     // An online-only file renamed so: nothing changes until its content is here.
     let far = b.h.od_rename(&id, "docs/old/c.txt", "docs/old/~c.tmp").await;
-    assert!(matches!(&far, Err(trs_sync_net::SyncError::OnDemand(trs_sync_net::OnDemandError::IgnoredNotHere, _))), "{far:?}");
+    assert!(matches!(&far, Err(seedwell_sync_net::SyncError::OnDemand(seedwell_sync_net::OnDemandError::IgnoredNotHere, _))), "{far:?}");
     assert!(b.h.od_item_at(&id, "docs/old/c.txt").unwrap().is_some());
     tokio::time::sleep(Duration::from_millis(600)).await;
     let src = fb.path().join("saved.txt");
     std::fs::write(&src, b"alpha, saved by Word").unwrap();
     assert_eq!(b.h.od_write(&id, "docs/a.txt", &src, None).await.unwrap(), "docs/a.txt");
     assert_eq!(b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap().id, doc.id);
-    let gone = b.h.od_delete_seen(&id, "docs/a.txt", Some(trs_sync_net::DeleteSeen::File(doc.content_version.clone()))).await.unwrap();
-    assert_eq!(gone, trs_sync::ondemand::Deleted::Deleted { items: 0, failed: vec![] }, "the file that left, let go of");
+    let gone = b.h.od_delete_seen(&id, "docs/a.txt", Some(seedwell_sync_net::DeleteSeen::File(doc.content_version.clone()))).await.unwrap();
+    assert_eq!(gone, seedwell_sync::ondemand::Deleted::Deleted { items: 0, failed: vec![] }, "the file that left, let go of");
     until(30, "A has the saved version", || read(&fa.path().join("docs/a.txt")).as_deref() == Some(&b"alpha, saved by Word"[..])).await;
     assert!(!watch.missed(), "A's file was never deleted meanwhile");
     drop(watch);
@@ -2775,7 +2811,7 @@ async fn words_save_and_a_plain_delete_reach_the_other_device_as_they_should() {
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(fa.path().join("big.bin").exists(), "not yet: it may still be a save");
     until(30, "A deleted big.bin", || !fa.path().join("big.bin").exists()).await;
-    assert!(t0.elapsed() >= trs_sync::ondemand::REPLACE_WINDOW, "{:?}", t0.elapsed());
+    assert!(t0.elapsed() >= seedwell_sync::ondemand::REPLACE_WINDOW, "{:?}", t0.elapsed());
     a.h.shutdown().await;
     b.h.shutdown().await;
 }
@@ -2833,7 +2869,7 @@ async fn a_big_document_saved_by_replace_reaches_the_other_device_as_one_edit() 
 async fn a_save_by_replace_slower_than_the_window_still_reaches_the_other_device_as_one_edit() {
     let (a, b, fa, fb, id) = pair().await;
     let window = Duration::from_millis(1000);
-    b.h.test_replace_window(&id, window, trs_sync::ondemand::WRITE_HOLD_MAX);
+    b.h.test_replace_window(&id, window, seedwell_sync::ondemand::WRITE_HOLD_MAX);
     let doc = b.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap();
     let watch = Watch::new(fa.path().join("docs/a.txt"));
     b.h.od_delete(&id, "docs/a.txt").await.unwrap();
@@ -2903,10 +2939,10 @@ async fn a_folder_deleted_elsewhere_that_the_host_kept_stays_out_until_a_synced_
     let hb = device_at("Beta", b._state.path()).await;
     hb.add_address(&id, addr(&a)).unwrap();
     until(30, "B runs again", || hb.od_item_at(&id, "docs/a.txt").ok().flatten().is_some()).await;
-    let kept = trs_sync::pull::kept_words("docs/old/sub/~keep.tmp");
+    let kept = seedwell_sync::pull::kept_words("docs/old/sub/~keep.tmp");
     for _ in 0..2 {
         let e = hb.od_mkdir(&id, "docs/old").await.unwrap_err();
-        assert!(matches!(&e, trs_sync_net::SyncError::OnDemand(trs_sync_net::OnDemandError::Ignored, w) if w == &kept), "{e}");
+        assert!(matches!(&e, seedwell_sync_net::SyncError::OnDemand(seedwell_sync_net::OnDemandError::Ignored, w) if w == &kept), "{e}");
     }
     assert!(hb.od_item_at(&id, "docs/old").unwrap().is_none(), "not recorded");
     assert_eq!(issues_at(&hb, "docs/old"), std::slice::from_ref(&kept), "the full folder's issue, once");
@@ -2923,7 +2959,7 @@ async fn a_folder_deleted_elsewhere_that_the_host_kept_stays_out_until_a_synced_
     hb.od_mkdir(&id, "docs/old").await.unwrap();
     // What is in it: the folder below still holds only the temp file, so it stays kept, with the issue now.
     let e = hb.od_mkdir(&id, "docs/old/sub").await.unwrap_err();
-    assert!(matches!(&e, trs_sync_net::SyncError::OnDemand(trs_sync_net::OnDemandError::Ignored, w) if w == &kept), "{e}");
+    assert!(matches!(&e, seedwell_sync_net::SyncError::OnDemand(seedwell_sync_net::OnDemandError::Ignored, w) if w == &kept), "{e}");
     assert_eq!(issues_at(&hb, "docs/old/sub"), std::slice::from_ref(&kept));
     assert_eq!(hb.od_write(&id, "docs/old/new.txt", &new, None).await.unwrap(), "docs/old/new.txt");
     let item = hb.od_item_at(&id, "docs/old/new.txt").unwrap().unwrap();
@@ -2990,7 +3026,7 @@ async fn a_kept_folder_stays_out_empty_and_a_new_one_at_a_deleted_name_is_synced
     a.h.rescan(&id).unwrap();
     until(30, "B took the deletes", || b.h.od_item_at(&id, "left").ok().flatten().is_none() && b.h.od_item_at(&id, "made").ok().flatten().is_none()).await;
     std::fs::remove_dir(place.join("made")).unwrap();
-    let kept = trs_sync::pull::kept_words("left/~keep.tmp");
+    let kept = seedwell_sync::pull::kept_words("left/~keep.tmp");
     assert!(b.h.od_mkdir(&id, "left").await.is_err());
     assert_eq!(issues_at(&b.h, "left"), std::slice::from_ref(&kept));
 
@@ -2999,7 +3035,7 @@ async fn a_kept_folder_stays_out_empty_and_a_new_one_at_a_deleted_name_is_synced
     until(10, "the issue is over", || issues_at(&b.h, "left").is_empty()).await;
     // Offered again, empty: still the folder that was there when the delete came, so it stays out, with no issue.
     let e = b.h.od_mkdir(&id, "left").await.unwrap_err();
-    assert!(matches!(&e, trs_sync_net::SyncError::OnDemand(trs_sync_net::OnDemandError::Ignored, _)), "{e}");
+    assert!(matches!(&e, seedwell_sync_net::SyncError::OnDemand(seedwell_sync_net::OnDemandError::Ignored, _)), "{e}");
     assert!(issues_at(&b.h, "left").is_empty());
 
     // Later the user makes an empty "made" again: new, so recorded, and it reaches A.
@@ -3043,9 +3079,9 @@ async fn a_host_file_changed_during_its_copy_is_never_recorded_as_its_content() 
             std::fs::write(&f, b"second save, longer").unwrap();
         }
     };
-    trs_platform::fs::test_while_copying(&src, Some(Box::new(hook)));
+    seedwell_platform::fs::test_while_copying(&src, Some(Box::new(hook)));
     let written = d.h.od_write(&id, "docs/a.txt", &src, Some(&base)).await;
-    trs_platform::fs::test_while_copying(&src, None);
+    seedwell_platform::fs::test_while_copying(&src, None);
     assert_eq!(written.unwrap(), "docs/a.txt");
     assert_eq!(*seen.lock().unwrap(), [0, 1], "copied a second time");
     assert_eq!(read(&d.h.od_cache_path(&id, "docs/a.txt").unwrap()).as_deref(), Some(&b"second save, longer"[..]));
@@ -3054,11 +3090,11 @@ async fn a_host_file_changed_during_its_copy_is_never_recorded_as_its_content() 
 
     // Changed during every copy: refused for now (the host offers it again), and nothing is recorded.
     let f = src.clone();
-    trs_platform::fs::test_while_copying(&src, Some(Box::new(move |n| std::fs::write(&f, vec![b'x'; 30 + n as usize]).unwrap())));
+    seedwell_platform::fs::test_while_copying(&src, Some(Box::new(move |n| std::fs::write(&f, vec![b'x'; 30 + n as usize]).unwrap())));
     let refused = d.h.od_write(&id, "docs/a.txt", &src, Some(&item.content_version)).await;
-    trs_platform::fs::test_while_copying(&src, None);
+    seedwell_platform::fs::test_while_copying(&src, None);
     match refused {
-        Err(trs_sync_net::SyncError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::ResourceBusy, "{e}"),
+        Err(seedwell_sync_net::SyncError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::ResourceBusy, "{e}"),
         other => panic!("not refused for now: {other:?}"),
     }
     let after = d.h.od_item_at(&id, "docs/a.txt").unwrap().unwrap();
@@ -3085,7 +3121,7 @@ async fn a_program_saving_a_file_is_never_refused_while_the_core_copies_it() {
             match std::fs::OpenOptions::new().write(true).open(&f) {
                 // The same bytes again: the opens are what is tested.
                 Ok(file) => {
-                    trs_platform::fs::write_all_at(&file, &[3u8; 4096], 0).unwrap();
+                    seedwell_platform::fs::write_all_at(&file, &[3u8; 4096], 0).unwrap();
                     saves += 1;
                 }
                 Err(e) => refused.push(e.to_string()),
@@ -3097,7 +3133,7 @@ async fn a_program_saving_a_file_is_never_refused_while_the_core_copies_it() {
         // A copy that overlapped a save may be refused for now; never with another error.
         match d.h.od_write(&id, &format!("adopted/{n}.bin"), &src, None).await {
             Ok(_) => {}
-            Err(trs_sync_net::SyncError::Io(e)) if e.kind() == std::io::ErrorKind::ResourceBusy => {}
+            Err(seedwell_sync_net::SyncError::Io(e)) if e.kind() == std::io::ErrorKind::ResourceBusy => {}
             Err(e) => panic!("adopting {n}: {e}"),
         }
     }

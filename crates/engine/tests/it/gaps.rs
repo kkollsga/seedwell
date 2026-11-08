@@ -4,7 +4,7 @@ use crate::common;
 use std::time::{Duration, Instant};
 
 use common::*;
-use trs_engine::*;
+use seedwell_engine::*;
 
 async fn seeder_of(t: &TestTorrent, rate: Option<u64>) -> Node {
     let n = node(|c| c.up_limit = rate).await;
@@ -125,7 +125,7 @@ async fn reannounce_reports_each_tracker_and_the_gate() {
     assert!(!r[0].url_redacted.contains("127.0.0.1:0"), "{}", r[0].url_redacted);
     assert!(!r[0].sent, "{r:?}");
     let until = r[0].not_before_ms.expect("a time");
-    assert!(until > trs_engine::util::unix_ms() + 1_000_000, "about 30 minutes away: {until}");
+    assert!(until > seedwell_engine::util::unix_ms() + 1_000_000, "about 30 minutes away: {until}");
     // Unknown torrents and a disabled tracker give an empty answer, not an error.
     assert!(n.h.reannounce(&[[9; 20]]).await.unwrap().is_empty());
 }

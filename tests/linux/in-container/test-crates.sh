@@ -3,11 +3,11 @@
 # Env: CRATES (space separated, default below), TEST_ARGS (extra args after --).
 set -u
 cd /src || exit 99
-export HOME=/tmp/home-$$ TRS_FORBID_REAL_HOME=1 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4} CARGO_TARGET_DIR=/cache/target CARGO_NET_RETRY=5
+export HOME=/tmp/home-$$ SEEDWELL_FORBID_REAL_HOME=1 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4} CARGO_TARGET_DIR=/cache/target CARGO_NET_RETRY=5
 mkdir -p "$HOME" /registry
 # keep the crate registry in the cache volume: a re-run must not download the dependency tree again
 rm -rf /opt/cargo/registry; ln -sfn /registry /opt/cargo/registry
-CRATES=${CRATES:-"trs-bencode trs-metainfo trs-wire trs-tracker trs-storage trs-dht trs-utp trs-http trs-state trs-classify trs-engine trs-control trs-cli trs-portmap"}
+CRATES=${CRATES:-"seedwell-bencode seedwell-metainfo seedwell-wire seedwell-tracker seedwell-storage seedwell-dht seedwell-utp seedwell-http seedwell-state seedwell-classify seedwell-engine seedwell-control seedwell-cli seedwell-portmap"}
 echo "== env: $(. /etc/os-release; echo "$PRETTY_NAME") | $(uname -m) | $(rustc -vV | sed -n '1p;5p' | tr '\n' ' ') | libc: $(ldd --version 2>&1 | head -1)"
 for c in $CRATES; do
   start=$(date +%s)

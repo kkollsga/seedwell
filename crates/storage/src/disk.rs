@@ -477,7 +477,7 @@ impl DiskIo {
                     limit: cfg.write_cache_bytes,
                 },
                 io: Pool::new(
-                    "trs-io",
+                    "seedwell-io",
                     Some(depth),
                     io_n,
                     idle,
@@ -487,7 +487,7 @@ impl DiskIo {
                     }),
                 ),
                 hash: Pool::new(
-                    "trs-hash",
+                    "seedwell-hash",
                     None,
                     hash_n,
                     idle,
@@ -497,7 +497,7 @@ impl DiskIo {
                     }),
                 ),
                 maint: Pool::new(
-                    "trs-maint",
+                    "seedwell-maint",
                     Some(256),
                     maint_n,
                     idle,
@@ -1009,7 +1009,7 @@ impl TorrentShared {
                 continue;
             }
             let f = self.file_for_read(layout, s.file)?;
-            trs_platform::fs::read_exact_at(&f, dst, s.file_offset)
+            seedwell_platform::fs::read_exact_at(&f, dst, s.file_offset)
                 .map_err(|e| StorageError::from_io(s.file, e))?;
         }
         Ok(())
@@ -1025,7 +1025,7 @@ impl TorrentShared {
                 continue;
             }
             let f = self.file_for_write(layout, s.file)?;
-            trs_platform::fs::write_all_at(&f, &data[s.data_offset..s.data_offset + s.len], s.file_offset)
+            seedwell_platform::fs::write_all_at(&f, &data[s.data_offset..s.data_offset + s.len], s.file_offset)
                 .map_err(|e| StorageError::from_io(s.file, e))?;
         }
         Ok(())
@@ -1573,7 +1573,7 @@ impl TorrentHandle {
                     continue;
                 }
                 let (p, _) = t.current_path(&layout, i);
-                match trs_platform::fs::sync_file(&p) {
+                match seedwell_platform::fs::sync_file(&p) {
                     Ok(()) => {}
                     Err(e) if is_not_found(&e) => {}
                     Err(e) => return Err(StorageError::from_io(i, e)),

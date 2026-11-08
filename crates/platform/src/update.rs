@@ -1,6 +1,6 @@
 //! What an app update looks like on this system: the release's installer and zip, this system's entry in
 //! `latest.json`, and the command that runs the installer. The rules of when to check and install are the core's
-//! (`trs-ffi`'s `updates.rs`); this is only the part that differs per system.
+//! (`seedwell-ffi`'s `updates.rs`); this is only the part that differs per system.
 
 /// This system's installer among the release's assets (it downloads, checks and installs the zip, then reopens
 /// the app).
@@ -27,10 +27,10 @@ pub const MINIMUM_SYSTEM_KEY: &str = "minimum_macos";
 #[cfg(windows)]
 pub const MINIMUM_SYSTEM_KEY: &str = "minimum_windows";
 
-/// This system's name among the builds of a watched folder's signed `build.json` (`trs-buildsig`).
+/// This system's name among the builds of a watched folder's signed `build.json` (`seedwell-buildsig`).
 #[cfg(not(windows))]
 pub const BUILD_SYSTEM: &str = "macos";
-/// This system's name among the builds of a watched folder's signed `build.json` (`trs-buildsig`).
+/// This system's name among the builds of a watched folder's signed `build.json` (`seedwell-buildsig`).
 #[cfg(windows)]
 pub const BUILD_SYSTEM: &str = "windows";
 
@@ -108,6 +108,24 @@ pub fn local_installer_command(script: &str, zip: &str, sha256: &str, developer_
 #[cfg(not(windows))]
 pub fn rollback_command(script: &str, i: &Install) -> Command {
     Command { argv: ["/bin/bash", script, "--rollback"].map(str::to_owned).to_vec(), env: i.env() }
+}
+
+/// The command that quits the app running from the install folder and opens it again with the relaunch arguments
+/// (`seedwell restart`), with the installer `script` (the app's own) and the quit and reopen every install does; it
+/// replaces nothing. `pid`: the app's process, the one quit (the script waits a second first, so the app's answer
+/// goes out before it quits).
+#[cfg(not(windows))]
+pub fn restart_command(script: &str, pid: u32, i: &Install) -> Command {
+    Command { argv: ["/bin/bash", script, "--restart", "--pid", &pid.to_string()].map(str::to_owned).to_vec(), env: i.env() }
+}
+
+/// The command that quits the app running from the install folder and opens it again as it was started
+/// (`seedwell restart`), with the installer `script` (the app's own) and the quit and reopen every install does; it
+/// replaces nothing, and leaves the other programs of the folder running (the CLI that asked waits for the app).
+/// `pid`: the app's process, the one quit (the script waits a second first, so the app's answer goes out first).
+#[cfg(windows)]
+pub fn restart_command(script: &str, pid: u32, i: &Install) -> Command {
+    powershell(&["-File", script, "-Restart", "-AppPid", &pid.to_string()], i)
 }
 
 /// The command that runs the release's `installer_url` for `version` (`None`: the latest) from the releases of
@@ -200,7 +218,7 @@ mod tests {
         let c = installer_command("https://h/i", Some("1.2.3"), "https://h", &i);
         let script_at = c.argv.iter().position(|a| a.contains("SEEDWELL") || a.contains("curl")).unwrap_or(2);
         assert!(!c.argv[script_at].contains(tricky));
-        for c in [c, local_installer_command(tricky, tricky, "ab", true, &i), rollback_command(tricky, &i)] {
+        for c in [c, local_installer_command(tricky, tricky, "ab", true, &i), rollback_command(tricky, &i), restart_command(tricky, 42, &i)] {
             // A script file is an argument, never script text; the places come in the environment.
             assert!(c.argv.iter().all(|a| a == tricky || !a.contains("rm -rf")), "{c:?}");
             let var = |k: &str| c.env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());

@@ -3,7 +3,7 @@
 
 Each check below is a failure Windows CI found in 0.1.15 or 0.1.16. A test must expect what this system shows:
 - `tilde`: `~/…` (or `~`) expected where the core writes a home-folder path it made. The core writes `~/…` on Unix
-  systems and the full path on Windows (trs_platform::dirs::shown); expect each system's form (the ffi chooser
+  systems and the full path on Windows (seedwell_platform::dirs::shown); expect each system's form (the ffi chooser
   tests' `at_home`). A `~/…` the test itself fed in (a rule's or a fixture's folder) comes back as it went in.
 - `this-mac`: "This Mac", "Show in Finder", "Move to Trash" expected: `computer!()`, `file_manager!()`, `trash!()`.
 - `joined`: `.join("a/b")` turned into a string and compared. Path::join writes the system's separator (`a\\b` on
@@ -16,7 +16,7 @@ Each check below is a failure Windows CI found in 0.1.15 or 0.1.16. A test must 
   dead code on Windows, which fails clippy's `-D warnings` there.
 - `home-env` (0.1.18; code that is not a test, the mock included): `$HOME` read directly. GitHub's Windows runner and a
   Windows app have none (a mock's `/Users/me` fallback has no drive there, so it is no absolute path): use
-  `trs_platform::dirs::home()`, which reads `%USERPROFILE%` on Windows. The platform crate itself is where that is
+  `seedwell_platform::dirs::home()`, which reads `%USERPROFILE%` on Windows. The platform crate itself is where that is
   decided.
 
 Allowed: code under `#[cfg(unix)]`, `#[cfg(not(windows))]`, `#[cfg(target_os = "macos")]` and the like,
@@ -436,7 +436,7 @@ def home_env(tree):
             pf.scan_cfg(*tree.flags[f])
         for m in HOME_ENV.finditer(pf.code):
             if not pf.test[m.start()] and not pf.guard[m.start()]:
-                hits.append((f, pf.line(m.start()), "home-env", "$HOME read directly: Windows has none; use trs_platform::dirs::home()"))
+                hits.append((f, pf.line(m.start()), "home-env", "$HOME read directly: Windows has none; use seedwell_platform::dirs::home()"))
     return hits
 
 

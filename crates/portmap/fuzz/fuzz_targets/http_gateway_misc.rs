@@ -2,7 +2,7 @@
 //! HTTP response parsing, URL handling and the routing-tool output parsers.
 
 use libfuzzer_sys::fuzz_target;
-use trs_portmap::{gateway, http};
+use seedwell_portmap::{gateway, http};
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(r) = http::parse_response(data, 64 * 1024) {

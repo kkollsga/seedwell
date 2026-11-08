@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use trs_fswatch::{Backend, Hint, RawEvent, RescanReason, watch};
+use seedwell_fswatch::{Backend, Hint, RawEvent, RescanReason, watch};
 
 use crate::common::*;
 
@@ -71,11 +71,11 @@ fn an_overflow_is_a_full_rescan() {
     let (_t, r) = root();
     let w = watch(&r, opts(Backend::Auto)).expect("watch");
     std::fs::write(r.join("first"), b"x").expect("write");
-    trs_fswatch::debug::hold_reads(true);
+    seedwell_fswatch::debug::hold_reads(true);
     wait_for(&w, |e| path_event(e, "first").is_some());
     for i in 0..5000 {
         std::fs::write(r.join(format!("burst-{i:05}-with-a-long-enough-name.txt")), b"x").expect("write");
     }
-    trs_fswatch::debug::hold_reads(false);
+    seedwell_fswatch::debug::hold_reads(false);
     wait_for(&w, |e| e.iter().any(|ev| matches!(ev, RawEvent::Rescan { rel: None, reason: RescanReason::Dropped })));
 }

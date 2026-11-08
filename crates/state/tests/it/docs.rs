@@ -7,10 +7,10 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use common::{TempDir, abs, win};
-use trs_state::doc::{BACKUPS_KEEP, DocStore, Document, LoadSource, PollEvent, Poller, spawn_watcher};
-use trs_state::rules::{Priority, Rule, RuleSet};
-use trs_state::trackers::{Profile, TrackerProfiles};
-use trs_state::{Config, DocError};
+use seedwell_state::doc::{BACKUPS_KEEP, DocStore, Document, LoadSource, PollEvent, Poller, spawn_watcher};
+use seedwell_state::rules::{Priority, Rule, RuleSet};
+use seedwell_state::trackers::{Profile, TrackerProfiles};
+use seedwell_state::{Config, DocError};
 
 fn names(dir: &std::path::Path) -> Vec<String> {
     let mut v: Vec<String> = fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
@@ -103,7 +103,7 @@ fn invalid_edit_falls_back_to_last_known_good_and_reports() {
 /// the file is not written.
 #[test]
 fn a_bad_value_takes_the_last_good_value_from_the_backup_and_everything_else_is_kept() {
-    use trs_state::config::{AfterAdd, Encryption};
+    use seedwell_state::config::{AfterAdd, Encryption};
     let dir = TempDir::new("salvage");
     let store = DocStore::<Config>::new(dir.path());
     let mut c = Config::default();
@@ -120,7 +120,7 @@ fn a_bad_value_takes_the_last_good_value_from_the_backup_and_everything_else_is_
     let l = store.load();
     assert_eq!(l.source, LoadSource::Repaired);
     assert!(l.error.is_none(), "{:?}", l.error);
-    assert_eq!(l.value.agents.permission, trs_state::config::Permission::Full);
+    assert_eq!(l.value.agents.permission, seedwell_state::config::Permission::Full);
     assert!(!l.value.network.upnp);
     assert_eq!(l.value.folders.torrent_after_add, AfterAdd::Leave);
     assert_eq!(l.value.network.listen_port, 40_000, "the last good file's, not the default");
@@ -147,7 +147,7 @@ fn a_bad_value_takes_the_last_good_value_from_the_backup_and_everything_else_is_
 /// the choice that leaves them alone, not its default; any other takes its default.
 #[test]
 fn without_a_backup_a_file_setting_takes_the_choice_that_leaves_files_alone() {
-    use trs_state::config::AfterAdd;
+    use seedwell_state::config::AfterAdd;
     let dir = TempDir::new("salvage-safe");
     let store = DocStore::<Config>::new(dir.path());
     fs::write(store.path(), "[folders]\ntorrent_after_add = \"keep\"\nby_status = \"yes\"\n[network]\nlisten_port = 80\n").unwrap();
@@ -168,7 +168,7 @@ fn without_a_backup_a_file_setting_takes_the_choice_that_leaves_files_alone() {
 /// the Trash for .torrent files and agents off).
 #[test]
 fn archive_without_a_folder_leaves_the_torrent_files_alone_and_keeps_the_rest() {
-    use trs_state::config::{AfterAdd, Permission};
+    use seedwell_state::config::{AfterAdd, Permission};
     for folder in ["", "archive_dir = \"relative/path\"\n"] {
         let dir = TempDir::new("salvage-archive");
         let store = DocStore::<Config>::new(dir.path());
@@ -192,7 +192,7 @@ fn archive_without_a_folder_leaves_the_torrent_files_alone_and_keeps_the_rest() 
 /// gives way to the next choice: the one that leaves files alone, then the default.
 #[test]
 fn a_backup_value_is_used_only_when_it_is_there_and_passes_the_checks() {
-    use trs_state::config::AfterAdd;
+    use seedwell_state::config::AfterAdd;
     let dir = TempDir::new("salvage-partial");
     let store = DocStore::<Config>::new(dir.path());
     // A hand-written good file as the last good one: it has no torrent_after_add.
@@ -470,14 +470,14 @@ fn a_version_1_config_is_migrated_on_load_with_a_backup() {
     let l = store.load();
     assert_eq!(l.source, LoadSource::File);
     assert!(l.error.is_none(), "{:?}", l.error);
-    assert_eq!(l.value.version, trs_state::config::CONFIG_VERSION);
+    assert_eq!(l.value.version, seedwell_state::config::CONFIG_VERSION);
     assert_eq!(l.value.network.listen_port, 51413);
     assert_eq!(l.value.folders.download_dir, abs("/Volumes/Media/Done"));
     assert_eq!(l.value.transfers.large_torrent_gb, 50);
     assert!(l.value.folders.categories.is_empty());
     // The file on disk is now version 3 and the old text is in the backups.
     let text = fs::read_to_string(&path).unwrap();
-    assert!(text.contains(&format!("version = {}", trs_state::config::CONFIG_VERSION)), "{text}");
+    assert!(text.contains(&format!("version = {}", seedwell_state::config::CONFIG_VERSION)), "{text}");
     assert!(text.contains("listen_port = 51413"));
     assert_eq!(fs::read_to_string(dir.path().join("config.toml.bak")).unwrap(), v1);
     let backups = store.backups();
@@ -510,14 +510,14 @@ fn a_config_with_the_retired_seeding_folder_loads_and_is_rewritten_without_it() 
 
 #[test]
 fn a_version_1_state_database_is_upgraded_with_a_backup() {
-    use trs_state::Store;
+    use seedwell_state::Store;
     let dir = TempDir::new("migrate-db");
     // Build a database at schema 1 with the old schema description, then open it with this build.
-    static V1: trs_state::store::Schema = trs_state::store::Schema { current: 1, migrations: &[] };
+    static V1: seedwell_state::store::Schema = seedwell_state::store::Schema { current: 1, migrations: &[] };
     {
-        let opts = trs_state::OpenOptions { schema: &V1, ..trs_state::OpenOptions::default() };
+        let opts = seedwell_state::OpenOptions { schema: &V1, ..seedwell_state::OpenOptions::default() };
         let opened = Store::open_with(dir.path(), &opts).unwrap();
-        let mut rec = trs_state::TorrentRecord::new("seed", 10, 1);
+        let mut rec = seedwell_state::TorrentRecord::new("seed", 10, 1);
         rec.save_root = 0;
         opened.store.put_torrent([7; 20], &rec).unwrap();
         opened.store.close().unwrap();
@@ -542,7 +542,7 @@ fn watch_baselines_are_stamped_once_and_restamped_when_re_enabled() {
     assert_eq!(c.folders.watch[0].since, Some(1000));
     // A new entry gets "now"; the old one keeps its baseline.
     let prev = c.clone();
-    c.folders.watch.push(trs_state::config::WatchFolder { path: "~/Torrents".into(), ..Default::default() });
+    c.folders.watch.push(seedwell_state::config::WatchFolder { path: "~/Torrents".into(), ..Default::default() });
     assert!(c.stamp_watch_baselines(Some(&prev), 3000));
     assert_eq!((c.folders.watch[0].since, c.folders.watch[1].since), (Some(1000), Some(3000)));
     // An entry that was disabled and is switched on again starts a new baseline.
@@ -622,7 +622,7 @@ fn private_min_seed_defaults_to_ten_days_validates_and_a_v3_file_migrates_keepin
     assert_eq!((t.private_min_seed_secs, t.max_active_downloads, t.upload_limit), (864_000, 5, 123_456));
     assert_eq!(l.value.network.listen_port, 40_123);
     let text = fs::read_to_string(store.path()).unwrap();
-    assert!(text.contains(&format!("version = {}", trs_state::config::CONFIG_VERSION)) && text.contains("private_min_seed_secs = 864000"), "{text}");
+    assert!(text.contains(&format!("version = {}", seedwell_state::config::CONFIG_VERSION)) && text.contains("private_min_seed_secs = 864000"), "{text}");
     assert!(text.contains("future_option = \"x\"") && text.contains("[from_the_future]"), "{text}");
     assert!(text.contains("listen_port = 40123") && text.contains("upload_limit = 123456"), "{text}");
     assert!(!store.backups().is_empty() || dir.path().join("config.toml.bak").exists(), "the v3 file is kept as a backup");

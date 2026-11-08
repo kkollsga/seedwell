@@ -4,8 +4,8 @@ use crate::sim;
 
 use sim::{Sim, node_addr, sim_config};
 use std::net::SocketAddrV4;
-use trs_dht::rng::Rng;
-use trs_dht::{Event, Id};
+use seedwell_dht::rng::Rng;
+use seedwell_dht::{Event, Id};
 
 fn report(sim: &Sim, label: &str) {
     let mut lens: Vec<usize> = sim.nodes.iter().map(|n| n.table_len()).collect();

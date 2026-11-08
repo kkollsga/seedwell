@@ -8,7 +8,7 @@
 //! * **Writes** are batched. The engine collects changes, waits [`crate::EngineConfig::persist_debounce`]
 //!   and hands one [`Batch`] to a dedicated writer thread, so a slow commit never blocks the
 //!   runtime. A batch must be applied atomically.
-//! * **Tracker timing** goes through [`Store::timing_store`]: `trs-tracker` needs each `save` to
+//! * **Tracker timing** goes through [`Store::timing_store`]: `seedwell-tracker` needs each `save` to
 //!   be durable *before* it releases a request (at-most-once `completed`), so those writes are
 //!   synchronous and not batched.
 //!
@@ -19,7 +19,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use trs_tracker::store::{StoreError as TimingError, TimingKey, TimingRecord, TimingStore};
+use seedwell_tracker::store::{StoreError as TimingError, TimingKey, TimingRecord, TimingStore};
 
 use crate::api::{Category, SeedGoal, TorrentId};
 
@@ -175,10 +175,10 @@ pub enum DirectState {
     Failed(String),
 }
 
-/// A direct download record (SPEC 7D). The resumable bytes live in trs-http's `.part` + sidecar.
+/// A direct download record (SPEC 7D). The resumable bytes live in seedwell-http's `.part` + sidecar.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DirectRecord {
-    /// Id (also the trs-http download id, in hex).
+    /// Id (also the seedwell-http download id, in hex).
     pub id: TorrentId,
     /// Source URL.
     pub url: String,
@@ -340,7 +340,7 @@ pub trait Store: Send + Sync + 'static {
     fn load_dht_state(&self) -> Result<Option<Vec<u8>>, StoreError>;
     /// Apply a batch atomically.
     fn commit(&self, batch: Batch) -> Result<(), StoreError>;
-    /// The durable timing store for `trs-tracker`. Every `save` must be durable when it returns.
+    /// The durable timing store for `seedwell-tracker`. Every `save` must be durable when it returns.
     fn timing_store(&self) -> Box<dyn TimingStore + Send>;
     /// The per-file paths of a placed torrent, loaded when it wakes.
     fn load_placement(&self, _id: &TorrentId) -> Result<Option<Placement>, StoreError> {
@@ -363,7 +363,7 @@ pub trait Store: Send + Sync + 'static {
         Ok(vec![now_ms])
     }
     /// The run that called `record_launch` ended in an orderly shutdown: a relaunch is not a crash
-    /// (`trs_tracker::crash::LaunchLog`).
+    /// (`seedwell_tracker::crash::LaunchLog`).
     fn record_clean_exit(&self) -> Result<(), StoreError> {
         Ok(())
     }
@@ -379,7 +379,7 @@ struct MemInner {
     dht: Option<Vec<u8>>,
     commits: u64,
     fail_commits: bool,
-    launches: trs_tracker::crash::LaunchLog,
+    launches: seedwell_tracker::crash::LaunchLog,
     placements: HashMap<TorrentId, Placement>,
     directs: HashMap<TorrentId, DirectRecord>,
 }
@@ -584,7 +584,7 @@ impl Store for MemStore {
     }
 
     fn record_launch(&self, now_ms: u64) -> Result<Vec<u64>, StoreError> {
-        let counted = self.g().launches.record_launch(trs_tracker::Millis(now_ms));
+        let counted = self.g().launches.record_launch(seedwell_tracker::Millis(now_ms));
         Ok(counted.into_iter().map(|t| t.0).collect())
     }
 
@@ -609,7 +609,7 @@ impl Writer {
     pub(crate) fn start(store: Arc<dyn Store>) -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<WriterMsg>();
         let join = std::thread::Builder::new()
-            .name("trs-persist".into())
+            .name("seedwell-persist".into())
             .spawn(move || {
                 // A failed commit must not kill the thread; the engine re-sends state it still
                 // considers dirty with its next batch.

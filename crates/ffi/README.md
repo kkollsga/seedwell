@@ -1,13 +1,13 @@
-# trs-ffi
+# seedwell-ffi
 
 The UniFFI surface between the Rust core and the Swift app (`app/`). One object, `Core`, plus plain
 records. `unsafe` is not used here; the engine's `#![forbid(unsafe_code)]` stands behind it.
 
 ```
-Swift (AppKit/SwiftUI) ── Core ─┬─ RealBackend ── trs_engine::Host (own runtime) ── EngineHandle
-                                │       └─ trs_control::start_for_app  (agent socket + activity log)
+Swift (AppKit/SwiftUI) ── Core ─┬─ RealBackend ── seedwell_engine::Host (own runtime) ── EngineHandle
+                                │       └─ seedwell_control::start_for_app  (agent socket + activity log)
                                 ├─ MockBackend   (--mock: a simulated library for design work)
-                                └─ SettingsStore (config.toml / rules.toml / trackers.toml via trs-state)
+                                └─ SettingsStore (config.toml / rules.toml / trackers.toml via seedwell-state)
 ```
 
 ## Rules of the boundary
@@ -39,16 +39,16 @@ Swift (AppKit/SwiftUI) ── Core ─┬─ RealBackend ── trs_engine::Host
 | `choice` / `confirm_choice` / `cancel_choice` | `EngineHandle::choice` / `reopen_choice`, `confirm_choice`, `cancel_choice` |
 | `location_moves` / `move_torrents` / `move_to` | `EngineHandle::location_moves`, `move_torrents`, `move_to` |
 | `watch_backlog` | `EngineHandle::watch_backlog` |
-| `on_agent_activity`, `agent_activity` | `trs_control` activity sink and ring |
+| `on_agent_activity`, `agent_activity` | `seedwell_control` activity sink and ring |
 
-`network.allow_lan_trackers` is a real `trs-state` field (`config.toml`, `[network]`, off by default); the
+`network.allow_lan_trackers` is a real `seedwell-state` field (`config.toml`, `[network]`, off by default); the
 engine reads it at start. A file written when the key was still an unknown key reads the same.
 
 ## Display names, rule and goal text
 
 `TransferRow.display_name` (also on `TorrentInfo` and `ChoiceInfo`) is the clean title lists show ("Sintel (2010)",
 "Fallen Kingdom — S02"); `name` stays the raw release name for Get Info, tooltips and search (the Sharing filter and
-the app's search match both). The engine computes it **once per torrent** (`trs_classify::torrent_title`, file-aware:
+the app's search match both). The engine computes it **once per torrent** (`seedwell_classify::torrent_title`, file-aware:
 the classifier sees the file list and a single-file torrent takes its file's name when that says more), stores it with
 the torrent record, and recomputes it only when the category changes; `TorrentRow::display_title()` is what this layer
 passes on, so the CLI (`seedwell list`, `info`) show the same text (JSON `title` next to `name`). Torrents stored
@@ -63,5 +63,5 @@ stretches). `SeedingGoal::RuleDefault` calls `EngineHandle::clear_seed_goal` (th
 
 ## Tests
 
-`cargo test -p trs-ffi`: settings round trips and validation, rule/profile ids and passkey stripping, paging and
+`cargo test -p seedwell-ffi`: settings round trips and validation, rule/profile ids and passkey stripping, paging and
 filtering on the mock, rule preview counts, and a real `Core` that starts, snapshots and stops in a temp dir.

@@ -5,7 +5,7 @@
 //! A date in the user's own style ("1 Nov") stays the host's: the functions that show one take it already written
 //! (`…_day`), like the sync texts.
 
-use trs_control::display as d;
+use seedwell_control::display as d;
 
 use crate::sidebar::SidebarTag;
 use crate::sync::{SyncAgentAccess, SyncChannel, SyncRole, SyncTopic};
@@ -37,7 +37,7 @@ pub(crate) fn subtitle(channel: &SyncChannel) -> String {
     } else if channel.members > 1 {
         format!("{} of {} online", channel.online, channel.members)
     } else {
-        concat!("Only this ", trs_platform::computer!()).to_owned()
+        concat!("Only this ", seedwell_platform::computer!()).to_owned()
     }];
     if channel.muted {
         parts.push("Muted".into());
@@ -206,6 +206,7 @@ pub(crate) mod tests {
             problem: None,
             waiting: None,
             gone: Vec::new(),
+            group: None,
         }
     }
 

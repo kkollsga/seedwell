@@ -1,4 +1,4 @@
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
@@ -21,7 +21,7 @@ static class Player
             if (!t.IsCompletedSuccessfully)
             {
                 var e = t.Exception?.InnerException;
-                Note(app, e is CoreException ce ? TrsFfiMethods.CoreErrorMessage(ce) : e?.Message ?? "");
+                Note(app, e is CoreException ce ? SeedwellFfiMethods.CoreErrorMessage(ce) : e?.Message ?? "");
                 return;
             }
             switch (t.Result)
@@ -50,15 +50,8 @@ static class Player
         };
         AppLog.Write($"play-url: {exe} {string.Join(' ', args)}");
         if (Quiet.On) return;
-        try
-        {
-            var start = new System.Diagnostics.ProcessStartInfo(exe) { UseShellExecute = false };
-            foreach (var a in args) start.ArgumentList.Add(a);
-            System.Diagnostics.Process.Start(start);
-        }
-        catch (Exception e)
-        {
-            Note(app, TrsFfiMethods.PlayLaunchFailed(player, e.Message));
-        }
+        var start = new System.Diagnostics.ProcessStartInfo(exe) { UseShellExecute = false };
+        foreach (var a in args) start.ArgumentList.Add(a);
+        Shell.Start(start, why => app.Dispatch(() => Note(app, SeedwellFfiMethods.PlayLaunchFailed(player, why))));
     }
 }

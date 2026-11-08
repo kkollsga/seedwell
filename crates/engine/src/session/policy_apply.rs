@@ -4,8 +4,8 @@
 
 use std::sync::Arc;
 
-use trs_classify::Category;
-use trs_metainfo::{Magnet, Metainfo};
+use seedwell_classify::Category;
+use seedwell_metainfo::{Magnet, Metainfo};
 
 use super::cold::*;
 use super::{Session, SessionMsg};
@@ -19,7 +19,7 @@ use crate::torrent::{TorrentCmd, TorrentMsg};
 /// "Other private" when there is none).
 fn tracker_allows_pex(pol: &PolicyData, ids: &crate::policy::IdTable, hosts: &[Box<str>], c: &ColdTorrent) -> bool {
     let profile = ColdTorrent::opt(c.tracker_profile).and_then(|i| ids.get(i));
-    let domain = hosts.get(usize::from(c.host)).filter(|h| !h.is_empty()).map(|h| trs_state::trackers::registrable_domain(h));
+    let domain = hosts.get(usize::from(c.host)).filter(|h| !h.is_empty()).map(|h| seedwell_state::trackers::registrable_domain(h));
     pol.profiles.allows_pex(profile, domain.as_deref())
 }
 
@@ -219,14 +219,14 @@ impl Session {
 }
 
 /// The profiles match the same torrents: same ids in the same order with the same addresses.
-fn same_matching(a: &trs_state::TrackerProfiles, b: &trs_state::TrackerProfiles) -> bool {
+fn same_matching(a: &seedwell_state::TrackerProfiles, b: &seedwell_state::TrackerProfiles) -> bool {
     a.profiles.len() == b.profiles.len() && a.profiles.iter().zip(&b.profiles).all(|(x, y)| x.id == y.id && x.urls == y.urls)
 }
 
 /// Every profile sets the same folders as before (a profile that is new or gone counts as a change
 /// only when it sets folders).
-fn same_locations(a: &trs_state::TrackerProfiles, b: &trs_state::TrackerProfiles) -> bool {
-    let key = |t: &trs_state::TrackerProfiles| -> Vec<(String, trs_state::config::LocationOverride, trs_state::config::CategoryLocations)> {
+fn same_locations(a: &seedwell_state::TrackerProfiles, b: &seedwell_state::TrackerProfiles) -> bool {
+    let key = |t: &seedwell_state::TrackerProfiles| -> Vec<(String, seedwell_state::config::LocationOverride, seedwell_state::config::CategoryLocations)> {
         t.profiles
             .iter()
             .filter(|p| !p.location.is_empty() || !p.categories.is_empty())

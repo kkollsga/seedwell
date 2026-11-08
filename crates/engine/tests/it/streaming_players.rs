@@ -1,12 +1,12 @@
-//! Real players against the real engine: a seeder throttled to `TRS_RATE_MBS` (default 6) MB/s and
+//! Real players against the real engine: a seeder throttled to `SEEDWELL_RATE_MBS` (default 6) MB/s and
 //! a Seedwell leecher streaming a ~300 MB 1080p file from it over loopback HTTP. All `#[ignore]`:
 //! they need ffmpeg, swiftc (AVFoundation) and VLC, and print numbers for SPEC 7F.4.
 //!
-//!   TRS_FX_MP4=<movie.mp4> TRS_FX_MKV=<movie.mkv> TRS_VLC=<VLC binary> \
-//!   cargo test -p trs-engine --test streaming_players --release -- --ignored --nocapture --test-threads=1
+//!   SEEDWELL_FX_MP4=<movie.mp4> SEEDWELL_FX_MKV=<movie.mkv> SEEDWELL_VLC=<VLC binary> \
+//!   cargo test -p seedwell-engine --test streaming_players --release -- --ignored --nocapture --test-threads=1
 //!
 //! Budgets (SPEC 7F.4, healthy swarm at >= 5 MB/s): first frame <= 5 s, seek <= 4 s (pieces <= 8 MiB).
-//! `TRS_PIECE_MIB` (default 4) sets the piece size.
+//! `SEEDWELL_PIECE_MIB` (default 4) sets the piece size.
 use crate::common;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use common::*;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use trs_engine::*;
+use seedwell_engine::*;
 
 const FFMPEG: &str = "/opt/homebrew/bin/ffmpeg";
 
@@ -49,8 +49,8 @@ struct Lab {
 /// A fresh seeder (throttled) and a fresh leecher streaming `path`; `secs` is the media duration.
 async fn lab(path: &str, name: &str, secs: f64) -> Lab {
     let data = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
-    let piece_mib = env_u64("TRS_PIECE_MIB", 4);
-    let rate = env_u64("TRS_RATE_MBS", 6) * 1_000_000;
+    let piece_mib = env_u64("SEEDWELL_PIECE_MIB", 4);
+    let rate = env_u64("SEEDWELL_RATE_MBS", 6) * 1_000_000;
     let t = make_torrent(&TorrentSpec { name, piece_len: (piece_mib << 20) as u32, files: &[(name, 0)], private: false, announce: None, seed: 1 });
     // `make_torrent` fills random bytes; build the real one from the file instead.
     drop(t);
@@ -69,7 +69,7 @@ async fn lab(path: &str, name: &str, secs: f64) -> Lab {
 fn torrent_of(name: &str, piece_len: u32, data: Vec<u8>) -> TestTorrent {
     let mut pieces = Vec::new();
     for chunk in data.chunks(piece_len as usize) {
-        pieces.extend_from_slice(&trs_storage::hash::sha1(chunk));
+        pieces.extend_from_slice(&seedwell_storage::hash::sha1(chunk));
     }
     let mut info = Vec::new();
     info.extend(b"d6:lengthi");
@@ -82,7 +82,7 @@ fn torrent_of(name: &str, piece_len: u32, data: Vec<u8>) -> TestTorrent {
     info.extend(format!("{}:", pieces.len()).bytes());
     info.extend(&pieces);
     info.push(b'e');
-    let id = trs_storage::hash::sha1(&info);
+    let id = seedwell_storage::hash::sha1(&info);
     let mut bytes = b"d4:info".to_vec();
     bytes.extend(&info);
     bytes.push(b'e');
@@ -104,7 +104,7 @@ impl Lab {
             self.file_len >> 20,
             self.duration,
             self.piece_mib,
-            env_u64("TRS_RATE_MBS", 6)
+            env_u64("SEEDWELL_RATE_MBS", 6)
         );
     }
 
@@ -146,15 +146,15 @@ async fn libav_case(var: &str, name: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "needs ffmpeg and TRS_FX_MP4; prints latency numbers"]
+#[ignore = "needs ffmpeg and SEEDWELL_FX_MP4; prints latency numbers"]
 async fn real_engine_libavformat_mp4() {
-    libav_case("TRS_FX_MP4", "movie.mp4").await;
+    libav_case("SEEDWELL_FX_MP4", "movie.mp4").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "needs ffmpeg and TRS_FX_MKV; prints latency numbers"]
+#[ignore = "needs ffmpeg and SEEDWELL_FX_MKV; prints latency numbers"]
 async fn real_engine_libavformat_mkv() {
-    libav_case("TRS_FX_MKV", "movie.mkv").await;
+    libav_case("SEEDWELL_FX_MKV", "movie.mkv").await;
 }
 
 fn json_num(line: &str, key: &str) -> Option<f64> {
@@ -165,9 +165,9 @@ fn json_num(line: &str, key: &str) -> Option<f64> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "needs swiftc, AVFoundation and TRS_FX_MP4; prints latency numbers"]
+#[ignore = "needs swiftc, AVFoundation and SEEDWELL_FX_MP4; prints latency numbers"]
 async fn real_engine_avfoundation_mp4() {
-    let Some(path) = env("TRS_FX_MP4") else { return eprintln!("TRS_FX_MP4 not set: skipping") };
+    let Some(path) = env("SEEDWELL_FX_MP4") else { return eprintln!("SEEDWELL_FX_MP4 not set: skipping") };
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../stream/tests/players/avf.swift");
     let bin = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("avf-probe");
     let st = Command::new("swiftc").arg("-O").arg(&src).arg("-o").arg(&bin).status().await.expect("swiftc");
@@ -201,10 +201,10 @@ async fn real_engine_avfoundation_mp4() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "needs a VLC binary that runs on this CPU (TRS_VLC) and TRS_FX_MP4/TRS_FX_MKV; prints latency numbers"]
+#[ignore = "needs a VLC binary that runs on this CPU (SEEDWELL_VLC) and SEEDWELL_FX_MP4/SEEDWELL_FX_MKV; prints latency numbers"]
 async fn real_engine_vlc() {
-    let Some(vlc) = env("TRS_VLC") else { return eprintln!("TRS_VLC not set: skipping") };
-    for (var, name) in [("TRS_FX_MP4", "movie.mp4"), ("TRS_FX_MKV", "movie.mkv")] {
+    let Some(vlc) = env("SEEDWELL_VLC") else { return eprintln!("SEEDWELL_VLC not set: skipping") };
+    for (var, name) in [("SEEDWELL_FX_MP4", "movie.mp4"), ("SEEDWELL_FX_MKV", "movie.mkv")] {
         let Some(path) = env(var) else { continue };
         let lab = lab(&path, name, 600.0).await;
         lab.banner(&format!("VLC headless (rc interface), {name}"));

@@ -21,11 +21,23 @@ import UserNotifications
 ///     getinfo-window                  the open Get Info popover: whose row it shows, a child of the main window, has the keys
 ///     getinfo-card                    the open Get Info card's lines, trackers and buttons, as the core drew them up
 ///     policy | dock-quit [logout] | quit-menu | where   (Dock icon and Quit paths; policy: the Dock icon the app would have)
-///     settings <tab> | settings close | tracker-edit <id>
+///     settings <tab> | settings close | tracker-edit <id>   (Settings opened on that tab, as the menu's Settings… or a deep link)
+///     settings-tab <tab>              a click on the open Settings' tab bar (only the tab changes)
+///     rules-section rules|trackers    the Rules | Trackers control at the top of Settings › Rules
 ///     appearance dark | light | system
 ///     chooser <n> | chooser-category <name> | chooser-close | scroll top|bottom|<0...1> | settings-scroll top|bottom|<0...1>
 ///     menu open | menu close          the menu bar menu (a quiet run opens and refreshes it without showing it)
 ///     menu-sync | menu-sync edit|remove <name>   the Folder Sync submenu as drawn (`menu open` first); a row's Edit / Remove button
+///     sync-add open | choose <path> | devices all|this | ondemand on|off | start | cancel | state   the Add Folder window
+///                                     as its controls call it (Choose… takes <path> as the open panel's answer); each
+///                                     reports the window's state, and the open Edit and Share windows
+///     sync-edit <folder> | sync-share <folder> | sync-page <folder> | sync-close   a folder's Edit window, its Share
+///                                     window (the Edit window's Share…), its page in the main window; every sync window closed
+///     devices pair | join <link> | confirm | state   Settings › Devices: Pair a Device… (its link), Pair with a Link…,
+///                                     Pair on the device asking; two QA runs pair with each other (never the user's app)
+///     ui latency start | stop | report   the fine latency probe (QALatency): the main thread's beats every 10 ms, the
+///                                     core's reads every 50 ms; report: max (with its UI action), p99, beats over 50 and
+///                                     100 ms, the five worst, the renderer captures' share apart, the core's reads, JSON
 ///     menu-hover open|quit|none | menu-press open|quit | menu-titles | menu-subtitles | menu-files …   the open menu's
 ///                                     footer, titles, the rows' subtitles, file lists
 ///     contextmenu <name> [menubar] [playwith] | contextmenu close   a row's context menu, "open" for `shot … menu`
@@ -56,8 +68,13 @@ import UserNotifications
 ///     favorite <tracker> | unfavorite <tracker>   "Save as Favorite" / "Remove from Favorites" (confirmed) on a tracker by name or id
 ///     tracker-menu <tracker> | tracker-menu close   the sidebar item's context menu (Info, Rename, Remove from Favorites / Save as Favorite)
 ///     tracker-info <tracker> | tracker-info close   the tracker's Info page (the sidebar item stays selected) / back to its torrents
+///     chat-groups                     the sidebar's groups of channels as drawn: each one's title, open, unread, channels and menu
+///     chat-group <name> open|close    a click on a group's row (opens or closes it, as its disclosure)
+///     chat-channel <name> open|close  a click on a channel's disclosure triangle (its topics shown or not)
 ///     fav rename <tracker> | fav addurl | fav editurl <i> | fav removeurl <i> | fav type <text> | fav commit | fav cancel | fav remove-ask [tracker]
 ///                                     the inline edits (the field is focused; `fav type` fills it)
+///     ui overflow [win=…]             the views laid out past the window's left or right edge ("overflow: none"): a page wider
+///                                     than the window pushes all its content (sidebar, tab bar) aside
 ///     ui dump | ui state | ui ping [win=main|chooser|popover|info]   read the window (info: Get Info's popover): its accessibility tree, the selection and
 ///                                     chooser state, how fast the main run loop answers (see QAInspect)
 ///     alert <n>                       presses the n-th button of the open alert
@@ -105,6 +122,8 @@ import UserNotifications
     private var menuHover: String?
     /// Set while `wait` runs its command: the reports go here instead of `<file>.bench`.
     private var captured: [String]?
+    /// Settings › Devices' model, for `devices` (made on first use).
+    private var devicesModel: DevicesModel?
 
     init(path: String, app: AppDelegate) {
         self.path = path
@@ -177,6 +196,11 @@ import UserNotifications
                 w.contentView?.superview?.layoutSubtreeIfNeeded()
                 w.displayIfNeeded()
             }
+        }
+        // A disclosure that opens or closes animates its rows for a moment: a shot taken meanwhile drew the rows going
+        // and the rows coming in one place. Wait for them (at most 1.5 s).
+        for _ in 0..<75 where NSApp.windows.contains(where: { $0.isVisible && QAInspect.rowsAnimating(in: $0) }) {
+            try? await Task.sleep(for: .milliseconds(20))
         }
     }
 
@@ -280,10 +304,13 @@ import UserNotifications
             await wait(arg)
         case "windows":
             report(QAShots.listing(scene))
+        case "ui" where arg.hasPrefix("latency"):
+            latencyCommand(String(arg.dropFirst("latency".count)).trimmingCharacters(in: .whitespaces))
         case "ui":
             let (rest, win) = qaTarget(arg)
             if rest == "dump" { QAInspect.dump(window: win) { report($0) } }
             else if rest == "views" { QAInspect.views(window: win) { report($0) } }
+            else if rest == "overflow" { report(QAInspect.overflow(window: win)) }
             else if rest == "ping" { report(await withCheckedContinuation { done in QAInspect.ping { done.resume(returning: $0) } }) }
             else { report(qaUIState()) }
         case "net":
@@ -297,6 +324,33 @@ import UserNotifications
             else { commands.favorites.askRemove(t.id); commands.favorites.confirmRemoval() }
         case "tracker-menu":
             qaTrackerMenu(arg)
+        case "chat-groups":
+            // "chat-groups: Agents [sparkles] open, unread 0: QA Composer · menu Rename Group…|Icon [...]|-|Delete Group (red)"
+            guard let m = app.mainWindowController?.libraryModel else { return report("chat-groups: window closed") }
+            m.refresh()
+            let groups = m.view.sidebar.chats.groups.map { g in
+                let menu = Self.describe(SidebarMenus.groupEntries(g.id, model: m, commands: commands))
+                return "\(g.title) [\(g.iconLabel)] \(g.open ? "open" : "closed")\(g.holdsSelection ? " holding the channel shown" : ""), unread \(g.unread): \(g.channels.map(\.item.title).joined(separator: ", ")) · menu \(menu)"
+            }
+            // Two rows drawn in one place (a row lingering, a disclosure caught mid-way) fail a script's `rows ok` check.
+            let overlap = app.mainWindowController?.nsWindow.map { QAInspect.overlappingRows(in: $0) } ?? []
+            report("chat-groups: \(groups.isEmpty ? "none" : groups.joined(separator: " | ")) · plain \(m.view.sidebar.chats.channels.map(\.item.title).joined(separator: ", ")) · rows \(overlap.isEmpty ? "ok" : overlap.joined(separator: ", "))")
+        case "chat-group":
+            let words = arg.split(separator: " ").map(String.init)
+            guard let m = app.mainWindowController?.libraryModel, let open = words.last.map({ $0 == "open" }),
+                  let g = m.view.sidebar.chats.groups.first(where: { $0.title == words.dropLast().joined(separator: " ") }) else {
+                return report("chat-group: no group \(arg)")
+            }
+            m.setGroupOpen(g.id, open)
+        case "chat-channel":
+            // A click on a channel's disclosure triangle: its topics shown or not.
+            let words = arg.split(separator: " ").map(String.init)
+            let name = words.dropLast().joined(separator: " ")
+            guard let m = app.mainWindowController?.libraryModel, let open = words.last.map({ $0 == "open" }),
+                  let c = commands.core.chatChannels().first(where: { $0.name == name }) else {
+                return report("chat-channel: no channel \(arg)")
+            }
+            m.setChannelOpen(.chat(channelId: c.id, topicId: nil), open)
         case "tracker-info":
             if arg == "close" { app.mainWindowController?.libraryModel?.trackerInfo = false }
             else if let t = qaTracker(arg) { commands.showTrackerInfo(t.id) }
@@ -364,6 +418,15 @@ import UserNotifications
         case "settings":
             if arg == "close" { app.mainWindowController?.libraryModel?.select(.downloads) }
             else { commands.showSettings(SettingsTab(rawValue: arg)) }
+        case "rules-section":
+            // The segmented control at the top of Settings › Rules: Rules or Trackers.
+            app.settings.rules(.section(section: arg == "trackers" ? .trackers : .rules))
+        case "settings-tab":
+            // A click on Settings' tab bar (Settings open): only the tab changes, nothing is read again.
+            guard let tab = SettingsTab(rawValue: arg), let c = app.mainWindowController, c.libraryModel?.section == .settings else {
+                return report("settings-tab: open Settings first (settings <tab>), then a tab: \(arg)")
+            }
+            c.nav.tab = tab
         case "tracker-edit":
             commands.editTracker(arg)
         case "appearance":
@@ -611,6 +674,23 @@ import UserNotifications
             report("menu-icon: answer-dot \(dot), problem-dot \(look?.attention == true ? "yes" : "no"), label '\(app.statusMenuController?.qaIconLabel ?? "")'")
         case "menu-sync":
             menuSyncCommand(arg)
+        case "sync-add":
+            syncAddCommand(arg)
+        case "sync-edit", "sync-share", "sync-page":
+            // The folder page's Edit, the Edit window's Share button, the menu row's click that shows its page.
+            guard let f = commands.core.syncSnapshot().folders.first(where: { $0.name == arg || $0.id.hasPrefix(arg) }) else {
+                return report("\(cmd): no folder \(arg)")
+            }
+            switch cmd {
+            case "sync-edit": commands.sync.showEdit(f.id)
+            case "sync-share": commands.sync.showShare(f.id)
+            default: commands.sync.showFolder(f.id, false)
+            }
+            report("\(cmd): \(f.name)")
+        case "sync-close":
+            app.syncWindows.closeAll()
+        case "devices":
+            devicesCommand(arg)
         case "menu-hover":
             // `menu-hover open | quit | none`: the Open / Quit row as a pointer over one side draws it.
             menuHover = arg == "none" ? nil : arg
@@ -938,6 +1018,90 @@ import UserNotifications
         switch words.first {
         case "edit", "remove": report("menu-sync: \(words[0]) \(sync.qaPress(words.count > 1 ? words[1] : "", edit: words[0] == "edit"))")
         default: report("menu-sync: \(sync.qaState) || \(sync.qaItems)")
+        }
+    }
+
+    /// `sync-add open | choose <path> | devices all|this | ondemand on|off | start | cancel | state`: the Add Folder
+    /// window as its controls call it (the menu's and the window's Add Folder…, Choose… with the path the open panel
+    /// would give, the On all my devices switch, the Files on demand box, Start, Cancel). Each reports the window's state.
+    private func syncAddCommand(_ arg: String) {
+        let words = arg.split(separator: " ", maxSplits: 1).map(String.init)
+        let rest = words.count > 1 ? words[1] : ""
+        let windows = app.syncWindows
+        if words.first == "open" { commands.sync.showAdd(nil) }
+        if let m = windows.qaAddModel {
+            let w = m.window
+            switch words.first {
+            case "choose":
+                // Choose… is the From this computer side's.
+                guard m.form.mode == .local else { return report("sync-add: choose: not shown (mode \(m.form.mode))") }
+                m.setFolder(rest)
+            case "devices":
+                guard let follow = w.follow, follow.enabled else { return report("sync-add: devices: the switch is \(w.follow == nil ? "not shown" : "off limits")") }
+                m.form.allDevices = rest == "all"
+            case "ondemand":
+                guard w.onDemandLabel != nil else { return report("sync-add: ondemand: not shown") }
+                m.form.onDemand = rest == "on"
+            case "start":
+                guard w.canStart, !m.busy else { return report("sync-add: start: Start is off (\(qaSyncAddState))") }
+                _ = windows.qaStartAdd()
+            case "cancel":
+                windows.closeAdd()
+            default:
+                break
+            }
+        }
+        report(qaSyncAddState)
+    }
+
+    /// "sync-add: open mode local folder "/x" devices all (shown) ondemand on (shown) start on busy no error - · edits [] shares []".
+    private var qaSyncAddState: String {
+        let open = app.syncWindows.qaOpen
+        let others = "edits [\(open.edits.joined(separator: ","))] shares [\(open.shares.joined(separator: ","))]"
+        guard let m = app.syncWindows.qaAddModel else { return "sync-add: closed · \(others)" }
+        let w = m.window
+        let follow = w.follow.map { $0.enabled ? "shown" : "shown, off limits" } ?? "not shown"
+        return "sync-add: open mode \(m.form.mode) folder \"\(m.form.folder)\" devices \(m.form.allDevices ? "all" : "this") (\(follow)) ondemand \(m.form.onDemand ? "on" : "off") (\(w.onDemandLabel == nil ? "not shown" : "shown")) start \(w.canStart ? "on" : "off") busy \(m.busy ? "yes" : "no") error \(m.error ?? "-") · \(others)"
+    }
+
+    /// Settings › Devices as its buttons call it (`DevicesModel`): `devices pair` (Pair a Device…: the link),
+    /// `devices join <link>` (Pair with a Link…, pasted, then Pair), `devices confirm` (Pair on the first device asking),
+    /// `devices state`. Only an isolated QA run takes them: two QA runs pair with each other, never with the user's.
+    private func devicesCommand(_ arg: String) {
+        let words = arg.split(separator: " ", maxSplits: 1).map(String.init)
+        let m = devicesModel ?? DevicesModel(core: commands.core)
+        devicesModel = m
+        m.reload()
+        switch words.first {
+        case "pair": m.pair()
+        case "join":
+            m.showPaste()
+            m.setPasted(words.count > 1 ? words[1] : "")
+            m.join()
+        case "confirm":
+            guard let r = m.view.requests.first else { return report("devices: confirm: nobody is asking") }
+            m.confirm(r)
+        default: break
+        }
+        var link = "-"
+        if case .pair(let l) = m.sheet { link = l.link }
+        report("devices: kind \(m.view.kind) devices \(m.view.rows.count) requests \(m.view.requests.count) busy \(m.busy ? "yes" : "no") error \(m.error ?? "-") link \(link)")
+    }
+
+    /// `ui latency start | stop | report` (QALatency): the main thread's beats every 10 ms and the core's reads the UI
+    /// refreshes from every 50 ms; `report` writes the summary, the five worst beats, the core's reads and one JSON line.
+    private func latencyCommand(_ arg: String) {
+        let probe = LatencyProbe.shared
+        switch arg {
+        case "start":
+            let core = commands.core
+            probe.start(reads: [("snapshot", { _ = core.snapshot() }), ("sync", { _ = core.syncSnapshot() })])
+            report("latency: started")
+        case "stop":
+            probe.stop()
+            report("latency: stopped")
+        default:
+            for line in probe.report().lines { report(line) }
         }
     }
 

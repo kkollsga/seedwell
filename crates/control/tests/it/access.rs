@@ -10,11 +10,11 @@ use std::time::Duration;
 
 use common::*;
 use serde_json::{Value, json};
-use trs_control::access::How;
-use trs_control::client::ClientError;
-use trs_control::proto::*;
-use trs_control::types::*;
-use trs_control::{Permission, ServerOptions};
+use seedwell_control::access::How;
+use seedwell_control::client::ClientError;
+use seedwell_control::proto::*;
+use seedwell_control::types::*;
+use seedwell_control::{Permission, ServerOptions};
 
 fn api(e: ClientError) -> ApiError {
     match e {
@@ -23,21 +23,21 @@ fn api(e: ClientError) -> ApiError {
     }
 }
 
-async fn call(c: &mut trs_control::Client, method: &str, params: Value) -> Result<Value, ApiError> {
+async fn call(c: &mut seedwell_control::Client, method: &str, params: Value) -> Result<Value, ApiError> {
     let r = Request::decode(method, params).expect("params decode");
     c.call(&r).await.map_err(api)
 }
 
 /// The agent permission level the desk reads (and an approval writes): `config.toml` in the state folder.
 pub fn set_level(dir: &std::path::Path, p: Permission) {
-    let store = trs_state::DocStore::<trs_state::Config>::new(dir);
+    let store = seedwell_state::DocStore::<seedwell_state::Config>::new(dir);
     let mut c = store.read_lenient().map(|d| d.value).unwrap_or_default();
     c.agents.permission = p;
     store.save(&c).unwrap();
 }
 
 pub fn level(dir: &std::path::Path) -> Permission {
-    trs_state::DocStore::<trs_state::Config>::new(dir).read_lenient().unwrap().value.agents.permission
+    seedwell_state::DocStore::<seedwell_state::Config>::new(dir).read_lenient().unwrap().value.agents.permission
 }
 
 fn asked(v: Value) -> AccessAskedDto {
@@ -51,7 +51,7 @@ struct Updater {
     asked: std::sync::Mutex<Vec<String>>,
 }
 
-impl trs_control::Builds for Updater {
+impl seedwell_control::Builds for Updater {
     fn status(&self) -> UpdateStatusDto {
         UpdateStatusDto { version: "0.1.16".into(), dev_builds: self.dev.load(Ordering::SeqCst), status: "up to date".into(), ..Default::default() }
     }
@@ -69,6 +69,10 @@ impl trs_control::Builds for Updater {
     fn update_now(&self) -> Result<String, String> {
         self.asked.lock().unwrap().push("update now".into());
         Ok("Installing Seedwell 0.1.17: Seedwell quits, is replaced and reopens".into())
+    }
+    fn restart(&self) -> Result<RestartDto, String> {
+        self.asked.lock().unwrap().push("restart".into());
+        Ok(RestartDto { note: "Restarting Seedwell: it quits and opens again; this interrupts 1 download".into(), log: "/s/logs/update.log".into(), ..Default::default() })
     }
 }
 
@@ -121,7 +125,7 @@ async fn a_refusal_names_the_request_and_asking_twice_is_one_request() {
     assert!(!a.duplicate);
     assert_eq!((a.request.what.as_str(), a.request.state.as_str(), a.request.agents.clone()), ("control", "pending", vec!["claude".to_owned()]));
     assert_eq!(a.request.why.as_deref(), Some("pause the downloads at night"));
-    assert_eq!(a.request.expires - a.request.at, trs_control::access::TTL_MS);
+    assert_eq!(a.request.expires - a.request.at, seedwell_control::access::TTL_MS);
     assert!(a.note.starts_with("Asked the user for agent permission control") && a.note.contains("Nothing changes until the user answers"), "{}", a.note);
     let mut d = rig.client("codex").await;
     let b = asked(call(&mut d, "agents.request", json!({"what": "control", "agent": "kglite"})).await.unwrap());
@@ -263,4 +267,43 @@ async fn update_now_needs_full_and_asks_the_updater() {
     let rig = Rig::new(Permission::Full).await;
     let mut c = rig.client("claude").await;
     assert_eq!(call(&mut c, "update.now", json!({})).await.unwrap_err().code, ErrorCode::Unsupported);
+}
+
+/// `restart` quits and reopens the user's app, so it needs full: below it the app's relaunch is never reached and the
+/// refusal names the request (logged as denied); at full the relaunch is asked exactly once per call (a second
+/// would quit the reopened app), the answer says who quits (the process and run `hello` names, so the CLI can tell
+/// the new run from it) and the activity log records it with what it interrupts. A daemon cannot restart itself.
+#[tokio::test]
+async fn restart_needs_full_reaches_the_relaunch_once_and_is_logged() {
+    let updater = Arc::new(Updater::default());
+    let opts = ServerOptions::default();
+    opts.builds.set(updater.clone());
+    let rig = Rig::with(Permission::ReadOnly, opts, vec![]).await;
+    let mut c = rig.client("claude").await;
+    for level in [Permission::ReadOnly, Permission::Control] {
+        rig.perm.set(level);
+        let e = call(&mut c, "restart", json!({})).await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::PermissionDenied, "{level:?}");
+        assert!(e.message.contains("seedwell agents request full"), "{}", e.message);
+    }
+    assert!(updater.asked.lock().unwrap().is_empty(), "refused below full: never relaunched");
+    let denied = rig.server.activity().recent(5);
+    assert!(denied.iter().take(2).all(|e| e.method == "restart" && e.outcome == "denied"), "{denied:?}");
+
+    rig.perm.set(Permission::Full);
+    let d: RestartDto = serde_json::from_value(call(&mut c, "restart", json!({})).await.unwrap()).unwrap();
+    assert_eq!(*updater.asked.lock().unwrap(), ["restart"], "the relaunch, exactly once");
+    assert!(d.note.starts_with("Restarting Seedwell") && d.log == "/s/logs/update.log", "{d:?}");
+    assert_eq!((d.pid, d.started_ms), (c.hello.pid, c.hello.started_ms), "the run that quits, as hello names it");
+    assert!(d.pid == std::process::id() && d.started_ms > 0);
+    let log = rig.server.activity().recent(5);
+    assert_eq!((log[0].method.as_str(), log[0].outcome.as_str(), log[0].client.as_str()), ("restart", "ok", "claude"));
+    assert!(log[0].summary.starts_with("restart Seedwell -> Restarting Seedwell") && log[0].summary.contains("interrupts 1 download"), "{}", log[0].summary);
+
+    // A daemon has no relaunch: it says so, and nothing quits.
+    let rig = Rig::new(Permission::Full).await;
+    let mut c = rig.client("claude").await;
+    let e = call(&mut c, "restart", json!({})).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert!(e.message.contains("cannot restart itself"), "{}", e.message);
 }

@@ -13,14 +13,14 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use trs_classify::Category;
+use seedwell_classify::Category;
 
 use crate::config::Config;
 
 /// `~` and `~/x` expanded with the home folder; other strings are used as they are.
 pub fn expand_tilde(s: &str) -> PathBuf {
     if (s == "~" || s.starts_with("~/"))
-        && let Some(home) = trs_platform::dirs::home() {
+        && let Some(home) = seedwell_platform::dirs::home() {
             let mut p = home;
             if let Some(rest) = s.strip_prefix("~/") {
                 p.push(rest);
@@ -35,7 +35,7 @@ pub fn expand_tilde(s: &str) -> PathBuf {
 /// Errors: `NotFound` when the path is below `/Volumes/<name>` and that volume is not mounted,
 /// or when no ancestor can be read at all.
 pub fn volume_id(path: &Path) -> io::Result<u64> {
-    for root in trs_platform::dirs::mount_roots() {
+    for root in seedwell_platform::dirs::mount_roots() {
         if let Ok(rest) = path.strip_prefix(root)
             && let Some(first) = rest.components().next()
             && !Path::new(root).join(first).exists()
@@ -46,7 +46,7 @@ pub fn volume_id(path: &Path) -> io::Result<u64> {
     let mut last = io::Error::new(io::ErrorKind::NotFound, "no existing folder");
     for dir in path.ancestors() {
         let probe = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
-        match trs_platform::fs::volume_id(probe) {
+        match seedwell_platform::fs::volume_id(probe) {
             Ok(id) => return Ok(id),
             Err(e) => last = e,
         }
@@ -159,7 +159,7 @@ mod tests {
     }
 
     fn tmp(tag: &str) -> Tmp {
-        let d = std::env::temp_dir().join(format!("trs-vol-{tag}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("seedwell-vol-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         Tmp(d)
     }

@@ -3,7 +3,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using System.Runtime.InteropServices.WindowsRuntime;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
@@ -55,6 +55,13 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
         flyout.OpenPinned(withSync: true);
         await Settle();
         await Save(root, "menu-sync");
+
+        // The same with the pointer on the rows: the grey line ("... 4 min left") beside the Edit and Delete buttons.
+        flyout.QaSyncHover = true;
+        flyout.OpenPinned(withSync: true);
+        await Settle();
+        await Save(root, "menu-sync-hover");
+        flyout.QaSyncHover = false;
 
         // Stop syncing's inline question, on the first folder.
         if (app.Core.SyncSnapshot().Folders.FirstOrDefault() is SyncFolder folder)
@@ -198,11 +205,11 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
             await Menu(pane.RenderMenu(new LibraryPlace.Chat(channel.Id, null)), "channel-menu");
             foreach (var (dialog, name) in new[]
             {
-                (TrsFfiMethods.ChatNewTopicDialog(channel), "dialog-new-topic"),
-                (TrsFfiMethods.ChatRenameDialog(channel), "dialog-rename"),
-                (TrsFfiMethods.ChatLeaveDialog(channel), "dialog-leave"),
-                (TrsFfiMethods.ChatAgentsDialog(channel), "dialog-agents"),
-                (TrsFfiMethods.ChatWakeCommandDialog(channel), "dialog-wake-command"),
+                (SeedwellFfiMethods.ChatNewTopicDialog(channel), "dialog-new-topic"),
+                (SeedwellFfiMethods.ChatRenameDialog(channel), "dialog-rename"),
+                (SeedwellFfiMethods.ChatLeaveDialog(channel), "dialog-leave"),
+                (SeedwellFfiMethods.ChatAgentsDialog(channel), "dialog-agents"),
+                (SeedwellFfiMethods.ChatWakeCommandDialog(channel), "dialog-wake-command"),
             })
             {
                 app.ChatDialogs.Show(dialog, channel);
@@ -245,6 +252,7 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
                 await SavePopups(window.Content.XamlRoot, "add-folder");
                 af.QaMode(SyncAddMode.Shared);
                 af.QaLink("seedwell://sync/not-a-real-link");
+                await af.PlacesRead();
                 await Settle();
                 await SavePopups(window.Content.XamlRoot, "add-folder-shared");
                 af.QaCancel();
@@ -264,6 +272,8 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
             await PopupOpened(window.Content.XamlRoot);
             if (ShareDialog.Open is ShareDialog sd)
             {
+                // Its first real drawing, not "opening": the form and the links are read off the UI thread.
+                await sd.Ready;
                 await Settle();
                 await SavePopups(window.Content.XamlRoot, "share");
                 sd.QaCancel();
@@ -317,10 +327,10 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
         // The core's questions (W4) as their dialogs, each from its model with a sample input.
         foreach (var (title, text, yes, no, name) in new[]
         {
-            Prompt(TrsFfiMethods.AddRequestPrompt(new AddRequestInfo(@"C:\Users\Anna\Downloads\Ubuntu 26.04.torrent", "ubuntu-26.04.1-desktop-amd64.iso", 6_200_000_000, Category.Software, "torrent.ubuntu.com")), "prompt-add-request"),
-            TrsFfiMethods.LocationMovePrompt(new MoveProposalInfo([new MoveItemInfo("a", "Film.mkv", 4_000_000_000, @"C:\Users\Anna\Downloads", @"D:\Media", true), new MoveItemInfo("b", "Series", 12_000_000_000, @"C:\Users\Anna\Downloads", @"D:\Media", true)], 16_000_000_000, 2)) is LocationMovePrompt lm
+            Prompt(SeedwellFfiMethods.AddRequestPrompt(new AddRequestInfo(@"C:\Users\Anna\Downloads\Ubuntu 26.04.torrent", "ubuntu-26.04.1-desktop-amd64.iso", 6_200_000_000, Category.Software, "torrent.ubuntu.com")), "prompt-add-request"),
+            SeedwellFfiMethods.LocationMovePrompt(new MoveProposalInfo([new MoveItemInfo("a", "Film.mkv", 4_000_000_000, @"C:\Users\Anna\Downloads", @"D:\Media", true), new MoveItemInfo("b", "Series", 12_000_000_000, @"C:\Users\Anna\Downloads", @"D:\Media", true)], 16_000_000_000, 2)) is LocationMovePrompt lm
                 ? (lm.Title, lm.Text, lm.MoveTitle, lm.DontMoveTitle, "prompt-location-move") : default,
-            Offer(TrsFfiMethods.BacklogOffer(5, @"C:\Users\Anna\Downloads", TorrentFileAction.Leave), "prompt-backlog"),
+            Offer(SeedwellFfiMethods.BacklogOffer(5, @"C:\Users\Anna\Downloads", TorrentFileAction.Leave), "prompt-backlog"),
         })
         {
             if (title is null) continue;
@@ -391,7 +401,7 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
     /// </summary>
     async Task RenderChatFiles()
     {
-        var samples = TrsFfiMethods.ChatFileSamples();
+        var samples = SeedwellFfiMethods.ChatFileSamples();
         var attachments = new ChatAttachments(app);
         var sheet = new StackPanel { Padding = new Thickness(16), Spacing = 10, Background = new SolidColorBrush(Base), Width = 900 };
         var grid = new Grid { ColumnSpacing = 16, RowSpacing = 10 };
@@ -437,7 +447,7 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
         var scale = window.Content.XamlRoot?.RasterizationScale ?? 1;
         // Off the UI thread: the core makes the sample pictures here, seconds on a slow machine or a debug core.
         var side = (uint)Math.Ceiling(760 * scale);
-        var samples = await Task.Run(() => TrsFfiMethods.ChatImageLayoutSamples(side));
+        var samples = await Task.Run(() => SeedwellFfiMethods.ChatImageLayoutSamples(side));
         var attachments = new ChatAttachments(app);
         Task<ChatImageView?> From(ChatImage image, uint side) => Task.FromResult(samples.FirstOrDefault(x => x.Image.Hash == image.Hash)?.View);
         StackPanel Labelled(ChatImageSample sample, double width)
@@ -564,32 +574,74 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
         HangWatch.LastAction = $"render: after {name}";
     }
 
-    /// <summary>An element drawn to a PNG, laid on the theme's base colour (the QA commands' shot uses it too).</summary>
-    internal static async Task SaveImage(UIElement element, string path, bool light)
+    /// <summary>QA only (an isolated run): writing a picture takes this long (SEEDWELL_QA_SLOW_SHOT_MS).</summary>
+    static readonly int SlowShotMs = Program.StateDir is not null && int.TryParse(Environment.GetEnvironmentVariable("SEEDWELL_QA_SLOW_SHOT_MS"), out var ms) ? ms : 0;
+
+    /// <summary>
+    /// An element drawn to a PNG, laid on the theme's base colour (the QA commands' shot uses it too). The drawing and the
+    /// reading of its pixels each have a dispatcher turn of their own; the rest is off the UI thread (the app never hangs:
+    /// encoding on it stalled a QA run 2.2 s under a compile). The picture is there when this ends; null, or why there is none
+    /// (also in the log: a picture that silently is not there took two full runs to see).
+    /// </summary>
+    internal static async Task<string?> SaveImage(UIElement element, string path, bool light)
     {
         var back = light ? Windows.UI.Color.FromArgb(255, 243, 243, 243) : Windows.UI.Color.FromArgb(255, 32, 32, 32);
+        await Quiet.NextTurn();
+        // Gone from the window since it was chosen (a popup closing): nothing to draw.
+        if (element.XamlRoot is not XamlRoot root)
+        {
+            AppLog.Write($"picture {Path.GetFileName(path)}: gone from the window");
+            return "gone from the window";
+        }
+        var dpi = 96 * root.RasterizationScale;
         var rtb = new RenderTargetBitmap();
-        await rtb.RenderAsync(element);
-        var pixels = (await rtb.GetPixelsAsync()).ToArray();
-        // Nothing drawn (a popup with nothing in it yet, a light-dismiss layer): no picture, rather than an empty file.
-        if (rtb.PixelWidth == 0 || rtb.PixelHeight == 0 || pixels.Length == 0)
+        // Each a capture: what a picture costs the UI thread is not the app stuttering (a stall is, all the same).
+        using (RendererCaptures.Shared.Capture())
         {
-            return;
+            // It ends with a frame that draws the element, and none may come (an element out of view, with nothing changing):
+            // a picture that cannot be drawn says so, rather than a run waiting for ever with the UI thread free.
+            var drawn = rtb.RenderAsync(element).AsTask();
+            if (await Task.WhenAny(drawn, Task.Delay(8000)) != drawn)
+            {
+                throw new TimeoutException($"{Path.GetFileName(path)}: no frame drew it in 8 s (is it out of view?)");
+            }
+            await drawn;
         }
-        // Acrylic (a menu's background) and the dialog's smoke come out transparent: lay the picture on the base colour.
-        for (int i = 0; i < pixels.Length; i += 4)
+        await Quiet.NextTurn();
+        Windows.Storage.Streams.IBuffer buffer;
+        using (RendererCaptures.Shared.Capture())
         {
-            int keep = 255 - pixels[i + 3];
-            pixels[i] = (byte)(pixels[i] + back.B * keep / 255);
-            pixels[i + 1] = (byte)(pixels[i + 1] + back.G * keep / 255);
-            pixels[i + 2] = (byte)(pixels[i + 2] + back.R * keep / 255);
-            pixels[i + 3] = 255;
+            buffer = await rtb.GetPixelsAsync();
         }
-        using var file = File.Create(path);
-        var encoder = await Windows.Graphics.Imaging.BitmapEncoder.CreateAsync(Windows.Graphics.Imaging.BitmapEncoder.PngEncoderId, file.AsRandomAccessStream());
-        var dpi = 96 * element.XamlRoot.RasterizationScale;
-        encoder.SetPixelData(Windows.Graphics.Imaging.BitmapPixelFormat.Bgra8, Windows.Graphics.Imaging.BitmapAlphaMode.Premultiplied,
-            (uint)rtb.PixelWidth, (uint)rtb.PixelHeight, dpi, dpi, pixels);
-        await encoder.FlushAsync();
+        var (width, height) = ((uint)rtb.PixelWidth, (uint)rtb.PixelHeight);
+        var actual = element is FrameworkElement sized ? $", the element {sized.ActualWidth:0}x{sized.ActualHeight:0}" : "";
+        return await Task.Run<string?>(async () =>
+        {
+            var pixels = buffer.ToArray();
+            // Nothing drawn (a popup with nothing in it yet, a light-dismiss layer): no picture, rather than an empty file.
+            if (width == 0 || height == 0 || pixels.Length == 0)
+            {
+                var why = $"nothing drawn ({width}x{height}, {pixels.Length} bytes{actual})";
+                AppLog.Write($"picture {Path.GetFileName(path)}: {why}");
+                return why;
+            }
+            // Acrylic (a menu's background) and the dialog's smoke come out transparent: lay the picture on the base colour.
+            for (int i = 0; i < pixels.Length; i += 4)
+            {
+                int keep = 255 - pixels[i + 3];
+                pixels[i] = (byte)(pixels[i] + back.B * keep / 255);
+                pixels[i + 1] = (byte)(pixels[i + 1] + back.G * keep / 255);
+                pixels[i + 2] = (byte)(pixels[i + 2] + back.R * keep / 255);
+                pixels[i + 3] = 255;
+            }
+            if (SlowShotMs > 0) Thread.Sleep(SlowShotMs);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            using var file = File.Create(path);
+            var encoder = await Windows.Graphics.Imaging.BitmapEncoder.CreateAsync(Windows.Graphics.Imaging.BitmapEncoder.PngEncoderId, file.AsRandomAccessStream());
+            encoder.SetPixelData(Windows.Graphics.Imaging.BitmapPixelFormat.Bgra8, Windows.Graphics.Imaging.BitmapAlphaMode.Premultiplied,
+                width, height, dpi, dpi, pixels);
+            await encoder.FlushAsync();
+            return null;
+        });
     }
 }

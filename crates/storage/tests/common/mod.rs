@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
-use trs_storage::{BLOCK_SIZE, FilePath, FileSpec, Layout, hash};
+use seedwell_storage::{BLOCK_SIZE, FilePath, FileSpec, Layout, hash};
 
 pub struct Synth {
     pub layout: Arc<Layout>,

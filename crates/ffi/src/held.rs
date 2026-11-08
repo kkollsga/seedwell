@@ -5,8 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
-use trs_platform::fs::{OtherVolume, move_to_trash};
-use trs_platform::{shift_key, trash};
+use seedwell_platform::fs::{OtherVolume, move_to_trash};
+use seedwell_platform::{shift_key, trash};
 
 use crate::backend::Backend;
 use crate::menu::APP_NAME;
@@ -98,7 +98,7 @@ fn file_name(path: &Path) -> String {
 /// switch must not point at the user's own), else the backend's stand-in, else (`None`) the system's Trash.
 pub(crate) fn trash_dir(backend: &dyn Backend) -> Option<PathBuf> {
     let qa = std::env::var_os("SEEDWELL_QA_TRASH_DIR").filter(|d| !d.is_empty()).map(PathBuf::from);
-    let dir = qa.filter(|d| trs_platform::dirs::in_temp_folder(d)).or_else(|| backend.trash_dir());
+    let dir = qa.filter(|d| seedwell_platform::dirs::in_temp_folder(d)).or_else(|| backend.trash_dir());
     #[cfg(test)]
     assert!(dir.is_some(), "a test would use the real Trash");
     dir

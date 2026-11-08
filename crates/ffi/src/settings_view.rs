@@ -12,7 +12,7 @@
 //! Some parts are drawn by views of their own, which the model only places ([`SettingsBlock`]): the Cloudflare
 //! rendezvous (`RendezvousView`), Devices (`devices_view`) and the rules and trackers editors.
 
-use trs_platform::file_manager;
+use seedwell_platform::file_manager;
 
 use crate::host::{has, HostFeature, HostWindow};
 use crate::library::LocalClock;
@@ -959,7 +959,7 @@ pub(crate) fn folder(key: SettingKey, path: &str, placeholder: &str, width: u32,
 
 // MARK: General
 
-const LIMIT_SPEED_HINT: &str = concat!("Toggle with ", trs_platform::shortcut!(alt "L"), " or Transfers ▸ Limit Speed");
+const LIMIT_SPEED_HINT: &str = concat!("Toggle with ", seedwell_platform::shortcut!(alt "L"), " or Transfers ▸ Limit Speed");
 
 fn updates_group(u: &SettingsUpdates, s: &AppSettings) -> Option<SettingsGroup> {
     let link = |b: &crate::updates::UpdateButton, command| SettingsButton {
@@ -1650,7 +1650,7 @@ fn folder_sync(i: &SettingsViewInput, features: &[HostFeature]) -> Vec<SettingsB
         this.push(row("sync.reach", "From the Internet", Some(&r.summary), vec![reachability(&r.state, "reachability")]));
     }
     let mut out = vec![
-        block(group("sync.this", concat!("This ", trs_platform::computer!()), this)),
+        block(group("sync.this", concat!("This ", seedwell_platform::computer!()), this)),
         block(group(
             "sync.finding",
             "Finding devices",
@@ -1667,7 +1667,7 @@ fn folder_sync(i: &SettingsViewInput, features: &[HostFeature]) -> Vec<SettingsB
         "sync.relaying",
         "Relaying",
         vec![
-            row("sync.relay-own", "For my own devices", Some(concat!("When two of your devices cannot reach each other, this ", trs_platform::computer!(), " passes their encrypted data on")), vec![
+            row("sync.relay-own", "For my own devices", Some(concat!("When two of your devices cannot reach each other, this ", seedwell_platform::computer!(), " passes their encrypted data on")), vec![
                 switch(SettingKey::RelayOwnDevices, s.relay_own_devices),
             ]),
             row("sync.relay-everyone", "For everyone in shared folders", Some("Also between other people’s devices in folders you share. Relays never see the files."), vec![
@@ -1786,7 +1786,7 @@ fn agents(i: &SettingsViewInput, features: &[HostFeature], clock: &dyn LocalCloc
             row("agents.allow", "Allow agents", Some("Local only. Never on the network."), vec![switch_help(
                 SettingKey::AllowAgents,
                 a.permission != AgentPermission::Off,
-                concat!("Let AI agents on this ", trs_platform::computer!(), " connect to Seedwell"),
+                concat!("Let AI agents on this ", seedwell_platform::computer!(), " connect to Seedwell"),
             )]),
             row("agents.permission", "Permission", Some("Full also deletes files and changes settings."), vec![ChoiceSpec {
                 enabled: a.permission != AgentPermission::Off,
@@ -2035,3 +2035,7 @@ pub fn settings_view_model(input: SettingsViewInput, host: Vec<HostWindow>, feat
 #[cfg(test)]
 #[path = "settings_view_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "settings_cli_tests.rs"]
+mod cli_tests;

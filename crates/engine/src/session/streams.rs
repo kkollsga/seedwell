@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::oneshot;
-use trs_stream::StreamServer;
+use seedwell_stream::StreamServer;
 
 use super::cold::Want;
 use super::{Cmd, Session};
@@ -27,7 +27,7 @@ pub(crate) fn owner_of(id: &TorrentId) -> u64 {
 /// What the session answers a stream request.
 pub(crate) enum Opened {
     /// A stream is open.
-    Stream { handle: trs_stream::StreamHandle, selected: bool },
+    Stream { handle: seedwell_stream::StreamHandle, selected: bool },
     /// Nothing left to download for this torrent: open the file itself.
     Complete { selected: bool },
 }

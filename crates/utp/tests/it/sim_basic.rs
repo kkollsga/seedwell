@@ -4,7 +4,7 @@
 use crate::common;
 
 use common::*;
-use trs_utp::{Config, End, State};
+use seedwell_utp::{Config, End, State};
 
 const MB: usize = 1024 * 1024;
 
@@ -245,7 +245,7 @@ fn half_close_keeps_reverse_direction_open() {
     assert!(b.rx == a.tx);
     assert!(a.rx == reply);
     let st = sim.a.status(a.handle.unwrap());
-    assert!(matches!(st, trs_utp::ConnStatus::Open | trs_utp::ConnStatus::Closed(End::Graceful)), "{st:?}");
+    assert!(matches!(st, seedwell_utp::ConnStatus::Open | seedwell_utp::ConnStatus::Closed(End::Graceful)), "{st:?}");
     let _ = State::Closed;
 }
 
@@ -271,7 +271,7 @@ fn many_connections_share_one_endpoint_pair() {
     let mut sides_a: Vec<Side> = (0..N).map(|i| Side::new(pseudo_data(100 + i as u64, 150_000 + i * 1000))).collect();
     let mut sides_b: Vec<Side> = (0..N).map(|i| Side::new(pseudo_data(200 + i as u64, 80_000))).collect();
     let mut connected = false;
-    let mut order_b: Vec<trs_utp::ConnHandle> = Vec::new();
+    let mut order_b: Vec<seedwell_utp::ConnHandle> = Vec::new();
     let ok = sim.run_for(120_000_000, &mut |s| {
         if !connected {
             connected = true;

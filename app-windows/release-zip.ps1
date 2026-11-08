@@ -60,7 +60,7 @@ if ($DevVersion) {
     Step "Seedwell $version (v$version), commit $(git -C $Repo rev-parse --short HEAD), Windows $minWindows or later"
 }
 
-# Release peer id -SW<ver>- instead of the development one (trs-metainfo PEER_ID_PREFIX), as the Mac's release.
+# Release peer id -SW<ver>- instead of the development one (seedwell-metainfo PEER_ID_PREFIX), as the Mac's release.
 $env:SEEDWELL_RELEASE = '1'
 
 Step 'Core, bindings and app (build.ps1, release)'
@@ -109,7 +109,7 @@ $check = Join-Path ([IO.Path]::GetTempPath()) "seedwell-release-check-$([Guid]::
 try {
     if ((Get-FileHash (Join-Path $Out $zip) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $zipSha) { throw 'the zip changed after hashing' }
     [IO.Compression.ZipFile]::ExtractToDirectory((Join-Path $Out $zip), "$check\app")
-    foreach ($f in 'Seedwell.exe', 'trs_ffi.dll', 'Seedwell.pri', 'App.xbf', 'MainWindow.xbf', 'FlyoutWindow.xbf', 'cli\seedwell.exe', 'install.ps1', 'THIRD-PARTY-NOTICES.md') { if (-not (Test-Path "$check\app\$f")) { throw "the zip has no $f" } }
+    foreach ($f in 'Seedwell.exe', 'seedwell_ffi.dll', 'Seedwell.pri', 'App.xbf', 'MainWindow.xbf', 'FlyoutWindow.xbf', 'cli\seedwell.exe', 'install.ps1', 'THIRD-PARTY-NOTICES.md') { if (-not (Test-Path "$check\app\$f")) { throw "the zip has no $f" } }
     $said = & "$check\app\cli\seedwell.exe" --version
     if ($said -ne "seedwell $version") { throw "the CLI says '$said', not 'seedwell $version'" }
     # The app starts from the unzipped folder with what the zip holds, and draws (quiet: no window is activated).

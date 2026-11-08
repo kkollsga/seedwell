@@ -2,7 +2,7 @@ using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
@@ -94,13 +94,17 @@ sealed class ChooserDialog
             Close();
             return;
         }
-        body.Content = Page(page);
+        FocusKeeper.Redraw(body, dialog.XamlRoot, () => body.Content = Page(page));
     }
 
     void Closed(string resolved)
     {
         if (resolved == id) Close();
     }
+
+    internal string QaFocused => FocusKeeper.Describe(body, dialog.XamlRoot);
+    internal Task<string> QaWalk() => FocusKeeper.QaWalk(body, dialog.XamlRoot, Redraw);
+    internal bool QaFocusFirstButton() => FocusKeeper.QaFocusFirstButton(body);
 
     internal void Close()
     {

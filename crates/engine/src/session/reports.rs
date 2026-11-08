@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
-use trs_metainfo::{Magnet, Metainfo};
+use seedwell_metainfo::{Magnet, Metainfo};
 
 use super::cold::*;
 use super::{After, Session};
@@ -136,7 +136,7 @@ impl Session {
         }
         let again = c.has2(G_REOPENED);
         c.set2(G_REOPENED, false);
-        let domain = self.hosts.get(usize::from(c.host)).filter(|h| !h.is_empty()).map(|h| trs_state::trackers::registrable_domain(h));
+        let domain = self.hosts.get(usize::from(c.host)).filter(|h| !h.is_empty()).map(|h| seedwell_state::trackers::registrable_domain(h));
         let private = c.private();
         let send_complete = complete && c.has(F_TRACKER_REG) && !c.has(F_ADDED_COMPLETE);
         self.update_seed_clock(id);
@@ -223,7 +223,7 @@ impl Session {
             .map(|m| m.trackers)
             .unwrap_or_default();
         // A full .torrent: {announce-list, info}. Keys are emitted in sorted order.
-        let mut enc = trs_bencode::Encoder::new();
+        let mut enc = seedwell_bencode::Encoder::new();
         enc.begin_dict();
         if !trackers.is_empty() {
             enc.str("announce-list").begin_list();

@@ -7,16 +7,16 @@ pub mod oracle;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
-use trs_tracker::gate::{GateConfig, GatedRequest, Ticket};
-use trs_tracker::hub::{HubReport, TorrentSpec, TrackerHub};
-use trs_tracker::response::{AnnounceError, AnnounceResponse, TransportError};
-use trs_tracker::url::Scheme;
-use trs_tracker::{InfoHash20, MemoryStore, Millis, Stats, TorrentEvent, TrackerUrl};
+use seedwell_tracker::gate::{GateConfig, GatedRequest, Ticket};
+use seedwell_tracker::hub::{HubReport, TorrentSpec, TrackerHub};
+use seedwell_tracker::response::{AnnounceError, AnnounceResponse, TransportError};
+use seedwell_tracker::url::Scheme;
+use seedwell_tracker::{InfoHash20, MemoryStore, Millis, Stats, TorrentEvent, TrackerUrl};
 
 use oracle::{Oracle, User};
 
 pub fn ok_response(interval: u64, min: Option<u64>) -> AnnounceResponse {
-    let t = trs_tracker::clamp_timing(Some(interval as i64), min.map(|m| m as i64));
+    let t = seedwell_tracker::clamp_timing(Some(interval as i64), min.map(|m| m as i64));
     AnnounceResponse {
         interval: t.interval,
         min_interval: t.min_interval,
@@ -382,7 +382,7 @@ impl<R: Responder> World<R> {
             self.drain_net();
             let reps = self.hub().take_reports();
             for r in &reps {
-                if let trs_tracker::Report::InvariantViolation(why) = &r.report {
+                if let seedwell_tracker::Report::InvariantViolation(why) = &r.report {
                     panic!("machine tripped its self-audit: {why}");
                 }
             }
@@ -391,11 +391,11 @@ impl<R: Responder> World<R> {
             }
             for ev in self.hub().take_gate_events() {
                 match ev {
-                    trs_tracker::gate::GateEvent::HostTripped { host, reason, .. } => {
+                    seedwell_tracker::gate::GateEvent::HostTripped { host, reason, .. } => {
                         panic!("gate tripped host {host}: {reason}")
                     }
-                    trs_tracker::gate::GateEvent::HostPaused { .. } => self.breaker_opens += 1,
-                    trs_tracker::gate::GateEvent::HostResumed { .. } => {}
+                    seedwell_tracker::gate::GateEvent::HostPaused { .. } => self.breaker_opens += 1,
+                    seedwell_tracker::gate::GateEvent::HostResumed { .. } => {}
                 }
             }
             for r in reqs {
@@ -412,8 +412,8 @@ impl<R: Responder> World<R> {
     fn drain_net(&mut self) {
         for ev in self.hub().take_net_events() {
             match ev {
-                trs_tracker::outage::NetEvent::Offline { at, .. } => self.oracle.outage_started(at),
-                trs_tracker::outage::NetEvent::Online { at, .. } => self.oracle.outage_ended(at),
+                seedwell_tracker::outage::NetEvent::Offline { at, .. } => self.oracle.outage_started(at),
+                seedwell_tracker::outage::NetEvent::Online { at, .. } => self.oracle.outage_ended(at),
                 _ => {}
             }
         }
@@ -433,7 +433,7 @@ impl<R: Responder> World<R> {
                 .as_ref()
                 .map(|r| r.timing().sanitized())
                 .map_err(Clone::clone);
-            if p.ticket.event() != Some(trs_tracker::Event::Stopped) {
+            if p.ticket.event() != Some(seedwell_tracker::Event::Stopped) {
                 let ks = self.key_stats.entry((ih, slot)).or_default();
                 if timing.is_ok() {
                     ks.ok += 1;
@@ -467,7 +467,7 @@ impl<R: Responder> World<R> {
         let udp = url.scheme() == Scheme::Udp;
         let params = r.announce_params().expect("announce").clone();
         assert!(
-            self.now >= self.hold_until || params.event == Some(trs_tracker::Event::Stopped),
+            self.now >= self.hold_until || params.event == Some(seedwell_tracker::Event::Stopped),
             "request released during a crash-loop hold"
         );
         let oseq = self
@@ -601,7 +601,7 @@ impl SpamDetector {
     }
 
     /// Record an announce *arriving at the tracker*.
-    pub fn arrive(&mut self, now: Millis, ih: InfoHash20, event: Option<trs_tracker::Event>) {
+    pub fn arrive(&mut self, now: Millis, ih: InfoHash20, event: Option<seedwell_tracker::Event>) {
         if event.is_some() {
             self.events += 1;
         } else {

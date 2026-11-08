@@ -312,13 +312,14 @@ pub(crate) fn ondemand_notice(
             format!(
                 concat!(
                     "Seedwell doesn't sync the new name, so the file would stay on this ",
-                    trs_platform::computer!(),
+                    seedwell_platform::computer!(),
                     " only, and it isn't here yet. Download it first, then rename it (“{}” in Folder Sync)."
                 ),
                 folder
             ),
         ),
-        K::NoItem | K::NotOnDemand | K::Gone | K::NotRunning | K::AnchorExpired | K::Changed | K::Ignored => return None,
+        // Busy: the host offers the file again by itself.
+        K::NoItem | K::NotOnDemand | K::Gone | K::NotRunning | K::AnchorExpired | K::Changed | K::Ignored | K::Busy => return None,
     };
     // One notification per file and problem (Windows' tag holds 64 characters: the path is hashed).
     let key = {
@@ -350,7 +351,7 @@ enum Kept {
 /// [`Notices::sync_evict_notice`]'s words: `folder` is the folder's name (`None`: no longer synced here, nothing to
 /// tell).
 pub(crate) fn evict_notice(folder_id: &str, folder: Option<&str>, e: &crate::sync::ondemand::SyncEvicted, initiated_by_user: bool) -> Option<Notice> {
-    use trs_sync::ondemand::{KEPT_CHANGED, KEPT_PINNED, NOT_HELD_ELSEWHERE};
+    use seedwell_sync::ondemand::{KEPT_CHANGED, KEPT_PINNED, NOT_HELD_ELSEWHERE};
     let folder = folder?;
     if !initiated_by_user {
         return None;
@@ -374,8 +375,8 @@ pub(crate) fn evict_notice(folder_id: &str, folder: Option<&str>, e: &crate::syn
     }
     let one = e.kept_why.iter().chain(&e.failed).next().filter(|_| n == 1);
     let title = match one {
-        Some(f) => format!("“{}” stays on this {}", f.path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(&f.path), trs_platform::computer!()),
-        None => format!("{n} files stay on this {}", trs_platform::computer!()),
+        Some(f) => format!("“{}” stays on this {}", f.path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(&f.path), seedwell_platform::computer!()),
+        None => format!("{n} files stay on this {}", seedwell_platform::computer!()),
     };
     let mut body = Vec::new();
     for (kind, c) in &why {
@@ -388,9 +389,9 @@ pub(crate) fn evict_notice(folder_id: &str, folder: Option<&str>, e: &crate::syn
             _ => (c.to_string(), "are", "them"),
         };
         body.push(match kind {
-            Kept::Pinned => format!("{s} {is} set to always stay on this {}: stop keeping {it} here first.", trs_platform::computer!()),
+            Kept::Pinned => format!("{s} {is} set to always stay on this {}: stop keeping {it} here first.", seedwell_platform::computer!()),
             Kept::OnlyCopy => format!("{s} {is} kept until a device that has {it} too is connected, so nothing is lost."),
-            Kept::Changed => format!("{s} changed on this {} and {is} synced first.", trs_platform::computer!()),
+            Kept::Changed => format!("{s} changed on this {} and {is} synced first.", seedwell_platform::computer!()),
             Kept::InUse => format!("{s} couldn't be freed: {} open in another app.", if it == "it" { "it may be" } else { "they may be" }),
             Kept::Other(why) => format!("{s}: {why}."),
         });
@@ -496,7 +497,7 @@ fn request_key(id: &str) -> String {
 /// The keys among `delivered` (the host's notifications still on screen or in its list) of request notices whose
 /// request no longer waits (`pending`: the requests that do): answered anywhere, expired or withdrawn. Other keys are
 /// never named.
-pub(crate) fn stale_request_keys(delivered: &[String], pending: &[trs_control::access::Entry]) -> Vec<String> {
+pub(crate) fn stale_request_keys(delivered: &[String], pending: &[seedwell_control::access::Entry]) -> Vec<String> {
     delivered
         .iter()
         .filter(|k| k.strip_prefix(REQUEST_KEY_PREFIX).is_some_and(|id| !pending.iter().any(|e| e.id == id)))
@@ -506,7 +507,7 @@ pub(crate) fn stale_request_keys(delivered: &[String], pending: &[trs_control::a
 
 /// An agent's request for access, with Approve and Deny (Settings › Agents on a click). Its words are the core's; the
 /// reason is the agent's own, quoted.
-pub(crate) fn request_notice(e: &trs_control::access::Entry) -> NoticeOutcome {
+pub(crate) fn request_notice(e: &seedwell_control::access::Entry) -> NoticeOutcome {
     let mut body = crate::agent_requests::quoted_why(e).map(|w| format!("{w}\n")).unwrap_or_default();
     body.push_str("Approve gives exactly this; Deny refuses. Also in Settings › Agents.");
     NoticeOutcome::Post {
@@ -547,7 +548,7 @@ pub(crate) struct Facts {
     /// The tracker of the torrent an id-only event names (an error, an automatic add).
     pub tracker: Option<String>,
     /// For an agent's request for access: the requests the user is asked about, newest first.
-    pub requests: Vec<trs_control::access::Entry>,
+    pub requests: Vec<seedwell_control::access::Entry>,
 }
 
 impl Facts {
@@ -652,7 +653,7 @@ pub(crate) fn decide(state: &mut State, event: NoticeEvent, f: &Facts, now_ms: u
             }
             let mut parts = vec![category_label(added.category), added.tracker];
             if let Some(d) = added.destination {
-                parts.push(format!("→ {}", trs_platform::dirs::shown(std::path::Path::new(&d))));
+                parts.push(format!("→ {}", seedwell_platform::dirs::shown(std::path::Path::new(&d))));
             }
             let title = format!("Added {}", added.name);
             notice(NoticeKind::Added, title, parts.join(" · "), None, NoticeRoute::Transfer { id: added.id })
@@ -685,7 +686,7 @@ pub(crate) fn decide(state: &mut State, event: NoticeEvent, f: &Facts, now_ms: u
                 return request_notice(e);
             }
             // An approval by a reply in chat that could not be done: the user is not looking at the app, so say so.
-            if activity.method == "agents.approve" && activity.outcome.starts_with("error") && activity.summary.contains(trs_control::access::CHAT_WORDS) {
+            if activity.method == "agents.approve" && activity.outcome.starts_with("error") && activity.summary.contains(seedwell_control::access::CHAT_WORDS) {
                 return notice(NoticeKind::Agent, "Not approved".into(), activity.summary, None, NoticeRoute::AgentRequests);
             }
             // The user's own answers, and expiries, need no notice.

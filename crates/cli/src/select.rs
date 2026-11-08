@@ -5,8 +5,8 @@
 //! that matches more than one torrent is an error that lists the candidates (exit 3), never a guess.
 
 use serde_json::json;
-use trs_control::proto::ListFilter;
-use trs_control::types::TransferDto;
+use seedwell_control::proto::ListFilter;
+use seedwell_control::types::TransferDto;
 
 use crate::args::{Opts, Usage};
 

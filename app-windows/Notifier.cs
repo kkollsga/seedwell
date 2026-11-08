@@ -1,11 +1,11 @@
 using Microsoft.Windows.AppNotifications;
 using Microsoft.Windows.AppNotifications.Builder;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
 /// <summary>
-/// Notifications on Windows (the Mac's Notifier), from the core's <c>Notices</c> (trs-ffi notify.rs): the core's events
+/// Notifications on Windows (the Mac's Notifier), from the core's <c>Notices</c> (seedwell-ffi notify.rs): the core's events
 /// and, every <c>chat_poll_ms</c>, the new chat messages, each turned by Rust into a notice to post or a place to open.
 /// Every rule (the Notifications settings, hidden trackers, the finished burst, muted channels, the conversation on
 /// screen) and every word is the core's; this posts Windows notifications (a key the core gives replaces the earlier
@@ -148,12 +148,12 @@ sealed class Notifier
     {
         click = Uri.UnescapeDataString(click);
         AppLog.Write($"notice clicked{(action is null ? "" : $": {action}")}");
-        if (action is not null && TrsFfiMethods.NoticeDecision(click, action) is NoticeDecision d)
+        if (action is not null && SeedwellFfiMethods.NoticeDecision(click, action) is NoticeDecision d)
         {
             Decide(d.RequestId, d.Approve);
             return;
         }
-        Route(TrsFfiMethods.NoticeRoute(click));
+        Route(SeedwellFfiMethods.NoticeRoute(click));
     }
 
     /// <summary>An agent's request approved or denied (a notice's button, the tray, Settings): the core decides, its answer is posted.</summary>

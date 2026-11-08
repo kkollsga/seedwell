@@ -3,8 +3,8 @@
 //! must encode and decode again to the same message.
 
 use libfuzzer_sys::fuzz_target;
-use trs_sync_proto::codec::Frame;
-use trs_sync_proto::msg::Message;
+use seedwell_sync_proto::codec::Frame;
+use seedwell_sync_proto::msg::Message;
 
 fuzz_target!(|data: &[u8]| {
     // As a stream of frames (the first 4 bytes of each are its length).

@@ -40,7 +40,7 @@ fn folder_sync_runs_in_the_daemon() {
     assert_eq!(text.code, 0, "{}", text.stderr);
     assert!(text.stdout.contains("Docs") && text.stdout.contains(&group), "{}", text.stdout);
     // The owner's key and the links are in a file only the user can read, never in sync.toml.
-    if let Some(mode) = trs_platform::fs::unix_mode(&std::fs::metadata(d.state.join("sync").join("secrets")).unwrap()) {
+    if let Some(mode) = seedwell_platform::fs::unix_mode(&std::fs::metadata(d.state.join("sync").join("secrets")).unwrap()) {
         assert_eq!(mode & 0o777, 0o600);
     }
     let toml = std::fs::read_to_string(d.state.join("sync.toml")).unwrap();
@@ -74,9 +74,9 @@ fn the_sync_port_moves_at_once_and_a_port_in_use_is_refused() {
     // Ports no other test is given (a port bound to port 0 and let go may be taken by another test before the move, or
     // be listened on again after it, and "let go" would fail without a bug): the first move puts sync on one.
     let lo = [std::net::IpAddr::from([127, 0, 0, 1]), std::net::IpAddr::from(std::net::Ipv6Addr::LOCALHOST)];
-    let before = trs_platform::net::closed_tcp_port(&lo);
+    let before = seedwell_platform::net::closed_tcp_port(&lo);
     assert_eq!(d.json(&["sync", "settings", "--port", &before.to_string()])["port"].as_u64(), Some(u64::from(before)));
-    let want = std::iter::repeat_with(|| trs_platform::net::closed_tcp_port(&lo)).find(|p| *p != before).unwrap();
+    let want = std::iter::repeat_with(|| seedwell_platform::net::closed_tcp_port(&lo)).find(|p| *p != before).unwrap();
 
     // A free port: sync starts again on it, with its folder, and the old port is let go.
     let st = d.json(&["sync", "settings", "--port", &want.to_string()]);
@@ -108,7 +108,7 @@ fn the_sync_port_moves_at_once_and_a_port_in_use_is_refused() {
 
 /// Starts `seedwell relay` and returns it with its ready line.
 fn relay(key: &std::path::Path) -> (std::process::Child, String) {
-    let mut child = trs_platform::proc::stoppable_command(BIN)
+    let mut child = seedwell_platform::proc::stoppable_command(BIN)
         .args(["relay", "--port", "0", "--bind", "127.0.0.1", "--key-file"])
         .arg(key)
         .stdout(Stdio::piped())
@@ -133,10 +133,10 @@ fn the_relay_starts_and_keeps_its_id() {
     let (mut a, line) = relay(&key);
     assert!(line.starts_with("seedwell relay ready address=relay://127.0.0.1:"), "{line:?}");
     let id = line.split('#').nth(1).unwrap().split_whitespace().next().unwrap().to_owned();
-    trs_platform::proc::request_stop(&a).unwrap();
+    seedwell_platform::proc::request_stop(&a).unwrap();
     let status = a.wait().unwrap();
     assert!(status.success(), "asked to stop, it stops cleanly: {status:?}");
-    if let Some(mode) = trs_platform::fs::unix_mode(&std::fs::metadata(&key).unwrap()) {
+    if let Some(mode) = seedwell_platform::fs::unix_mode(&std::fs::metadata(&key).unwrap()) {
         assert_eq!(mode & 0o777, 0o600);
     }
     let (mut b, line) = relay(&key);
@@ -342,16 +342,16 @@ fn agents_on_one_mac_talk_in_their_projects_threads() {
     let first = cli_stdin(&a, &["chat", "send", "Bridge", "--project", "Seedwell", "--as", "seedwell", "-"], "## Built\n\n1. app\n2. cli");
     assert_eq!(first.code, 0, "{}", first.stderr);
     let first: serde_json::Value = serde_json::from_str(&first.stdout).unwrap();
-    let second = cli_stdin(&a, &["chat", "send", "Bridge", "--project", "seedwell", "--as", "TorrentRS", "-"], "thanks");
+    let second = cli_stdin(&a, &["chat", "send", "Bridge", "--project", "seedwell", "--as", "Makro", "-"], "thanks");
     assert_eq!(second.code, 0, "{}", second.stderr);
     let second: serde_json::Value = serde_json::from_str(&second.stdout).unwrap();
     assert_eq!(first["topic"], second["topic"], "the second post reuses the thread: {first} {second}");
-    assert_eq!((first["topic_title"].as_str(), second["agent"].as_str()), (Some("Seedwell"), Some("TorrentRS")));
+    assert_eq!((first["topic_title"].as_str(), second["agent"].as_str()), (Some("Seedwell"), Some("Makro")));
     let mut line = String::new();
     BufReader::new(watch.stdout.take().unwrap()).read_line(&mut line).unwrap();
     let _ = watch.wait();
     let m: serde_json::Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line}"));
-    assert_eq!((m["agent"].as_str(), m["body"].as_str(), m["trust"].as_str()), (Some("TorrentRS"), Some("thanks"), Some("untrusted-agent")), "{m}");
+    assert_eq!((m["agent"].as_str(), m["body"].as_str(), m["trust"].as_str()), (Some("Makro"), Some("thanks"), Some("untrusted-agent")), "{m}");
 
     let topics = a.json(&["chat", "topics", "Bridge"]);
     assert_eq!(topics["topics"].as_array().map(Vec::len), Some(1), "one thread: {topics}");

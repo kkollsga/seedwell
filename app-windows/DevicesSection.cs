@@ -1,12 +1,12 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
 /// <summary>
 /// Settings › Devices on Windows (SPEC §7G.1 "Your devices", §7G.5): the PC's own devices, drawn from the core's
-/// <c>DevicesView</c> (trs-ffi devices_text.rs, as the Mac's Settings tab): the list with Remove…, a device asking to
+/// <c>DevicesView</c> (seedwell-ffi devices_text.rs, as the Mac's Settings tab): the list with Remove…, a device asking to
 /// pair (its id, Refuse and Pair), Pair a Device… (the link, Copy, the countdown), Pair with a Link… and Leave or
 /// Start Over, each in a dialog. Read again every second. Only the user's clicks reach these calls; agents never.
 /// "On all my devices" is in a folder's Add Folder and Edit dialogs (<see cref="EditFolderDialog"/>), New Channel and
@@ -31,7 +31,7 @@ sealed class DevicesSection
         timer.Interval = TimeSpan.FromSeconds(1);
         timer.Tick += (_, _) => Update();
         // The core's pace (DevicesView.RefreshMs) from the first read on.
-        // Read only while shown (the page is made anew each time it opens).
+        // Read only while shown.
         panel.Loaded += (_, _) => timer.Start();
         panel.Unloaded += (_, _) => timer.Stop();
         Update();
@@ -39,11 +39,19 @@ sealed class DevicesSection
 
     static ulong NowS() => (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
+    /// <summary>QA: what a change of the core's view does, while the section is showing (its timer runs only then).</summary>
+    internal void QaRedraw()
+    {
+        if (!panel.IsLoaded) return;
+        drawn = "";
+        Update();
+    }
+
     void Update()
     {
         if (link is PairLinkView l && countdown is TextBlock t)
         {
-            t.Text = TrsFfiMethods.DevicesCountdown(l.ExpiresS, NowS());
+            t.Text = SeedwellFfiMethods.DevicesCountdown(l.ExpiresS, NowS());
         }
         DevicesView v;
         try { v = app.Core.DevicesView(); }
@@ -66,7 +74,9 @@ sealed class DevicesSection
         $"{v.Kind}|{string.Join(";", v.Rows.Select(r => $"{r.Id},{r.Title},{r.Detail},{r.Warning}"))}|{string.Join(";", v.Requests.Select(r => $"{r.Id},{r.Question}"))}"
         + $"|{v.JoiningLine}|{v.JoiningProblem}|{v.PairEnabled}|{v.LinkEnabled}|{v.LeaveTitle}";
 
-    void Draw(DevicesView v)
+    void Draw(DevicesView v) => FocusKeeper.Redraw(panel, panel.XamlRoot, () => DrawAnew(v));
+
+    void DrawAnew(DevicesView v)
     {
         panel.Children.Clear();
         panel.Children.Add(new TextBlock { Text = "Devices", FontSize = 18, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Margin = new Thickness(0, 12, 0, 0) });
@@ -155,7 +165,7 @@ sealed class DevicesSection
         {
             return;
         }
-        _ = new ContentDialog { XamlRoot = root, Content = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap }, CloseButtonText = TrsFfiMethods.AlertOkTitle() }.ShowAsync();
+        _ = new ContentDialog { XamlRoot = root, Content = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap }, CloseButtonText = SeedwellFfiMethods.AlertOkTitle() }.ShowAsync();
     }
 
     async void ShowPairLink()
@@ -171,7 +181,7 @@ sealed class DevicesSection
         var content = new StackPanel { Spacing = 10, MaxWidth = 460 };
         content.Children.Add(new TextBlock { Text = l.Text, TextWrapping = TextWrapping.Wrap, Opacity = 0.8 });
         content.Children.Add(new TextBox { Text = l.Link, IsReadOnly = true, TextWrapping = TextWrapping.Wrap, FontFamily = new Microsoft.UI.Xaml.Media.FontFamily("Consolas") });
-        countdown = new TextBlock { Text = TrsFfiMethods.DevicesCountdown(l.ExpiresS, NowS()), Opacity = 0.7 };
+        countdown = new TextBlock { Text = SeedwellFfiMethods.DevicesCountdown(l.ExpiresS, NowS()), Opacity = 0.7 };
         content.Children.Add(countdown);
         var d = new ContentDialog { XamlRoot = root, Title = l.Title, Content = content, PrimaryButtonText = l.CopyTitle, CloseButtonText = "Done", DefaultButton = ContentDialogButton.Primary };
         d.PrimaryButtonClick += (_, args) =>

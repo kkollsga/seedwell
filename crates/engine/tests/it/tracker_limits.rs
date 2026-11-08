@@ -4,10 +4,10 @@ use crate::common;
 use std::time::{Duration, Instant};
 
 use common::*;
-use trs_engine::*;
-use trs_state::rules::{DefaultRule, SeedingGoal};
-use trs_state::trackers::{Profile, UrlPattern};
-use trs_state::{RuleSet, TrackerProfiles};
+use seedwell_engine::*;
+use seedwell_state::rules::{DefaultRule, SeedingGoal};
+use seedwell_state::trackers::{Profile, UrlPattern};
+use seedwell_state::{RuleSet, TrackerProfiles};
 
 const ANNOUNCE: &str = "http://127.0.0.1:1/announce";
 

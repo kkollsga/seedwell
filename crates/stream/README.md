@@ -1,4 +1,4 @@
-# trs-stream
+# seedwell-stream
 
 Seedwell's streaming server (SPEC 7F, "play while downloading"). It serves one file of a
 downloading torrent over a loopback HTTP/1.1 server with `Range` support so the user's own player
@@ -121,8 +121,8 @@ pub trait PieceSource: Send + Sync + 'static {
 
 ## Tests
 
-`cargo test -p trs-stream` (no network, no real home/Downloads; ffmpeg fixtures are cached in
-`target/tmp/trs-stream-fixtures`, generated with `/opt/homebrew/bin/ffmpeg`, tests skip if it is missing):
+`cargo test -p seedwell-stream` (no network, no real home/Downloads; ffmpeg fixtures are cached in
+`target/tmp/seedwell-stream-fixtures`, generated with `/opt/homebrew/bin/ffmpeg`, tests skip if it is missing):
 
 * `src` unit tests: ranges, request parsing, planner, container probes (hand-built atoms and EBML), MIME.
 * `tests/protocol.rs`: range forms, errors, non-loopback refusal, keep-alive/pipelining, verification gating,
@@ -130,8 +130,8 @@ pub trait PieceSource: Send + Sync + 'static {
   > 4 GiB offsets, two streams, removal mid-play, AVFoundation-style small parallel ranges, stale cursors.
 * `tests/real_files.rs`: probes against real ffmpeg MP4 (moov at end / faststart) and MKV (Cues at end), and the
   stream finding the index first against a fake swarm.
-* `tests/players.rs` (`#[ignore]`): real players; see the header of the file. `cargo test -p trs-stream --test players
-  -- --ignored --nocapture --test-threads=1`. `TRS_PIECE_MIB` and `TRS_RATE_MBS` tune the fake swarm.
+* `tests/players.rs` (`#[ignore]`): real players; see the header of the file. `cargo test -p seedwell-stream --test players
+  -- --ignored --nocapture --test-threads=1`. `SEEDWELL_PIECE_MIB` and `SEEDWELL_RATE_MBS` tune the fake swarm.
   `tests/players/avf.swift` is the AVFoundation probe (AVURLAsset + AVPlayer + seek), built with `swiftc`.
 
 The fake swarm (`tests/common/fake.rs`) delivers pieces at a fixed rate: urgent hints by deadline (round-robin

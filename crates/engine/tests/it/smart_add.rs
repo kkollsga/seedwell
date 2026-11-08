@@ -9,8 +9,8 @@ use std::time::Duration;
 use common::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use trs_engine::config::{AfterAdd, AskMode, DetectionConfig, SmartAddConfig, WatchConfig, WatchMode};
-use trs_engine::*;
+use seedwell_engine::config::{AfterAdd, AskMode, DetectionConfig, SmartAddConfig, WatchConfig, WatchMode};
+use seedwell_engine::*;
 
 struct Lab {
     dl: PathBuf,
@@ -437,7 +437,7 @@ async fn cancel_leaves_nothing_and_never_touches_the_users_files() {
     walk(&l.dl, &mut found);
     assert_eq!(found, std::slice::from_ref(&own));
     // The stored .torrent and the record are gone, and it can be added again.
-    use trs_engine::persist::Store;
+    use seedwell_engine::persist::Store;
     n.h.flush().await.unwrap();
     assert!(n.store.load_torrents().unwrap().is_empty());
     let again = n.h.add_torrent_file(t.bytes.clone(), AddOptions::default()).await.unwrap();
@@ -576,7 +576,7 @@ async fn a_held_torrent_remembers_its_torrent_file_and_only_a_matching_one_count
     // A link in its place is not a regular file (where this system lets us make one).
     let real = l.state.join("real.dat");
     std::fs::rename(&file, &real).unwrap();
-    if trs_platform::fs::symlink(&real.to_string_lossy(), &file).is_ok() {
+    if seedwell_platform::fs::symlink(&real.to_string_lossy(), &file).is_ok() {
         assert_eq!(n.h.held_source(t.id), None, "a symlink is never offered");
         std::fs::remove_file(&file).unwrap();
     }

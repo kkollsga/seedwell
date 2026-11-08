@@ -6,11 +6,11 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use trs_sync::ondemand::ROOT_ID;
-use trs_sync_net::secrets::FileSecrets;
-use trs_sync_net::{Options, SyncHandle};
-use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::members::Role;
+use seedwell_sync::ondemand::ROOT_ID;
+use seedwell_sync_net::secrets::FileSecrets;
+use seedwell_sync_net::{Options, SyncHandle};
+use seedwell_sync_proto::ids::FolderId;
+use seedwell_sync_proto::members::Role;
 
 struct Device {
     h: SyncHandle,
@@ -51,7 +51,7 @@ fn listed(d: &Device, id: &FolderId) -> usize {
         while let Ok(Some(page)) = d.h.od_children(id, &dir, cursor.as_deref(), 1000) {
             for i in &page.items {
                 n += 1;
-                if i.kind == trs_sync_proto::model::FileKind::Dir {
+                if i.kind == seedwell_sync_proto::model::FileKind::Dir {
                     dirs.push(i.id.clone());
                 }
             }
@@ -245,7 +245,7 @@ async fn a_fetch_whose_file_is_recorded_between_its_reads_is_not_given_up() {
 /// until the record is committed, then here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_download_waiting_for_its_record_is_coming_until_it_is_recorded() {
-    use trs_sync_net::service::FetchWait;
+    use seedwell_sync_net::service::FetchWait;
     let film = noise(3_000_000, 8);
     for maker_leaves in [false, true] {
         let (a, b, _fa, _fb, id) = owner_and_member(&[("Film.mkv", film.clone())], false).await;
@@ -325,7 +325,7 @@ async fn listings_and_status_answer_at_once_while_a_scan_holds_the_folder() {
         d.h.test_scan_hold(Duration::from_millis(1500));
         d.h.rescan(&id).unwrap();
     }
-    let scanning = |d: &Device| d.h.snapshot().folders.iter().any(|f| f.id == id.to_string() && f.state == trs_sync_net::status::FolderState::Scanning);
+    let scanning = |d: &Device| d.h.snapshot().folders.iter().any(|f| f.id == id.to_string() && f.state == seedwell_sync_net::status::FolderState::Scanning);
     until(10, "both scan", || scanning(&a) && scanning(&b)).await;
     let calls = answers_at_once(&a, &b, &id, true, "the folder scanned", Duration::from_secs(3)).await;
     assert!(calls > 30, "{calls}");
@@ -354,7 +354,7 @@ async fn a_full_folders_names_come_first_and_its_scan_says_how_far_it_is() {
     until(20, "B lists the small files while A still hashes", || b.h.od_item_at(&id, "Extras/note 049.txt").ok().flatten().is_some()).await;
     let st = a.h.snapshot().folders.into_iter().find(|f| f.id == id.to_string()).unwrap();
     let scan = st.scan.expect("still scanning: the films are read after the names");
-    assert_eq!(scan.phase, trs_sync::scan::ScanPhase::CheckingContents);
+    assert_eq!(scan.phase, seedwell_sync::scan::ScanPhase::CheckingContents);
     // (The small files were read as the walk met them.)
     assert_eq!((scan.files, scan.check_files), (66, 66), "the totals, known once the walk is over");
     assert!(scan.check_bytes > 16 << 30 && scan.bytes == scan.check_bytes);
@@ -422,7 +422,7 @@ async fn a_stream_stalled_on_a_piece_holds_up_no_call_on_the_folders_core() {
     assert!(!fetch.is_finished(), "the stream was still on its way");
     // (And the folder says it syncs, not that it waits for devices, while the stream runs after the rounds.)
     let state = b.h.snapshot().folders.into_iter().find(|f| f.id == id.to_string()).unwrap().state;
-    assert_eq!(state, trs_sync_net::status::FolderState::Syncing);
+    assert_eq!(state, seedwell_sync_net::status::FolderState::Syncing);
     a.h.test_stream_wait(Duration::ZERO);
     let got = fetch.await.unwrap().unwrap();
     assert_eq!(std::fs::read(&got.path).unwrap(), film);
@@ -468,7 +468,7 @@ async fn a_fetch_stalled_on_a_chunk_holds_up_no_call_on_the_folders_core() {
         std::fs::write(src.join("Notes/a.txt"), b"note").unwrap();
         // A full folder: hashed as it is added.
         let id: FolderId = a.h.add_folder(src).await.unwrap().id.parse().unwrap();
-        until(30, "A has scanned", || a.h.snapshot().folders.iter().any(|f| f.id == id.to_string() && f.state == trs_sync_net::status::FolderState::UpToDate)).await;
+        until(30, "A has scanned", || a.h.snapshot().folders.iter().any(|f| f.id == id.to_string() && f.state == seedwell_sync_net::status::FolderState::UpToDate)).await;
         // Each chunk answered seconds late: a fetch that stands on its chunks.
         a.h.test_serve_wait(Duration::from_secs(4));
         let link = a.h.create_invite(&id, Role::ReadWrite, 1, 1).unwrap().link;
@@ -530,7 +530,7 @@ async fn a_long_stream_holds_up_no_hashed_files_fetch() {
     // A full folder (notes hashed as it is added), then marked on demand for the others: the film added after is
     // listed, not hashed.
     let id: FolderId = a.h.add_folder(src.clone()).await.unwrap().id.parse().unwrap();
-    until(30, "A has scanned", || a.h.snapshot().folders.iter().any(|f| f.id == id.to_string() && f.state == trs_sync_net::status::FolderState::UpToDate)).await;
+    until(30, "A has scanned", || a.h.snapshot().folders.iter().any(|f| f.id == id.to_string() && f.state == seedwell_sync_net::status::FolderState::UpToDate)).await;
     a.h.set_files_on_demand(&id, true, None).await.unwrap();
     let film = noise(30_000_000, 62);
     std::fs::write(src.join("Film.mkv"), &film).unwrap();
@@ -576,7 +576,7 @@ async fn a_service_started_again_while_a_fetch_was_finishing_opens_the_folder() 
     std::fs::create_dir_all(&src).unwrap();
     std::fs::write(src.join("notes.bin"), noise(300_000, 71)).unwrap();
     let id: FolderId = a.h.add_folder(src).await.unwrap().id.parse().unwrap();
-    until(30, "A has scanned", || a.h.snapshot().folders.iter().any(|f| f.id == id.to_string() && f.state == trs_sync_net::status::FolderState::UpToDate)).await;
+    until(30, "A has scanned", || a.h.snapshot().folders.iter().any(|f| f.id == id.to_string() && f.state == seedwell_sync_net::status::FolderState::UpToDate)).await;
     let b = start().await;
     // B's fetch of the file ends, then stands with the index held (as a slow disk's flush would).
     b.test_job_hold(Duration::from_secs(3));

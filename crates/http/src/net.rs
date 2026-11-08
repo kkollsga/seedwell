@@ -37,7 +37,7 @@ pub(crate) struct Net {
     route: Option<crate::types::RouteFn>,
     /// The client through the proxy in use, kept while that proxy is (its own keep-alive pool: a direct
     /// connection is never reused for a proxied request or the other way round).
-    via: Mutex<Option<(trs_socks::Proxy, SocksClient)>>,
+    via: Mutex<Option<(seedwell_socks::Proxy, SocksClient)>>,
 }
 
 type SocksClient = Client<HttpsConnector<SocksConnector>, Empty<Bytes>>;
@@ -45,7 +45,7 @@ type SocksClient = Client<HttpsConnector<SocksConnector>, Empty<Bytes>>;
 /// Connects through a SOCKS5 proxy, which resolves the host name: nothing is looked up here.
 #[derive(Clone)]
 struct SocksConnector {
-    proxy: Arc<trs_socks::Proxy>,
+    proxy: Arc<seedwell_socks::Proxy>,
     timeout: Duration,
 }
 
@@ -64,7 +64,7 @@ impl tower_service::Service<Uri> for SocksConnector {
             let host = uri.host().unwrap_or_default();
             let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host).to_owned();
             let port = uri.port_u16().unwrap_or(if uri.scheme_str() == Some("https") { 443 } else { 80 });
-            let (s, _) = trs_socks::connect(&me.proxy, &trs_socks::Target::Name(host, port), me.timeout).await?;
+            let (s, _) = seedwell_socks::connect(&me.proxy, &seedwell_socks::Target::Name(host, port), me.timeout).await?;
             Ok(hyper_util::rt::TokioIo::new(s))
         })
     }
@@ -125,7 +125,7 @@ impl Net {
         }
     }
 
-    fn socks_client(&self, proxy: trs_socks::Proxy) -> SocksClient {
+    fn socks_client(&self, proxy: seedwell_socks::Proxy) -> SocksClient {
         let mut via = self.via.lock().unwrap_or_else(|p| p.into_inner());
         if let Some((p, c)) = via.as_ref()
             && *p == proxy

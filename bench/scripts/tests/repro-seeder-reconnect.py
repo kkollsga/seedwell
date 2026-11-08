@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Repro for the TorrentRS hot-variant failure (needs TRS_BENCH_BIN; do not run during another benchmark).
+"""Repro for the Seedwell hot-variant failure (needs SEEDWELL_BENCH_BIN; do not run during another benchmark).
 
-A TorrentRS seeder serves one Transmission leecher process (round "a"), the leecher exits, and a *new* leecher
+A Seedwell seeder serves one Transmission leecher process (round "a"), the leecher exits, and a *new* leecher
 process from the same IP connects (round "b").  Observed 2026-10-11: round a completes (first block after ~30 s),
 round b never connects (seeder peers = 0) within 100 s.
 
@@ -23,7 +23,7 @@ tr = MockTracker(7171, util.RUNS / "trackerlogs" / "repro.jsonl", peers=[f"{ip}:
 mset, ddir = ensure_scale_set(500, tr.announce_url)
 mset = mset[:12]
 tr.start()
-s = ADAPTERS["torrentrs"]("s")
+s = ADAPTERS["seedwell"]("s")
 s.launch(LaunchCfg(util.PROFILES / "repro-s", 51413, 0, "local", iface=iface), [(m["torrent"], ddir) for m in mset])
 while not s.poll()["complete"]:
     time.sleep(1)

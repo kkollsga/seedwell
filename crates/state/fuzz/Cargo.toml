@@ -1,5 +1,5 @@
 [package]
-name = "trs-state-fuzz"
+name = "seedwell-state-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
@@ -9,8 +9,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-trs-state = { path = ".." }
-trs-classify = { path = "../../classify" }
+seedwell-state = { path = ".." }
+seedwell-classify = { path = "../../classify" }
 
 # Keeps this crate out of the root workspace.
 [workspace]

@@ -8,7 +8,7 @@ use std::fmt;
 
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use trs_classify::Category;
+use seedwell_classify::Category;
 
 use crate::doc::{Document, Parsed, parse_toml, render_table, salvage_table};
 use crate::duration::Secs;
@@ -423,6 +423,14 @@ impl Default for WatchFolder {
     }
 }
 
+impl WatchFolder {
+    /// A folder the user adds to the watch list (Settings › Folders' +, or an agent's `settings set folders.watch`):
+    /// on, asking before it adds, the `.torrent` file left where it is. The engine host stamps `since`.
+    pub fn added(path: impl Into<String>) -> Self {
+        WatchFolder { path: path.into(), mode: WatchMode::Ask, after_add: AfterAdd::Leave, ..WatchFolder::default() }
+    }
+}
+
 /// Per-category location overrides (SPEC §7A.4). Both optional; unset means "the app default".
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -516,7 +524,7 @@ pub struct Folders {
     pub download_dir: String,
     /// The app-level default **incomplete location**: staging root for unfinished downloads
     /// (same volume as the finished location recommended; a different volume makes finishing
-    /// a copy, see `trs_state::volume`).
+    /// a copy, see `seedwell_state::volume`).
     pub incomplete_dir: String,
     /// Organize finished torrents by sharing state (SPEC §7A.3): `Active/`, `Dormant/`, `Stopped/`
     /// and `Dead/` below their finished location. Off keeps the layout flat.
@@ -597,7 +605,7 @@ pub struct Network {
     /// Trackers on a private network (RFC 1918, CGNAT, ULA: a LAN or VPN tracker) may be
     /// contacted. Off by default: a tracker URL comes from a stranger's `.torrent`, and the
     /// strict policy keeps it from aiming requests at the user's router or local services
-    /// (SPEC 7C, `trs-tracker` destination policy). Loopback, link-local and cloud metadata
+    /// (SPEC 7C, `seedwell-tracker` destination policy). Loopback, link-local and cloud metadata
     /// addresses stay refused whatever this says. Takes effect when the engine starts.
     pub allow_lan_trackers: bool,
     /// Torrent traffic through a SOCKS5 proxy (SPEC §7H): `[network.proxy]`. The key (username and password) is in

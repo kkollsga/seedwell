@@ -2,8 +2,8 @@
 
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::time::{Duration, Instant};
-use trs_dht::codec::{self, Body, Envelope, Query, QueryOut, ResponseOut};
-use trs_dht::{Config, DhtCore, Event, Id, Input, Intent, PublicInfoHash, Refused};
+use seedwell_dht::codec::{self, Body, Envelope, Query, QueryOut, ResponseOut};
+use seedwell_dht::{Config, DhtCore, Event, Id, Input, Intent, PublicInfoHash, Refused};
 
 const ME: Id = [0x42; 20];
 
@@ -216,7 +216,7 @@ fn answers_ping_and_find_node_like_a_good_node() {
     assert!(!nodes.is_empty() && nodes.len() <= 8);
     assert_eq!(nodes[0].0, target, "exact match is closest");
     for w in nodes.windows(2) {
-        assert!(trs_dht::id::cmp_distance(&target, &w[0].0, &w[1].0).is_le());
+        assert!(seedwell_dht::id::cmp_distance(&target, &w[0].0, &w[1].0).is_le());
     }
 }
 
@@ -850,7 +850,7 @@ fn external_ip_consensus_regenerates_a_secure_node_id() {
     };
     assert_eq!(old, ME);
     assert_eq!(h.core.node_id(), new);
-    assert!(trs_dht::id::is_valid_for_ip(&new, *me_seen.ip()));
+    assert!(seedwell_dht::id::is_valid_for_ip(&new, *me_seen.ip()));
     assert_eq!(h.core.external_ip(), Some(*me_seen.ip()));
 }
 
@@ -923,7 +923,7 @@ fn saved_state_is_capped_at_200_nodes() {
     for n in 1..=3000 {
         introduce(&mut h, 1000, peer(n), nid(n));
     }
-    assert!(h.core.save_state().len() <= 27 + trs_dht::MAX_SAVED_NODES * 26);
+    assert!(h.core.save_state().len() <= 27 + seedwell_dht::MAX_SAVED_NODES * 26);
 }
 
 #[test]

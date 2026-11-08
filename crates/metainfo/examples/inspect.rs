@@ -1,11 +1,11 @@
 //! Prints a summary of a `.torrent` file or magnet URI.
 //!
 //! ```text
-//! cargo run -p trs-metainfo --example inspect -- path/to/file.torrent
-//! cargo run -p trs-metainfo --example inspect -- 'magnet:?xt=urn:btih:...'
+//! cargo run -p seedwell-metainfo --example inspect -- path/to/file.torrent
+//! cargo run -p seedwell-metainfo --example inspect -- 'magnet:?xt=urn:btih:...'
 //! ```
 
-use trs_metainfo::{Magnet, Metainfo};
+use seedwell_metainfo::{Magnet, Metainfo};
 
 fn main() {
     let Some(arg) = std::env::args().nth(1) else {

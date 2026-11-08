@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use common::*;
-use trs_portmap::*;
+use seedwell_portmap::*;
 
 const GW: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 const LOCAL: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
@@ -104,7 +104,7 @@ impl World {
                 Output::Udp { to, data } => {
                     assert_eq!(
                         to,
-                        SocketAddr::V4(trs_portmap::ssdp::MULTICAST),
+                        SocketAddr::V4(seedwell_portmap::ssdp::MULTICAST),
                         "unexpected destination"
                     );
                     assert!(data.starts_with(b"M-SEARCH"));

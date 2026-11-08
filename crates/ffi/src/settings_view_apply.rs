@@ -5,7 +5,7 @@
 use crate::menu::APP_NAME;
 use crate::settings::{
     AgentPermission, AskMode, EncryptionSetting, OnBatteryMode, OnGoalAction, PreallocationMode, ScheduleDays, TorrentFileAction,
-    WatchFolderSetting, WatchModeSetting,
+    WatchModeSetting,
 };
 use crate::settings::GoalKind;
 use crate::settings_parse::{self as p, PortEntry, SettingsFieldKind};
@@ -473,16 +473,8 @@ fn change(s: &mut SettingsState, c: &SettingsChange) -> Outcome {
             if path.trim().is_empty() || watch.iter().any(|w| &w.path == path) {
                 return Outcome::refused();
             }
-            watch.push(WatchFolderSetting {
-                path: path.clone(),
-                enabled: true,
-                mode: WatchModeSetting::Ask,
-                after_add: TorrentFileAction::Leave,
-                archive_dir: None,
-                category: None,
-                rule: None,
-                since: None,
-            });
+            // The same new entry an agent's `settings set folders.watch` makes (`WatchFolder::added`).
+            watch.push(crate::settings::watch_to(&seedwell_state::config::WatchFolder::added(path.clone())));
             s.view.selected_watch = Some(watch.len() as u32 - 1);
             Outcome::save(SettingsStore::Settings)
         }

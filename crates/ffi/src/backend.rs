@@ -86,7 +86,7 @@ pub trait Backend: Send + Sync {
     /// Agents' live leases on keeping the Mac awake (`None`: no agent asked). Cheap.
     fn agents_awake(&self) -> Option<crate::types::AgentsAwake>;
     /// Agents' pending requests for access the user is asked about, newest first (SPEC 9A.3). Cheap.
-    fn agent_requests(&self) -> Vec<trs_control::access::Entry>;
+    fn agent_requests(&self) -> Vec<seedwell_control::access::Entry>;
     /// The user's answer to one, from the app (its notification, Settings › Agents, the menu): what happened, or why
     /// nothing did. Only the app calls this; agents have no way to.
     fn agent_request_decide(&self, id: &str, approve: bool) -> Result<String, String>;
@@ -176,16 +176,16 @@ pub trait Backend: Send + Sync {
     }
     /// The secret store of the keys (the Keychain the app passed, else the state folder's vault): where the torrent
     /// proxy's key is kept (SPEC §7H). `None` for a backend without one (the mock).
-    fn secrets(&self) -> Option<Arc<dyn trs_sync_net::secrets::SecretStore>> {
+    fn secrets(&self) -> Option<Arc<dyn seedwell_sync_net::secrets::SecretStore>> {
         None
     }
     /// Torrent traffic through a SOCKS5 proxy, or directly again (`None`): at once (SPEC §7H).
-    fn set_torrent_proxy(&self, _proxy: Option<trs_engine::ProxyConfig>) {}
+    fn set_torrent_proxy(&self, _proxy: Option<seedwell_engine::ProxyConfig>) {}
     /// Tests every server of the torrent proxy now (the status's `ranks` counts up when done). Returns at once.
     fn torrent_proxy_rank_now(&self) {}
     /// How the torrent proxy is doing. Cheap, never waits for the engine.
-    fn torrent_proxy_status(&self) -> trs_engine::ProxyStatus {
-        trs_engine::ProxyStatus::default()
+    fn torrent_proxy_status(&self) -> seedwell_engine::ProxyStatus {
+        seedwell_engine::ProxyStatus::default()
     }
     /// A decision of the app's worth a line in the developer log (`Decision`, `event`): a stall of the host's UI thread.
     /// Never blocks.

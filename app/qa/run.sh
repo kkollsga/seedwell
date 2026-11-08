@@ -15,7 +15,7 @@ source "$HERE/env.sh"
 LOGS="$OUT/logs"
 mkdir -p "$LOGS"
 [ -x "$APPBIN" ] || { echo "no app at $APP: build it first (app/qa/rebuild.sh)"; exit 2; }
-[ -x "$TRS" ] || echo "note: no seedwell daemon at $TRS (scripts with a local seeder need: cargo build --release -p trs-cli)"
+[ -x "$SEEDWELL" ] || echo "note: no seedwell daemon at $SEEDWELL (scripts with a local seeder need: cargo build --release -p seedwell-cli)"
 
 # The scripts that share the standard scene (scenario.sh, built by the first of them): they run one after the other
 # and the scene is torn down after the last.

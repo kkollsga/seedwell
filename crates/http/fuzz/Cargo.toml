@@ -1,5 +1,5 @@
 [package]
-name = "trs-http-fuzz"
+name = "seedwell-http-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-trs-http = { path = ".." }
+seedwell-http = { path = ".." }
 
 # Keeps this crate out of the root workspace.
 [workspace]

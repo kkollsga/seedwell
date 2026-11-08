@@ -60,7 +60,7 @@ echo "==> Seedwell $VERSION ($TAG), commit $(git -C "$REPO" rev-parse --short HE
 
 # Full LTO; build.sh signs with SEEDWELL_SIGN_IDENTITY (sign.sh: hardened runtime, secure timestamp), else ad hoc.
 export SEEDWELL_FAST=0
-# Release peer id `-SW<ver>-` instead of the dev `-SX0001-` (trs-metainfo PEER_ID_PREFIX).
+# Release peer id `-SW<ver>-` instead of the dev `-SX0001-` (seedwell-metainfo PEER_ID_PREFIX).
 export SEEDWELL_RELEASE=1
 "$APP_DIR/build.sh"
 

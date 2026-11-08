@@ -3,7 +3,7 @@
 use crate::adversarial_support;
 
 use adversarial_support::*;
-use trs_tracker::{Event, Millis, TorrentEvent};
+use seedwell_tracker::{Event, Millis, TorrentEvent};
 
 const A: &str = "http://a.test/announce?passkey=SECRET";
 const B: &str = "http://b.test/announce?passkey=SECRET";
@@ -124,7 +124,7 @@ fn bug_duplicate_late_success_trips_the_host() {
     assert!(
         lab.gate_events
             .iter()
-            .all(|e| !matches!(e, trs_tracker::gate::GateEvent::HostTripped { .. })),
+            .all(|e| !matches!(e, seedwell_tracker::gate::GateEvent::HostTripped { .. })),
         "host tripped: {:?}",
         lab.gate_events
     );
@@ -154,7 +154,7 @@ fn bug_late_success_after_newer_request_trips_the_host() {
     assert!(
         lab.gate_events
             .iter()
-            .all(|e| !matches!(e, trs_tracker::gate::GateEvent::HostTripped { .. })),
+            .all(|e| !matches!(e, seedwell_tracker::gate::GateEvent::HostTripped { .. })),
         "host tripped: {:?}",
         lab.gate_events
     );
@@ -853,7 +853,7 @@ fn bug_host_trip_cannot_be_recovered_without_restart() {
     assert!(
         lab.gate_events
             .iter()
-            .any(|e| matches!(e, trs_tracker::gate::GateEvent::HostTripped { .. }))
+            .any(|e| matches!(e, seedwell_tracker::gate::GateEvent::HostTripped { .. }))
     );
     let sent_while_tripped = lab.sent.len();
     lab.run_for(d(3600));

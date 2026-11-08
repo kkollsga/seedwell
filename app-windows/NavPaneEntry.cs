@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 

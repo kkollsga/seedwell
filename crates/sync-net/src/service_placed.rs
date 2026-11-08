@@ -4,10 +4,10 @@
 use std::io;
 use std::sync::Arc;
 
-use trs_sync::fs::{Fs, StdFs};
-use trs_sync::index::IndexStore;
-use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::model::FileKind;
+use seedwell_sync::fs::{Fs, StdFs};
+use seedwell_sync::index::IndexStore;
+use seedwell_sync_proto::ids::FolderId;
+use seedwell_sync_proto::model::FileKind;
 
 use super::{OnDemandError, SyncError, SyncHandle, invalid, lock, on_demand};
 use crate::placed::{Mark, Note, PlaceFs, Placed, holds_content, holds_version, mark_of_stamp};
@@ -37,11 +37,11 @@ fn check(path: &str) -> Result<(), SyncError> {
     if path.is_empty() {
         return Err(invalid("the folder itself is not a file"));
     }
-    trs_sync_proto::model::validate_path(path).map_err(|_| invalid(format!("{path:?} is not a path in the folder")))
+    seedwell_sync_proto::model::validate_path(path).map_err(|_| invalid(format!("{path:?} is not a path in the folder")))
 }
 
 /// The placeholder at `at` of `place`, when it holds content.
-fn content_at(place: &StdFs, at: &str) -> io::Result<Option<trs_sync::fs::Meta>> {
+fn content_at(place: &StdFs, at: &str) -> io::Result<Option<seedwell_sync::fs::Meta>> {
     Ok(place.lstat(at)?.filter(|m| m.kind == FileKind::File && !m.dataless && !m.other))
 }
 
@@ -150,9 +150,9 @@ impl SyncHandle {
         let checked = tokio::task::spawn_blocking(move || -> io::Result<Option<(Mark, bool)>> {
             let place = StdFs::new(pl2.place());
             let Some(before) = content_at(&place, &p2)? else { return Ok(None) };
-            let rec = f2.index.view().local(&p2)?.filter(|r| trs_sync::ondemand::live(r) && !r.dataless && r.file.info.kind == FileKind::File);
+            let rec = f2.index.view().local(&p2)?.filter(|r| seedwell_sync::ondemand::live(r) && !r.dataless && r.file.info.kind == FileKind::File);
             let info = match rec {
-                Some(r) if trs_sync::ondemand::content_version_of(&r.file.info) == cv2 => Some(r.file.info),
+                Some(r) if seedwell_sync::ondemand::content_version_of(&r.file.info) == cv2 => Some(r.file.info),
                 _ => handed,
             };
             let same = match &info {
@@ -174,8 +174,8 @@ impl SyncHandle {
         let root = f.root.clone();
         let adopted = self
             .with_core(&f, move |c| {
-                let rec = c.store().local(&p)?.filter(|r| trs_sync::ondemand::live(r) && !r.dataless && r.file.info.kind == FileKind::File);
-                let current = rec.filter(|r| trs_sync::ondemand::content_version_of(&r.file.info) == cv);
+                let rec = c.store().local(&p)?.filter(|r| seedwell_sync::ondemand::live(r) && !r.dataless && r.file.info.kind == FileKind::File);
+                let current = rec.filter(|r| seedwell_sync::ondemand::content_version_of(&r.file.info) == cv);
                 let cache = StdFs::new(root);
                 let note = |real: Option<Mark>, shown: Mark, exec: bool, held: bool| Note { at: p.clone(), real, shown, exec, content: cv.clone(), held };
                 let Some(r) = current else {
@@ -187,7 +187,7 @@ impl SyncHandle {
                     return Ok(None);
                 }
                 let cm = cache.lstat(&p)?;
-                let recorded = cm.as_ref().is_some_and(|m| r.stamp == Some(trs_sync::index::Stamp { size: m.size, mtime_ns: m.mtime_ns, ctime_ns: m.ctime_ns, inode: m.inode }));
+                let recorded = cm.as_ref().is_some_and(|m| r.stamp == Some(seedwell_sync::index::Stamp { size: m.size, mtime_ns: m.mtime_ns, ctime_ns: m.ctime_ns, inode: m.inode }));
                 // Still the placeholder that was read (the user may write to it any time).
                 let unchanged = content_at(&StdFs::new(placed.place()), &p)?.is_some_and(|m| Mark::of(&m).same(&mark));
                 let (Some(cm), true, true, Some(stamp)) = (cm, recorded, same && unchanged, r.stamp) else {
@@ -228,13 +228,13 @@ impl SyncHandle {
                 }
                 return Ok(LocalChange::Unchanged);
             };
-            let rec = f.index.view().local(&p)?.filter(|r| trs_sync::ondemand::live(r) && r.file.info.kind == FileKind::File);
+            let rec = f.index.view().local(&p)?.filter(|r| seedwell_sync::ondemand::live(r) && r.file.info.kind == FileKind::File);
             let here = rec.as_ref().filter(|r| !r.dataless);
             let mark = Mark::of(&m);
             if let Some(n) = &note
                 && n.real.is_some_and(|r| r.same(&mark))
             {
-                let current = here.is_some_and(|r| trs_sync::ondemand::content_version_of(&r.file.info) == n.content);
+                let current = here.is_some_and(|r| seedwell_sync::ondemand::content_version_of(&r.file.info) == n.content);
                 return Ok(if n.held || current { LocalChange::Unchanged } else { LocalChange::Stale });
             }
             // The core reads the version at the name from this placeholder (held): it is that version's only copy here.
@@ -253,7 +253,7 @@ impl SyncHandle {
                 if let Some(n) = note {
                     // The same content as recorded: the note follows the file as it is now.
                     let shown = if n.held { r.stamp.as_ref().map_or(n.shown, mark_of_stamp) } else { n.shown };
-                    placed.put(&p, Note { real: Some(mark), shown, content: trs_sync::ondemand::content_version_of(&r.file.info), ..n })?;
+                    placed.put(&p, Note { real: Some(mark), shown, content: seedwell_sync::ondemand::content_version_of(&r.file.info), ..n })?;
                 }
                 return Ok(LocalChange::Unchanged);
             }
@@ -261,7 +261,7 @@ impl SyncHandle {
             // reads it from here, so whatever this device recorded of it since, its scan's record of an edit included,
             // came from this file); else the one noted.
             let base = match (&note, here) {
-                (Some(_), Some(r)) if held => Some(trs_sync::ondemand::content_version_of(&r.file.info)),
+                (Some(_), Some(r)) if held => Some(seedwell_sync::ondemand::content_version_of(&r.file.info)),
                 (n, _) => n.as_ref().map(|n| n.content.clone()),
             };
             // The user's edit reported already from an earlier version (a report of it now would be a conflict copy,
@@ -270,13 +270,13 @@ impl SyncHandle {
             // this one. Noted as it is now: the next look reads nothing. (An edit from the current version is one,
             // whatever it holds: the user may put a copy's content back at the name.) Never while held: the host
             // would let go of the only copy here of the version at the name.
-            let conflict = !held && rec.as_ref().is_some_and(|r| base.as_deref().is_none_or(|b| b != trs_sync::ondemand::content_version_of(&r.file.info)));
+            let conflict = !held && rec.as_ref().is_some_and(|r| base.as_deref().is_none_or(|b| b != seedwell_sync::ondemand::content_version_of(&r.file.info)));
             let view = f.index.view();
-            let holds_copy = &mut |i: &trs_sync_proto::model::FileInfo| match view.local(&i.path)? {
+            let holds_copy = &mut |i: &seedwell_sync_proto::model::FileInfo| match view.local(&i.path)? {
                 Some(r) => holds_version(&core, &r, &place, &at, false),
                 None => Ok(false),
             };
-            let copy = if conflict { trs_sync::ondemand::copy_holding(&view, &p, holds_copy)? } else { None };
+            let copy = if conflict { seedwell_sync::ondemand::copy_holding(&view, &p, holds_copy)? } else { None };
             if copy.is_some() {
                 crate::placed::after_reading(&placed.place().join(&at));
             }
@@ -287,7 +287,7 @@ impl SyncHandle {
             if let Some(c) = copy.filter(|c| !c.dataless)
                 && still()?
             {
-                let content = trs_sync::ondemand::content_version_of(&c.file.info);
+                let content = seedwell_sync::ondemand::content_version_of(&c.file.info);
                 let n = match note {
                     Some(n) => Note { at: at.clone(), real: Some(mark), content, held: false, ..n },
                     None => Note { at: at.clone(), real: Some(mark), shown: mark, exec: false, content, held: false },

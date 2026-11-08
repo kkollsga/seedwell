@@ -6,18 +6,18 @@ use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use trs_sync::chunk::{Tier, chunk_bytes};
-use trs_sync::clock::Clock;
-use trs_sync::folder::{DeviceSigner, FolderConfig, FolderCore, RemoteIndex, Requested};
-use trs_sync::fs::{FileHandle, Fs, Listing, MemFs, Meta, read_all, write_all};
-use trs_sync::ignore::Ignore;
-use trs_sync::index::{LocalRecord, MemStore};
-use trs_sync::lazy::{ChunksEnd, JobEnd, Stream, StreamEnd, StreamError, run_job};
-use trs_sync::pull::{ChunkRequest, ChunkSource, FetchError, PullReport, StreamAsk, StreamFail, StreamGot};
-use trs_sync::scan::Signer;
-use trs_sync_proto::device::DeviceKey;
-use trs_sync_proto::ids::ShortId;
-use trs_sync_proto::model::{FileInfo, SignedFile};
+use seedwell_sync::chunk::{Tier, chunk_bytes};
+use seedwell_sync::clock::Clock;
+use seedwell_sync::folder::{DeviceSigner, FolderConfig, FolderCore, RemoteIndex, Requested};
+use seedwell_sync::fs::{FileHandle, Fs, Listing, MemFs, Meta, read_all, write_all};
+use seedwell_sync::ignore::Ignore;
+use seedwell_sync::index::{LocalRecord, MemStore};
+use seedwell_sync::lazy::{ChunksEnd, JobEnd, Stream, StreamEnd, StreamError, run_job};
+use seedwell_sync::pull::{ChunkRequest, ChunkSource, FetchError, PullReport, StreamAsk, StreamFail, StreamGot};
+use seedwell_sync::scan::Signer;
+use seedwell_sync_proto::device::DeviceKey;
+use seedwell_sync_proto::ids::ShortId;
+use seedwell_sync_proto::model::{FileInfo, SignedFile};
 
 use crate::flow::{Key, learn_writers};
 
@@ -179,7 +179,7 @@ fn noise(n: usize, seed: u64) -> Vec<u8> {
 /// Signs a stream's end in a test ([`Maker::sign`]).
 type EndSigner<'a> = &'a (dyn Fn(FileInfo) -> [u8; 64] + Sync);
 
-/// The maker's side of the network, as `trs-sync-net` serves it: unhashed files streamed from its disk (one
+/// The maker's side of the network, as `seedwell-sync-net` serves it: unhashed files streamed from its disk (one
 /// [`Stream`] per file, hashed as read, the last piece signed), chunks read from its disk. `meddle` runs before each
 /// piece after the first (a program writing the file meanwhile). Only the version's maker streams.
 struct Maker<'a> {
@@ -233,9 +233,9 @@ impl ChunkSource for Maker<'_> {
                 let sig = p.done.map(|h| match self.sign {
                     Some(sign) => sign(h.info),
                     None => {
-                        // (As `trs-sync-net` serves it: what was signed is noted.)
+                        // (As `seedwell-sync-net` serves it: what was signed is noted.)
                         let signed = self.signer.sign(h.info);
-                        trs_sync::lazy::note_hashed(self.disk, &signed).unwrap();
+                        seedwell_sync::lazy::note_hashed(self.disk, &signed).unwrap();
                         signed.sig
                     }
                 });
@@ -258,7 +258,7 @@ impl ChunkSource for Maker<'_> {
     }
 }
 
-/// Pull rounds until nothing more is done, running the streams the rounds want in between (as `trs-sync-net`'s
+/// Pull rounds until nothing more is done, running the streams the rounds want in between (as `seedwell-sync-net`'s
 /// streamer does, with the folder's core let go).
 fn pull(to: &mut Dev, source: &dyn ChunkSource) -> PullReport {
     let name = |_: ShortId| "device".to_string();
@@ -338,7 +338,7 @@ fn a_folder_marked_on_demand_while_its_first_scan_walks_reads_none_of_its_big_fi
         write_all(&a.disk.fs, &format!("Film {i}.mkv"), &noise(6_000_000, i)).unwrap();
     }
     write_all(&a.disk.fs, "notes.txt", b"hello").unwrap();
-    let mut job = trs_sync::scan::ScanJob::stepped("", std::time::Duration::from_secs(60), 4 << 20);
+    let mut job = seedwell_sync::scan::ScanJob::stepped("", std::time::Duration::from_secs(60), 4 << 20);
     // The walk: small files read as met, the big ones left for after it.
     assert!(!a.core.scan_step(&mut job).unwrap());
     a.core.set_list_first(true);
@@ -442,7 +442,7 @@ fn files(d: &Dev) -> Vec<String> {
                 continue;
             }
             match d.disk.fs.lstat(&p).unwrap().unwrap().kind {
-                trs_sync_proto::model::FileKind::Dir => dirs.push(p),
+                seedwell_sync_proto::model::FileKind::Dir => dirs.push(p),
                 _ => out.push(p),
             }
         }
@@ -478,7 +478,7 @@ fn placed_and_stopped(key: &Key, on_demand: bool, announced: bool, film: &[u8], 
     }
     write_all(&b.disk.fs, "f.bin", bytes).unwrap();
     b.disk.fs.set_mtime("f.bin", v.info.mtime_ns).unwrap();
-    trs_sync::lazy::note_hashed(&b.disk.fs, &h).unwrap();
+    seedwell_sync::lazy::note_hashed(&b.disk.fs, &h).unwrap();
     (a, b, h)
 }
 
@@ -539,7 +539,7 @@ fn a_stream_whose_end_does_not_check_is_never_placed() {
     let key = Key::rw([9; 32]);
     let folder = dev(3, &key).core.folder_id();
     let other = DeviceKey::from_seed(&[3; 32]);
-    let by_another = |info: FileInfo| other.sign(&trs_sync_proto::sign::file_payload(&folder, &info));
+    let by_another = |info: FileInfo| other.sign(&seedwell_sync_proto::sign::file_payload(&folder, &info));
     let maker = DeviceSigner::new(Arc::new(DeviceKey::from_seed(&[1; 32])), dev(1, &key).core.folder_id());
     let other_chunks = |mut info: FileInfo| {
         info.chunks[0].hash[0] ^= 1;
@@ -659,7 +659,7 @@ fn a_file_still_read_after_a_mark_is_read_apart_with_the_core_let_go() {
     let v = a.core.store().local("Film.mkv").unwrap().unwrap().file.info;
     a.disk.fs.rename("Film.mkv", "moved.mkv").unwrap();
     a.disk.fs.rename("moved.mkv", "Film.mkv").unwrap();
-    let mut job = trs_sync::scan::ScanJob::stepped("", std::time::Duration::from_secs(60), 4 << 20);
+    let mut job = seedwell_sync::scan::ScanJob::stepped("", std::time::Duration::from_secs(60), 4 << 20);
     assert!(!a.core.scan_step(&mut job).unwrap());
     assert!(job.take_to_hash().is_empty(), "left for after the walk");
     a.core.set_list_first(true);
@@ -767,7 +767,7 @@ fn a_cut_off_stream_starts_again_when_its_version_or_temp_file_changed_or_it_was
     assert_eq!(read_all(&b.disk.fs, "f.bin").unwrap(), film2);
     // The temp file gone.
     let (a, mut b, film) = cut_off(&key);
-    let tmp = trs_sync::pull::stream_temp_path("f.bin");
+    let tmp = seedwell_sync::pull::stream_temp_path("f.bin");
     assert!(b.disk.fs.lstat(&tmp).unwrap().is_some());
     b.disk.fs.remove_file(&tmp).unwrap();
     let source = Maker::of(&a, None);
@@ -776,7 +776,7 @@ fn a_cut_off_stream_starts_again_when_its_version_or_temp_file_changed_or_it_was
     assert_eq!(read_all(&b.disk.fs, "f.bin").unwrap(), film);
     // Left longer than the maker keeps its read.
     let (a, mut b, film) = cut_off(&key);
-    b.clock.0.fetch_add(trs_sync::lazy::STREAM_IDLE.as_secs() + 1, Ordering::SeqCst);
+    b.clock.0.fetch_add(seedwell_sync::lazy::STREAM_IDLE.as_secs() + 1, Ordering::SeqCst);
     let source = Maker::of(&a, None);
     assert!(pull(&mut b, &source).failed.is_empty());
     assert_eq!(source.asked.lock().unwrap().first(), Some(&0));
@@ -804,7 +804,7 @@ impl ChunkSource for Flaky<'_> {
     }
 }
 
-/// The failures of fetching a hashed file's chunks with the core let go (as `trs-sync-net` does: the round notes what
+/// The failures of fetching a hashed file's chunks with the core let go (as `seedwell-sync-net` does: the round notes what
 /// must come from peers, a job fetches it, a later round places the file): what is here already fetched again, a
 /// chunk that did not come lost (or the file placed without it), a chunk fetched twice, or the file placed with the
 /// round's checks skipped. The changed file is built from the old one plus the changed chunks, a chunk that did not
@@ -932,7 +932,7 @@ fn a_temp_file_left_over_is_checked_by_the_job_not_the_round() {
     a.core.scan("").unwrap();
     send(&a, &mut b);
     // Half of it in a temp file, as a stop leaves it.
-    write_all(&b.disk.fs, &trs_sync::pull::temp_path("film.bin"), &film[..4_500_000]).unwrap();
+    write_all(&b.disk.fs, &seedwell_sync::pull::temp_path("film.bin"), &film[..4_500_000]).unwrap();
     let before = b.disk.read.load(Ordering::SeqCst);
     let name = |_: ShortId| "device".to_string();
     let source = Maker::of(&a, None);
@@ -992,7 +992,7 @@ fn a_job_for_an_old_version_or_a_changed_temp_file_is_never_placed_as_it_is() {
         let end = run_job(&*b.core.fs(), &Maker::of(&a, None), b.core.store(), j, &|| false, 64 << 20, &mut 0).unwrap();
         b.core.job_ended(&path, end);
     }
-    b.disk.fs.open_rw(&trs_sync::pull::temp_path("f.bin")).unwrap().write_at(2_000_000, &[0; 100]).unwrap();
+    b.disk.fs.open_rw(&seedwell_sync::pull::temp_path("f.bin")).unwrap().write_at(2_000_000, &[0; 100]).unwrap();
     assert!(pull(&mut b, &Maker::of(&a, None)).failed.is_empty());
     assert_eq!(read_all(&b.disk.fs, "f.bin").unwrap(), film, "the changed part fetched again");
 }
@@ -1012,7 +1012,7 @@ fn a_failed_job_fails_only_its_own_version() {
     let jobs = b.core.take_jobs();
     for j in jobs {
         let path = j.path().to_string();
-        b.core.job_ended(&path, trs_sync::lazy::JobEnd::Chunks(trs_sync::lazy::ChunksEnd::Failed("a device sent nonsense".into())));
+        b.core.job_ended(&path, seedwell_sync::lazy::JobEnd::Chunks(seedwell_sync::lazy::ChunksEnd::Failed("a device sent nonsense".into())));
     }
     let v2 = noise(5_000_000, 58);
     write_all(&a.disk.fs, "f.bin", &v2).unwrap();

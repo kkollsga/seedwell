@@ -71,7 +71,8 @@ public final class FPProviderItem: NSObject, NSFileProviderItem, @unchecked Send
 
     public var itemIdentifier: NSFileProviderItemIdentifier { FPIdentifiers.provider(wire.id) }
     public var parentItemIdentifier: NSFileProviderItemIdentifier { isRoot ? .rootContainer : FPIdentifiers.provider(wire.parent) }
-    public var filename: String { isRoot ? rootName : wire.name }
+    /// The root's is the core's when it gives one (the hub, whose domain has no name), else the domain's.
+    public var filename: String { isRoot && wire.name.isEmpty ? rootName : wire.name }
 
     public var contentType: UTType {
         let ext = (wire.name as NSString).pathExtension

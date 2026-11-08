@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use trs_http::name::{
+use seedwell_http::name::{
     MAX_NAME_BYTES, derive_file_name, file_name_from_url, parse_content_disposition, sanitize_file_name,
     unique_name,
 };

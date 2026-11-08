@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
-use trs_utp::{Config, ForeignDatagram, UtpSocket, UtpStream};
+use seedwell_utp::{Config, ForeignDatagram, UtpSocket, UtpStream};
 
 fn lo() -> SocketAddr {
     "127.0.0.1:0".parse().unwrap()

@@ -1,5 +1,5 @@
 //! The rendezvous (SPEC §7G.3): an address book on the user's own Cloudflare account, where each device keeps a
-//! sealed, signed record of where it can be reached ([`trs_sync_proto::rendezvous`]) and looks up the devices it
+//! sealed, signed record of where it can be reached ([`seedwell_sync_proto::rendezvous`]) and looks up the devices it
 //! shares something with when they are not connected.
 //!
 //! * **Publishing** (only with a rendezvous set up, `settings.rendezvous`): at the start, on a network change, when
@@ -23,9 +23,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
-use trs_rendezvous::client::{ClientError, Rendezvous, WriteKey, normalize_url};
-use trs_sync_proto::ids::DeviceId;
-use trs_sync_proto::rendezvous::{Record, record_id_hex};
+use seedwell_rendezvous::client::{ClientError, Rendezvous, WriteKey, normalize_url};
+use seedwell_sync_proto::ids::DeviceId;
+use seedwell_sync_proto::rendezvous::{Record, record_id_hex};
 
 use crate::service::{SyncError, SyncHandle};
 use crate::shared::lock;
@@ -94,13 +94,13 @@ pub(crate) struct State {
 }
 
 fn now_s() -> u64 {
-    trs_rendezvous::now_ms() / 1000
+    seedwell_rendezvous::now_ms() / 1000
 }
 
 /// The secret-store name of this device's write key for `url`.
 fn key_name(url: &str) -> String {
     let d = ring::digest::digest(&ring::digest::SHA256, url.as_bytes());
-    format!("rendezvous-write-{}", &trs_rendezvous::hex(d.as_ref())[..16])
+    format!("rendezvous-write-{}", &seedwell_rendezvous::hex(d.as_ref())[..16])
 }
 
 impl SyncHandle {
@@ -118,7 +118,7 @@ impl SyncHandle {
 
     /// Uses the rendezvous at `url` (`https://…`, as the setup or the user gives it): saved, and this device's record is
     /// written there at once (the answer says whether that worked). The rendezvous it used before, if another, loses
-    /// this device's record. Test it first (`trs_rendezvous::client::Rendezvous::self_test`): this does not.
+    /// this device's record. Test it first (`seedwell_rendezvous::client::Rendezvous::self_test`): this does not.
     pub async fn set_rendezvous(&self, url: &str) -> Result<RendezvousStatus, SyncError> {
         let url = normalize_url(url).map_err(|e| SyncError::Invalid(e.to_string()))?;
         let old = self.rendezvous_url();
@@ -207,7 +207,7 @@ impl SyncHandle {
 
 /// The entry this device's signed address record carries for its rendezvous, if it has one.
 pub(crate) fn record_entry(h: &SyncHandle) -> Option<String> {
-    Some(h.rendezvous_url()).filter(|u| !u.is_empty() && u.len() + RECORD_PREFIX.len() <= trs_sync_proto::msg::MAX_ADDR).map(|u| format!("{RECORD_PREFIX}{u}"))
+    Some(h.rendezvous_url()).filter(|u| !u.is_empty() && u.len() + RECORD_PREFIX.len() <= seedwell_sync_proto::msg::MAX_ADDR).map(|u| format!("{RECORD_PREFIX}{u}"))
 }
 
 /// Whether an address record's entry is a rendezvous (not an address).
@@ -305,7 +305,7 @@ pub(crate) fn look_up(h: &SyncHandle, device: DeviceId) {
 
 /// A record of `device` was found: its addresses are dialed (when it is newer than the last one seen).
 fn found(h: &SyncHandle, device: DeviceId, rec: &Record) {
-    if rec.issued_ms + MAX_AGE_MS < trs_rendezvous::now_ms() {
+    if rec.issued_ms + MAX_AGE_MS < seedwell_rendezvous::now_ms() {
         return;
     }
     {
@@ -343,7 +343,7 @@ pub(crate) fn network_changed(h: &SyncHandle) {
 
 /// The time of this device's next write: now, and later than the last one.
 fn next_ms(h: &SyncHandle) -> u64 {
-    let now = trs_rendezvous::now_ms();
+    let now = seedwell_rendezvous::now_ms();
     let last = &h.inner.rendezvous.last_ms;
     let mut prev = last.load(Ordering::SeqCst);
     loop {

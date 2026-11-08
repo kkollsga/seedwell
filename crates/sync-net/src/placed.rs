@@ -31,9 +31,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use trs_sync::fs::{FileHandle, Fs, Listing, Meta, StdFs};
-use trs_sync::index::Stamp;
-use trs_sync_proto::model::{FileInfo, FileKind};
+use seedwell_sync::fs::{FileHandle, Fs, Listing, Meta, StdFs};
+use seedwell_sync::index::Stamp;
+use seedwell_sync_proto::model::{FileInfo, FileKind};
 
 use crate::shared::lock;
 
@@ -231,7 +231,7 @@ impl Placed {
     pub fn handed(&self, p: &str, content: &str) -> Option<FileInfo> {
         let mut h = lock(&self.handed);
         let i = h.remove(p)?;
-        (trs_sync::ondemand::content_version_of(&i) == content).then_some(i)
+        (seedwell_sync::ondemand::content_version_of(&i) == content).then_some(i)
     }
 
     /// The note of `p`.
@@ -361,7 +361,7 @@ impl Placed {
         };
         let from = self.place_fs();
         let cache = StdFs::new(self.cache.clone());
-        let tmp = trs_sync::pull::temp_path(&format!("{p}.placed"));
+        let tmp = seedwell_sync::pull::temp_path(&format!("{p}.placed"));
         copy_between(&from, &at, &cache, &tmp)?;
         cache.set_mtime(&tmp, n.shown.mtime_ns)?;
         cache.rename(&tmp, p)?;
@@ -403,7 +403,7 @@ impl Placed {
                 std::fs::create_dir_all(d)?;
             }
             if std::fs::rename(&src, &dst).is_err() {
-                let tmp = trs_sync::pull::temp_path(&format!("{p}.placed"));
+                let tmp = seedwell_sync::pull::temp_path(&format!("{p}.placed"));
                 copy_between(&self.place_fs(), &at, &cache, &tmp)?;
                 cache.set_mtime(&tmp, note.shown.mtime_ns)?;
                 cache.rename(&tmp, &p)?;
@@ -495,7 +495,7 @@ pub fn holds_content(fs: &dyn Fs, rel: &str, info: &FileInfo) -> io::Result<bool
         return Ok(false);
     }
     let mut buf = Vec::new();
-    for (off, c) in trs_sync::index::offsets(&info.chunks) {
+    for (off, c) in seedwell_sync::index::offsets(&info.chunks) {
         buf.resize(c.len as usize, 0);
         let mut got = 0;
         while got < buf.len() {
@@ -521,7 +521,7 @@ pub fn holds_content(fs: &dyn Fs, rel: &str, info: &FileInfo) -> io::Result<bool
 /// So this device's own edit, recorded first by its scan and reported by its host after, is the version recorded,
 /// never a conflict with itself (Windows, master after build 69: a conflict copy, and the placeholder let go of as
 /// stale while it held the only copy of the version at the name).
-pub fn holds_version(core: &dyn Fs, rec: &trs_sync::index::LocalRecord, fs: &dyn Fs, rel: &str, same_file: bool) -> io::Result<bool> {
+pub fn holds_version(core: &dyn Fs, rec: &seedwell_sync::index::LocalRecord, fs: &dyn Fs, rel: &str, same_file: bool) -> io::Result<bool> {
     let info = &rec.file.info;
     if !info.is_unhashed() {
         return holds_content(fs, rel, info);
@@ -601,7 +601,7 @@ impl Fs for PlaceFs {
         };
         for name in held {
             if !out.entries.iter().any(|e| e.name == name) {
-                out.entries.push(trs_sync::fs::DirEntry { name });
+                out.entries.push(seedwell_sync::fs::DirEntry { name });
             }
         }
         out.entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -752,7 +752,7 @@ mod tests {
         let shown = held(&s, "docs/a.txt", b"alpha");
         let m = s.fs.lstat("docs/a.txt").unwrap().unwrap();
         assert_eq!(Mark::of(&m), shown, "unchanged since: as the core recorded it");
-        assert_eq!(trs_sync::fs::read_all(&s.fs, "docs/a.txt").unwrap(), b"alpha");
+        assert_eq!(seedwell_sync::fs::read_all(&s.fs, "docs/a.txt").unwrap(), b"alpha");
         let names: Vec<String> = s.fs.read_dir("docs").unwrap().entries.into_iter().map(|e| e.name).collect();
         assert_eq!(names, ["a.txt"], "listed where the cache has no file");
         // Changed in the placeholder: the core sees the change.
@@ -795,9 +795,9 @@ mod tests {
         // The host reports the rename before it happens on disk: the content is found at its old name meanwhile.
         s.placed.host_rename("docs/a.txt", "docs/z.txt", || s.fs.rename("docs/a.txt", "docs/z.txt")).unwrap();
         assert!(s.placed.is_held("docs/z.txt") && s.placed.note("docs/a.txt").is_none());
-        assert_eq!(trs_sync::fs::read_all(&s.fs, "docs/z.txt").unwrap(), b"alpha");
+        assert_eq!(seedwell_sync::fs::read_all(&s.fs, "docs/z.txt").unwrap(), b"alpha");
         std::fs::rename(s.place.join("docs/a.txt"), s.place.join("docs/z.txt")).unwrap();
-        assert_eq!(trs_sync::fs::read_all(&s.fs, "docs/z.txt").unwrap(), b"alpha");
+        assert_eq!(seedwell_sync::fs::read_all(&s.fs, "docs/z.txt").unwrap(), b"alpha");
         assert_eq!(s.placed.note("docs/z.txt").unwrap().at, "docs/z.txt", "found at its new name");
         // Freed: the core lets go, the placeholder is the host's to dehydrate.
         s.fs.remove_file("docs/z.txt").unwrap();
@@ -839,7 +839,7 @@ mod tests {
         let data: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
         std::fs::write(s.cache.join("docs/big"), &data).unwrap();
         let fs = StdFs::new(s.cache.clone());
-        let chunks = trs_sync::chunk::chunk_bytes(&data, trs_sync::chunk::Tier::for_size(data.len() as u64));
+        let chunks = seedwell_sync::chunk::chunk_bytes(&data, seedwell_sync::chunk::Tier::for_size(data.len() as u64));
         let info = FileInfo {
             path: "docs/big".into(),
             kind: FileKind::File,
@@ -847,8 +847,8 @@ mod tests {
             mtime_ns: 0,
             exec: false,
             deleted: false,
-            version: trs_sync_proto::model::Version::new(),
-            modified_by: trs_sync_proto::ids::ShortId(0),
+            version: seedwell_sync_proto::model::Version::new(),
+            modified_by: seedwell_sync_proto::ids::ShortId(0),
             file_id: [0; 16],
             symlink_target: String::new(),
             conflict_of: None,

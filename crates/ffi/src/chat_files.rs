@@ -10,9 +10,9 @@
 
 use std::path::{Path, PathBuf};
 
-use trs_sync_net::chat::{AttachmentInfo, NewAttachment, NewImage};
-use trs_sync_net::files::DownloadTo;
-use trs_sync_net::room::Place;
+use seedwell_sync_net::chat::{AttachmentInfo, NewAttachment, NewImage};
+use seedwell_sync_net::files::DownloadTo;
+use seedwell_sync_net::room::Place;
 
 use crate::Core;
 use crate::chat_images::ChatImageInput;
@@ -144,13 +144,13 @@ fn failed(msg: impl Into<String>) -> CoreError {
     CoreError::Failed { message: msg.into() }
 }
 
-fn sync_failed(e: trs_sync_net::SyncError) -> CoreError {
-    failed(trs_control::redact::scrub_keys(&e.to_string()))
+fn sync_failed(e: seedwell_sync_net::SyncError) -> CoreError {
+    failed(seedwell_control::redact::scrub_keys(&e.to_string()))
 }
 
 /// A channel's id or `dm:<device>` (a message's `place`).
 pub(crate) fn place(s: &str) -> Result<Place, CoreError> {
-    s.parse().map_err(|_| failed(concat!("This conversation is no longer on this ", trs_platform::computer!(), ".")))
+    s.parse().map_err(|_| failed(concat!("This conversation is no longer on this ", seedwell_platform::computer!(), ".")))
 }
 
 /// The icon a file's name calls for.
@@ -176,7 +176,7 @@ pub(crate) fn icon_of(name: &str) -> ChatFileIcon {
 }
 
 fn size(n: u64) -> String {
-    trs_media::size_text(n)
+    seedwell_media::size_text(n)
 }
 
 fn action(kind: ChatFileActionKind) -> ChatFileAction {
@@ -186,7 +186,7 @@ fn action(kind: ChatFileActionKind) -> ChatFileAction {
         ChatFileActionKind::Retry => "Retry",
         ChatFileActionKind::Cancel => "Cancel",
         ChatFileActionKind::Open => "Open",
-        ChatFileActionKind::ShowInFolder => concat!("Show in ", trs_platform::file_manager!()),
+        ChatFileActionKind::ShowInFolder => concat!("Show in ", seedwell_platform::file_manager!()),
         ChatFileActionKind::StopSharing => "Stop Sharing",
     };
     ChatFileAction { kind, label: label.into() }
@@ -194,7 +194,7 @@ fn action(kind: ChatFileActionKind) -> ChatFileAction {
 
 /// The folder a path is in, as people read it (`~/Downloads`).
 fn folder_of(path: &str) -> String {
-    Path::new(path).parent().map(trs_platform::dirs::shown).unwrap_or_default()
+    Path::new(path).parent().map(seedwell_platform::dirs::shown).unwrap_or_default()
 }
 
 /// A file of a message as a card. `author`: who sent it (its device's name), for "waiting for …".
@@ -221,7 +221,7 @@ pub(crate) fn card_of(a: &AttachmentInfo, author: &str) -> ChatFileCard {
             (ChatFileState::Failed, format!("Download failed: {why}"), None, vec![action(K::Retry), action(K::Cancel)])
         }
         "shared" => {
-            let from = a.path.as_deref().map(|p| trs_platform::dirs::shown(Path::new(p))).unwrap_or_default();
+            let from = a.path.as_deref().map(|p| seedwell_platform::dirs::shown(Path::new(p))).unwrap_or_default();
             (ChatFileState::Shared, format!("{total} · Shared from {from}"), None, vec![action(K::ShowInFolder), action(K::StopSharing)])
         }
         "unshared" => {
@@ -234,7 +234,7 @@ pub(crate) fn card_of(a: &AttachmentInfo, author: &str) -> ChatFileCard {
 }
 
 /// A pending send for the host.
-pub(crate) fn pending_of(p: &trs_sync_net::files::PreparingInfo) -> ChatPendingSend {
+pub(crate) fn pending_of(p: &seedwell_sync_net::files::PreparingInfo) -> ChatPendingSend {
     let names = match p.names.as_slice() {
         [one] => one.clone(),
         [first, rest @ ..] => format!("{first} and {} more", rest.len()),
@@ -256,7 +256,7 @@ pub(crate) fn pending_of(p: &trs_sync_net::files::PreparingInfo) -> ChatPendingS
 
 /// What to ask before opening a file that runs code.
 pub(crate) fn open_check(path: &Path, name: &str) -> Option<ChatFileConfirm> {
-    trs_sync_net::files::opens_as_code(path).then(|| ChatFileConfirm {
+    seedwell_sync_net::files::opens_as_code(path).then(|| ChatFileConfirm {
         title: format!("Open “{name}”?"),
         message: "It is an app, an installer or a script: opening it can run code on this computer. Open it only if you trust the person who sent it.".into(),
         open: "Open".into(),
@@ -292,7 +292,7 @@ pub struct ChatFileSamples {
 /// A made-up file of a message, as the service reports it.
 pub(crate) fn sample_info(name: &str, size: u64, state: &str, done: u64, rate: u64, path: Option<&str>, problem: Option<&str>) -> AttachmentInfo {
     AttachmentInfo {
-        hash: trs_sync_proto::members::hex(&trs_sync_net::blobs::sha256(name.as_bytes())),
+        hash: seedwell_sync_proto::members::hex(&seedwell_sync_net::blobs::sha256(name.as_bytes())),
         kind: "file".into(),
         name: name.into(),
         size,
@@ -310,7 +310,7 @@ pub(crate) fn sample_info(name: &str, size: u64, state: &str, done: u64, rate: u
 /// See [`ChatFileSamples`].
 #[uniffi::export]
 pub fn chat_file_samples() -> ChatFileSamples {
-    let home = trs_platform::dirs::home().unwrap_or_default().display().to_string();
+    let home = seedwell_platform::dirs::home().unwrap_or_default().display().to_string();
     let downloads = format!("{home}/Downloads/Film.mov");
     let shared = format!("{home}/Documents/Budget 2027.xlsx");
     let gb = 1_234_000_000;
@@ -327,13 +327,13 @@ pub fn chat_file_samples() -> ChatFileSamples {
     .into_iter()
     .map(|(label, a, author)| ChatFileSample { label: label.into(), card: card_of(&a, author) })
     .collect();
-    let preparing = trs_sync_net::files::PreparingInfo { id: 1, names: vec!["Film.mov".into()], done: 419_560_000, total: gb, problem: None };
-    let failed = trs_sync_net::files::PreparingInfo {
+    let preparing = seedwell_sync_net::files::PreparingInfo { id: 1, names: vec!["Film.mov".into()], done: 419_560_000, total: gb, problem: None };
+    let failed = seedwell_sync_net::files::PreparingInfo {
         id: 2,
         names: vec!["Pasted Image.png".into()],
         done: 0,
         total: 240_000,
-        problem: Some(concat!("that device is not connected to this ", trs_platform::computer!(), " directly; private messages go only over a direct connection between the two, never through another device, so write once both are online and can reach each other").into()),
+        problem: Some(concat!("that device is not connected to this ", seedwell_platform::computer!(), " directly; private messages go only over a direct connection between the two, never through another device, so write once both are online and can reach each other").into()),
     };
     ChatFileSamples {
         cards,
@@ -350,7 +350,7 @@ impl Core {
     pub fn chat_send_attachments(&self, place: String, topic: Option<String>, body: String, reply_to: Option<String>, inputs: Vec<ChatImageInput>) -> Result<(), CoreError> {
         let (h, rt) = self.backend.sync().chat_service().ok_or_else(|| failed("Folder sync is not running."))?;
         let place = self::place(&place)?;
-        let max = trs_sync_proto::attach::MAX_ATTACHMENTS;
+        let max = seedwell_sync_proto::attach::MAX_ATTACHMENTS;
         if inputs.len() > max {
             return Err(failed(format!("A message can have at most {max} attachments.")));
         }
@@ -392,7 +392,7 @@ impl Core {
     pub fn chat_file_open(&self, place: String, hash: String) -> Result<ChatFileOpen, CoreError> {
         let (h, _) = self.backend.sync().chat_service().ok_or_else(|| failed("Folder sync is not running."))?;
         let (a, _) = h.chat_attachment(self::place(&place)?, &hash).map_err(sync_failed)?;
-        let path = a.path.clone().filter(|p| Path::new(p).exists()).ok_or_else(|| failed(concat!("The file is not on this ", trs_platform::computer!(), ".")))?;
+        let path = a.path.clone().filter(|p| Path::new(p).exists()).ok_or_else(|| failed(concat!("The file is not on this ", seedwell_platform::computer!(), ".")))?;
         Ok(ChatFileOpen { confirm: open_check(Path::new(&path), &a.name), path })
     }
 }
@@ -463,7 +463,7 @@ mod tests {
 
         let c = card_of(&info("downloaded", 1_200_000_000, 0, Some("/Users/bo/Downloads/Film.mov"), None), "Anna's Mac");
         assert_eq!((c.state, c.status.as_str(), c.path.as_deref()), (ChatFileState::Downloaded, "1.2 GB · Downloaded to /Users/bo/Downloads", Some("/Users/bo/Downloads/Film.mov")));
-        assert_eq!(labels(&c), ["Open", concat!("Show in ", trs_platform::file_manager!())]);
+        assert_eq!(labels(&c), ["Open", concat!("Show in ", seedwell_platform::file_manager!())]);
 
         let c = card_of(&info("gone", 0, 0, None, None), "");
         assert_eq!((c.state, c.status.as_str(), c.actions.len()), (ChatFileState::Gone, "1.2 GB · No longer available: its sender changed, moved or stopped sharing it", 0));
@@ -473,7 +473,7 @@ mod tests {
 
         let c = card_of(&info("shared", 0, 0, Some("/Volumes/Work/Film.mov"), None), "");
         assert_eq!((c.state, c.status.as_str()), (ChatFileState::Shared, "1.2 GB · Shared from /Volumes/Work/Film.mov"));
-        assert_eq!(labels(&c), [concat!("Show in ", trs_platform::file_manager!()), "Stop Sharing"]);
+        assert_eq!(labels(&c), [concat!("Show in ", seedwell_platform::file_manager!()), "Stop Sharing"]);
 
         let c = card_of(&info("unshared", 0, 0, Some("/x/Film.mov"), Some("the file changed since it was sent")), "");
         assert_eq!((c.state, c.status.as_str()), (ChatFileState::Unshared, "1.2 GB · No longer shared: the file changed since it was sent"));
@@ -486,10 +486,10 @@ mod tests {
         for (n, i) in [("a.PDF", ChatFileIcon::Pdf), ("b.zip", ChatFileIcon::Archive), ("c.dmg", ChatFileIcon::DiskImage), ("d.app", ChatFileIcon::App), ("e", ChatFileIcon::Other), ("f.rs", ChatFileIcon::Code)] {
             assert_eq!(icon_of(n), i, "{n}");
         }
-        let p = trs_sync_net::files::PreparingInfo { id: 3, names: vec!["big.iso".into(), "notes.txt".into()], done: 340, total: 1000, problem: None };
+        let p = seedwell_sync_net::files::PreparingInfo { id: 3, names: vec!["big.iso".into(), "notes.txt".into()], done: 340, total: 1000, problem: None };
         let v = pending_of(&p);
         assert_eq!((v.title.as_str(), v.failed, v.progress), ("Preparing big.iso and 1 more… 34 %", false, 0.34));
-        let bad = pending_of(&trs_sync_net::files::PreparingInfo { problem: Some("big.iso: the file changed while it was being read; try again".into()), names: vec!["big.iso".into()], ..p });
+        let bad = pending_of(&seedwell_sync_net::files::PreparingInfo { problem: Some("big.iso: the file changed while it was being read; try again".into()), names: vec!["big.iso".into()], ..p });
         assert_eq!((bad.title.as_str(), bad.failed, bad.problem.as_str(), bad.dismiss.as_str()), ("big.iso was not sent", true, "big.iso: the file changed while it was being read; try again", "Dismiss"));
     }
 

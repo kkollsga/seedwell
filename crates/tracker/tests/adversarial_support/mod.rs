@@ -8,10 +8,10 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
-use trs_tracker::gate::{GateConfig, GateEvent, GatedRequest, Ticket};
-use trs_tracker::hub::{HubReport, TorrentSpec, TrackerHub};
-use trs_tracker::response::{AnnounceError, AnnounceResponse, TransportError};
-use trs_tracker::{
+use seedwell_tracker::gate::{GateConfig, GateEvent, GatedRequest, Ticket};
+use seedwell_tracker::hub::{HubReport, TorrentSpec, TrackerHub};
+use seedwell_tracker::response::{AnnounceError, AnnounceResponse, TransportError};
+use seedwell_tracker::{
     AnnounceParams, Event, InfoHash20, MemoryStore, Millis, Report, Stats, TorrentEvent,
     TrackerUrl, clamp_timing,
 };

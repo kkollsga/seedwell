@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::broadcast;
-use trs_control::backend::{AddArgs, AddSource, Backend};
-use trs_control::proto::*;
-use trs_control::types::*;
-use trs_control::{
+use seedwell_control::backend::{AddArgs, AddSource, Backend};
+use seedwell_control::proto::*;
+use seedwell_control::types::*;
+use seedwell_control::{
     Client, Permission, PermissionHandle, PermissionSource, ServerHandle, ServerOptions, StateAccess, serve_backend,
 };
 
@@ -44,7 +44,7 @@ pub struct Mock {
     pub events: broadcast::Sender<EventDto>,
     /// A real folder sync service, when a test runs one.
     #[cfg(feature = "sync")]
-    pub sync: Mutex<Option<trs_sync_net::SyncHandle>>,
+    pub sync: Mutex<Option<seedwell_sync_net::SyncHandle>>,
     /// The Trash folder `sync.remove` uses.
     pub trash: Mutex<Option<std::path::PathBuf>>,
 }
@@ -296,7 +296,7 @@ impl Backend for Mock {
             cross_volume: 0,
         })
     }
-    async fn move_to(&self, ids: Vec<TransferId>, path: Option<std::path::PathBuf>) -> Result<trs_control::backend::MoveOutcome, ApiError> {
+    async fn move_to(&self, ids: Vec<TransferId>, path: Option<std::path::PathBuf>) -> Result<seedwell_control::backend::MoveOutcome, ApiError> {
         self.log(format!("move {} to {:?}", ids.len(), path));
         Ok((ids, Vec::new()))
     }
@@ -308,7 +308,7 @@ impl Backend for Mock {
         self.trash.lock().unwrap().clone()
     }
     #[cfg(feature = "sync")]
-    fn sync(&self) -> Option<trs_sync_net::SyncHandle> {
+    fn sync(&self) -> Option<seedwell_sync_net::SyncHandle> {
         self.sync.lock().unwrap().clone()
     }
     fn subscribe(&self) -> broadcast::Receiver<EventDto> {
@@ -354,13 +354,13 @@ impl Rig {
 
 /// A raw line-level connection for protocol abuse tests.
 pub struct Raw {
-    pub rd: BufReader<tokio::io::ReadHalf<trs_control::transport::Conn>>,
-    pub wr: tokio::io::WriteHalf<trs_control::transport::Conn>,
+    pub rd: BufReader<tokio::io::ReadHalf<seedwell_control::transport::Conn>>,
+    pub wr: tokio::io::WriteHalf<seedwell_control::transport::Conn>,
 }
 
 impl Raw {
     pub async fn connect(path: &std::path::Path) -> Raw {
-        let s = trs_control::transport::connect(path).await.unwrap();
+        let s = seedwell_control::transport::connect(path).await.unwrap();
         let (rd, wr) = tokio::io::split(s);
         Raw { rd: BufReader::new(rd), wr }
     }

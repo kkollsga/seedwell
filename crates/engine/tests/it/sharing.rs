@@ -6,11 +6,11 @@ use std::time::Duration;
 use common::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use trs_engine::persist::Placed;
-use trs_engine::*;
+use seedwell_engine::persist::Placed;
+use seedwell_engine::*;
 
 fn now() -> u64 {
-    trs_engine::util::unix_secs()
+    seedwell_engine::util::unix_secs()
 }
 
 async fn group(h: &EngineHandle, id: &TorrentId) -> Option<SeedGroup> {
@@ -19,7 +19,7 @@ async fn group(h: &EngineHandle, id: &TorrentId) -> Option<SeedGroup> {
 
 /// A stored, finished torrent with the given activity and error start, as a previous run left it.
 fn put_stored(s: &MemStore, t: &TestTorrent, dir: &std::path::Path, last_activity: u64, error_since: u64) {
-    let rec = trs_engine::persist::TorrentRecord {
+    let rec = seedwell_engine::persist::TorrentRecord {
         id: t.id,
         name: t.name.clone(),
         has_metadata: true,
@@ -31,7 +31,7 @@ fn put_stored(s: &MemStore, t: &TestTorrent, dir: &std::path::Path, last_activit
         piece_length: t.piece_len,
         private: false,
         save_path: dir.to_path_buf(),
-        state: trs_engine::persist::StoredState::Active,
+        state: seedwell_engine::persist::StoredState::Active,
         file_priorities: vec![],
         priority: 1,
         priority_user: false,
@@ -61,8 +61,8 @@ fn put_stored(s: &MemStore, t: &TestTorrent, dir: &std::path::Path, last_activit
     };
     s.put(
         rec,
-        trs_engine::persist::LifetimeCounters { done_bytes: t.total(), ..Default::default() },
-        Some(trs_engine::persist::ResumeRecord { complete: true, ..Default::default() }),
+        seedwell_engine::persist::LifetimeCounters { done_bytes: t.total(), ..Default::default() },
+        Some(seedwell_engine::persist::ResumeRecord { complete: true, ..Default::default() }),
         Some(std::sync::Arc::from(t.bytes.as_slice())),
     );
 }

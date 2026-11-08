@@ -165,13 +165,21 @@ pub trait Backend: Send + Sync + 'static {
     fn stop_stream(&self, _token: &str) -> impl Future<Output = Result<bool, ApiError>> + Send {
         async { Err(ApiError::new(crate::proto::ErrorCode::Unsupported, "this backend cannot stream")) }
     }
+    /// Delete the developer-mode tracker log in `logs` (the state folder's `logs`), as Settings › Advanced › Developer ›
+    /// Clear does. The engine's backend clears its writer, which holds the file.
+    fn tracker_log_clear(&self, logs: &std::path::Path) -> impl Future<Output = ()> + Send {
+        for n in ["trackers.log", "trackers.log.1", "trackers.log.2"] {
+            let _ = std::fs::remove_file(logs.join(n));
+        }
+        async {}
+    }
     /// A folder that stands in for the Trash (`None` = the system's): where `sync.remove` with `delete_files` puts a folder.
     fn trash_dir(&self) -> impl Future<Output = Option<PathBuf>> + Send {
         async { None }
     }
     /// The folder sync service, while it runs (`None`: the `sync.*` methods say it is not running).
     #[cfg(feature = "sync")]
-    fn sync(&self) -> Option<trs_sync_net::SyncHandle> {
+    fn sync(&self) -> Option<seedwell_sync_net::SyncHandle> {
         None
     }
     /// Moves folder sync to `port` now ([`crate::sync::SyncSlot::move_port`]); the port in use.

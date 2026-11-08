@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use trs_platform::computer;
+use seedwell_platform::computer;
 
 use crate::menu::APP_NAME;
 use crate::sources::{is_command_line_source, source_kind, SourceKind};

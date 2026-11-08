@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TorrentRS comparison benchmark harness.  Run with:  python3 -I bench/scripts/bench.py <command> ...
+"""Seedwell comparison benchmark harness.  Run with:  python3 -I bench/scripts/bench.py <command> ...
 
 Commands
   netcheck                       quick speed sanity check (curl, ~200 MB)

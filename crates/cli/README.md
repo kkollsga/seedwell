@@ -1,12 +1,12 @@
-# trs-cli: the `seedwell` command
+# seedwell-cli: the `seedwell` command
 
 One binary, three jobs. `#![forbid(unsafe_code)]`.
 
 | Command | What |
 |---|---|
-| `seedwell <command>` | The command line for the running app: talks to the control socket (`trs-control`), `--json` on every command, `debug` and `sim` groups for diagnostics and testing |
+| `seedwell <command>` | The command line for the running app: talks to the control socket (`seedwell-control`), `--json` on every command, `debug` and `sim` groups for diagnostics and testing |
 | `seedwell skill show / install / uninstall` | The Agent Skill (SKILL.md + REFERENCE.md) that ships inside the binary, generated from the command table |
-| `seedwell daemon` | The whole stack headless (engine + `trs-state` + control socket), for E2E tests, benchmarks and Linux CI |
+| `seedwell daemon` | The whole stack headless (engine + `seedwell-state` + control socket), for E2E tests, benchmarks and Linux CI |
 
 There is no MCP server (user decision, 2026-10-16): one tailored CLI plus the embedded skill. SPEC §9A is the contract.
 
@@ -71,14 +71,14 @@ seedwell daemon --state-dir D --download-dir X [--listen-port P] [--bind 127.0.0
 
 ## Dependencies
 
-`trs-control` (protocol and client), `tokio` (current-thread runtime; with the `daemon` feature, `signal` and the
-engine's multi-thread runtime), `serde`/`serde_json`, `trs-devlog`. `trs-engine` and `trs-state` only with the
+`seedwell-control` (protocol and client), `tokio` (current-thread runtime; with the `daemon` feature, `signal` and the
+engine's multi-thread runtime), `serde`/`serde_json`, `seedwell-devlog`. `seedwell-engine` and `seedwell-state` only with the
 `daemon` feature (default); `--no-default-features` gives the client-only binary that the app bundle ships (it
 includes `sim` and `skill`). No argument-parsing crate: the grammar is small.
 
 ## Tests
 
-`cargo test -p trs-cli`
+`cargo test -p seedwell-cli`
 
 * unit tests: argument scanner, selection, parsing of every command and every example in the help and the skill,
   the skill's frontmatter and install/uninstall (temp dir only), the sim generators (SHA-1 vectors, layouts, torrent bytes).

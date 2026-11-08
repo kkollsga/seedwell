@@ -6,6 +6,8 @@ options.applyHomeRoot()
 
 // A QA-control run never comes forward and shows no window on a screen (QuietRun), from its first window on.
 if options.qaControl != nil { MainActor.assumeIsolated { QuietRun.start() } }
+// The snapshot renderer draws its windows in-process off every screen: materials (the glass sidebar) drawn in the app.
+if options.renderSnapshots != nil { MainActor.assumeIsolated { QuietRun.drawMaterialsInApp(true) } }
 
 let app = NSApplication.shared
 let delegate = AppDelegate(options: options)

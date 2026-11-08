@@ -1,6 +1,6 @@
 //! Public types of the control API: commands' arguments, query results and events.
 //!
-//! These are plain data. `trs-ffi` and the `seedwell` CLI map them onto their own
+//! These are plain data. `seedwell-ffi` and the `seedwell` CLI map them onto their own
 //! records; nothing here depends on UniFFI or serde.
 
 use std::net::SocketAddr;
@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use crate::tier::Tier;
 
-pub use trs_classify::Category;
+pub use seedwell_classify::Category;
 
 /// Identifies a torrent: the 20-byte swarm id (v1 info-hash, or the truncated v2 hash).
 pub type TorrentId = [u8; 20];
@@ -861,7 +861,7 @@ impl TorrentRow {
 
     /// The title lists show: the persisted clean title, else the cleaned raw name.
     pub fn display_title(&self) -> String {
-        if self.title.is_empty() { trs_classify::clean_name(&self.name) } else { self.title.clone() }
+        if self.title.is_empty() { seedwell_classify::clean_name(&self.name) } else { self.title.clone() }
     }
 }
 
@@ -1002,13 +1002,13 @@ impl StreamContainer {
 impl StreamContainer {
     /// The container family a file name suggests (by extension).
     pub fn of_name(name: &str) -> Self {
-        trs_stream::mime::container_of(name).into()
+        seedwell_stream::mime::container_of(name).into()
     }
 }
 
-impl From<trs_stream::Container> for StreamContainer {
-    fn from(c: trs_stream::Container) -> Self {
-        use trs_stream::Container as C;
+impl From<seedwell_stream::Container> for StreamContainer {
+    fn from(c: seedwell_stream::Container) -> Self {
+        use seedwell_stream::Container as C;
         match c {
             C::Mp4Family => Self::Mp4Family,
             C::Matroska => Self::Matroska,
@@ -1606,7 +1606,7 @@ pub enum ChoiceGroupKind {
 pub struct ChoiceItem {
     /// `S03E01`, `Night of the Living Dead (1968)`, `Album (2007)`, `App-1.2-arm64.dmg`.
     pub label: String,
-    /// Stable key (see `trs_classify::Item::identity`).
+    /// Stable key (see `seedwell_classify::Item::identity`).
     pub identity: String,
     /// Bytes of its files.
     pub bytes: u64,

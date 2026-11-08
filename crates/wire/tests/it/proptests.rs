@@ -3,8 +3,8 @@
 use bytes::BytesMut;
 use proptest::prelude::*;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use trs_wire::pex::MAX_PEX_SEND;
-use trs_wire::*;
+use seedwell_wire::pex::MAX_PEX_SEND;
+use seedwell_wire::*;
 
 fn block() -> impl Strategy<Value = BlockRequest> {
     (any::<u32>(), any::<u32>(), 1u32..=16384).prop_map(|(index, begin, length)| BlockRequest {
@@ -190,7 +190,7 @@ proptest! {
             order.swap(i, (s >> 33) as usize % (i + 1));
         }
         for p in order {
-            prop_assert!(a.insert(p, trs_wire::metadata::piece_slice(&data, p).unwrap()).unwrap());
+            prop_assert!(a.insert(p, seedwell_wire::metadata::piece_slice(&data, p).unwrap()).unwrap());
         }
         prop_assert_eq!(&*a.finish().unwrap(), &data[..]);
     }

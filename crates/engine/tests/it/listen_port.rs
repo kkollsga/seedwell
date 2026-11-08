@@ -3,7 +3,7 @@ use crate::common;
 use std::time::Duration;
 
 use common::*;
-use trs_engine::*;
+use seedwell_engine::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_taken_listen_port_falls_back_to_a_free_one_and_says_so() {

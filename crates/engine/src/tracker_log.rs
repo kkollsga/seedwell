@@ -1,4 +1,4 @@
-//! Developer mode: turning tracker exchanges and hub decisions into `trs_devlog` entries.
+//! Developer mode: turning tracker exchanges and hub decisions into `seedwell_devlog` entries.
 //!
 //! Everything here runs only while the log is on (`DevLog::enabled`). The entries carry the raw
 //! tracker URL; `DevLog::log` masks every secret at the logging boundary.
@@ -6,14 +6,14 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use trs_devlog::{Entry, Kind, Next, Request, Response};
-use trs_tracker::gate::GatedRequest;
-use trs_tracker::http::{HttpTrace, HttpTransport};
-use trs_tracker::hub::{HubNote, NoteKind};
-use trs_tracker::response::{AnnounceError, AnnounceResponse, RetryIn, TransportError};
-use trs_tracker::udp::UdpTrace;
-use trs_tracker::url::{Scheme, build_announce_url};
-use trs_tracker::{AnnounceParams, Crypto, Event};
+use seedwell_devlog::{Entry, Kind, Next, Request, Response};
+use seedwell_tracker::gate::GatedRequest;
+use seedwell_tracker::http::{HttpTrace, HttpTransport};
+use seedwell_tracker::hub::{HubNote, NoteKind};
+use seedwell_tracker::response::{AnnounceError, AnnounceResponse, RetryIn, TransportError};
+use seedwell_tracker::udp::UdpTrace;
+use seedwell_tracker::url::{Scheme, build_announce_url};
+use seedwell_tracker::{AnnounceParams, Crypto, Event};
 
 /// What the transport learned about the wire.
 #[derive(Clone, Copy, Debug)]
@@ -78,8 +78,8 @@ pub(crate) fn error_text(e: &AnnounceError) -> String {
             TransportError::Tls => "TLS handshake or certificate failure".into(),
             TransportError::Forbidden(r) => format!("destination not allowed by the network policy: {r}"),
             TransportError::NotSent => "not sent (a local write failed)".into(),
-            TransportError::Proxy(trs_tracker::ProxyBlock::Down) => "not sent (the proxy is not working; never sent directly)".into(),
-            TransportError::Proxy(trs_tracker::ProxyBlock::Udp) => "not sent (UDP trackers are off while the proxy is on)".into(),
+            TransportError::Proxy(seedwell_tracker::ProxyBlock::Down) => "not sent (the proxy is not working; never sent directly)".into(),
+            TransportError::Proxy(seedwell_tracker::ProxyBlock::Udp) => "not sent (UDP trackers are off while the proxy is on)".into(),
             TransportError::Io => "connection reset or I/O error".into(),
             TransportError::Redirect => "too many or refused redirects".into(),
             TransportError::TooLarge => "answer too large".into(),

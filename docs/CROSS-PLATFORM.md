@@ -32,7 +32,15 @@ chat's messages file through its `journal`, in the store's order; a room's files
 that changes saved state (a page marks what it shows read) saves it on the core's threads (`save_config_soon`).
 `ui_wait_tests` saves to a slow disk while it times them; `SEEDWELL_QA_SLOW_SAVES=<ms>` does the same in a QA run. The host keeps blocking system calls (file system looks at user paths, system
 services) off its UI thread too, quits on a thread of its own with a deadline, and runs the core's hang watchdog
-(`ui_watchdog`, `Core::ui_stall`: a stall over a second is logged, a test run that hangs two seconds fails).
+(`ui_watchdog`, `Core::ui_stall`, `Core::ui_stutter`: a stall over a second is logged, and so is a stutter, shorter stalls that
+hold the UI thread up for 60 % of three seconds; a test run that hangs two seconds, or stutters, fails). The renderer's
+own captures are not a stutter: the time the UI thread spends drawing a snapshot or QA shot (the Mac's
+`SnapshotWindow.settled` draws a window at 2x every 50 ms until two drawings match, a few hundred milliseconds each
+under load) is marked as it runs (`RendererCaptures`) and taken out of the stutter's busy time; what the UI thread does
+between two captures still counts, and a single stall counts whole. A dialog the host draws from a core model asks
+the core after a change only, never once per render (the Mac's Share window draws its last `sync_share_window`; a
+render of a view is not a change), and again after the model's `refresh_ms` while it is open (the Share dialog's
+countdown, and its folder changed elsewhere), off the UI thread, drawn only when the result differs.
 
 ## 2. Seams
 
@@ -51,18 +59,18 @@ services) off its UI thread too, quits on a thread of its own with a deadline, a
 | App updates | curl installer (Sparkle for Developer ID) | installer/updater of the package | the package manager / AppImage |
 
 **Rust seams** (`cfg`-split modules; nothing outside them names an OS):
-- `trs-platform` (new): `dirs` (home, state, downloads, IPC name, sensitive roots, mount roots), `fs` (read/write
+- `seedwell-platform` (new): `dirs` (home, state, downloads, IPC name, sensitive roots, mount roots), `fs` (read/write
   at offset, preallocate, rename without replace, directory sync, volume and file ids, free space, private files,
   metadata copy), `names` (one portable file-name policy), `proc` (shell, process tree, device name, stats,
   utc offset), `signal` (shutdown), `net` (default gateway).
-- Existing seams kept: `trs-fswatch` backends (FSEvents, inotify, poll; ReadDirectoryChangesW to add), the
-  `trs_sync::fs::Fs` trait (a Windows `StdFs`), `SecretStore`, `Awake`.
+- Existing seams kept: `seedwell-fswatch` backends (FSEvents, inotify, poll; ReadDirectoryChangesW to add), the
+  `seedwell_sync::fs::Fs` trait (a Windows `StdFs`), `SecretStore`, `Awake`.
 - New: a Trash seam, `fs::move_to_trash` (a given Trash folder; else the Mac's own Trash call (NSFileManager, each volume's
-  Trash, Put Back), the Recycle Bin, the freedesktop.org home trash) with `trash!()` for its name in text, and a transport seam in `trs-control` (Unix socket, named pipe
+  Trash, Put Back), the Recycle Bin, the freedesktop.org home trash) with `trash!()` for its name in text, and a transport seam in `seedwell-control` (Unix socket, named pipe
   with an owner-only DACL).
 - errno numbers are never matched; `io::ErrorKind` is.
 
-**Bindings.** `trs-ffi` stays the one API for every host. It is plain UniFFI (no Swift-specific code); it builds as a
+**Bindings.** `seedwell-ffi` stays the one API for every host. It is plain UniFFI (no Swift-specific code); it builds as a
 `cdylib` too for C#/Kotlin/Python bindings, or a Rust UI links it as a library.
 
 ## 3. Compatibility decisions (fixed before any Windows or Linux device exists)
@@ -108,13 +116,13 @@ Each step is its own commit with tests; `tools/check.sh` passes after each.
 - [x] Torrents: two files differing only by case or Unicode normalization become one file on APFS (endless hash
       failures) (§3.8).
 - [x] Swift and Rust disagree: the mail header parser and the tag notes (app vs `seedwell mail`): one
-      implementation in `trs_control::mail`. The link problem wording (dead Swift fallback), the default ignores of
+      implementation in `seedwell_control::mail`. The link problem wording (dead Swift fallback), the default ignores of
       the Finder badges and the video extensions are still copied by hand: they go with the sync and Play steps of
       Phase 3.
 - [x] Found on the way: a folder-and-channel link's two invitations could expire a second apart.
 
 **Phase 1: compatibility decisions** (§3)
-- [x] A Windows name check as a per-path issue in the puller (`trs_platform::fs::name_problem`; a folder named
+- [x] A Windows name check as a per-path issue in the puller (`seedwell_platform::fs::name_problem`; a folder named
       `dir.` would otherwise come back as `dir`), and the same for symlinks without Developer Mode.
 - [x] Deterministic conflict-copy times: the stamp is UTC with a `z` (`2026-10-25 14.32z`), shown in local time
       by the app; the device name is the loser's own signed profile in the folder's membership (0.1.9), so every
@@ -125,18 +133,18 @@ Each step is its own commit with tests; `tools/check.sh` passes after each.
       system.
 
 **Phase 2: Rust builds and runs on Windows and Linux**
-- [x] `trs-platform` with the modules of §2 (`fs`, `dirs`, `proc`, `signal`, `net`, `ipc`); the `std::os::unix`, `libc`
+- [x] `seedwell-platform` with the modules of §2 (`fs`, `dirs`, `proc`, `signal`, `net`, `ipc`); the `std::os::unix`, `libc`
       calls and errno matches of storage, state, http, sync, sync-net, engine, devlog, control and cli moved there
       or became `io::ErrorKind` matches. The workspace builds and passes clippy for `x86_64-pc-windows-gnu`.
-      Still OS-specific in place: the fswatch backends, `trs-storage`'s mapped allocator (macOS), the sync flush
-      barrier (macOS), uTP's socket options; and the app (`trs-ffi` builds for Windows, nothing calls it yet).
+      Still OS-specific in place: the fswatch backends, `seedwell-storage`'s mapped allocator (macOS), the sync flush
+      barrier (macOS), uTP's socket options; and the app (`seedwell-ffi` builds for Windows, nothing calls it yet).
 - [ ] Linux behaviour: run it there. Done: XDG state dir (`dirs::state_dir`), mount roots, local time offset
       (`localtime_r`, no more `/bin/date`), the freedesktop.org home trash (`fs::move_to_trash`: `files/` and
       `info/*.trashinfo`; only the home trash, so a folder on another volume is refused as on the Mac).
 - [ ] Windows: ReadDirectoryChangesW watcher (the poll backend runs meanwhile), the Recycle Bin run on the PC
       (`fs::move_to_trash`: `SHFileOperationW` with undo and no UI; refuses what the bin would delete outright:
       a drive without one, set to delete at once, or an item larger than it holds). Done: named-pipe
-      transport with an owner-only DACL (`trs-control::transport`), Windows `StdFs` (file ids and change times
+      transport with an owner-only DACL (`seedwell-control::transport`), Windows `StdFs` (file ids and change times
       from the handle, no exec bit), Job Objects for wake commands, Ctrl+C/close/logoff/shutdown.
 - [x] The test suite runs on a Windows 11 PC (MSVC), through the OneDrive bridge: from 434 failures at the first
       run to the few listed there. Found on the way and fixed for every system: a lost wake-up on encrypted
@@ -154,48 +162,50 @@ Each step is its own commit with tests; `tools/check.sh` passes after each.
 **Phase 3: the Mac app becomes a thin host** (Swift logic → Rust view models; Swift keeps drawing)
 - [ ] One formatter (`human`): bytes, rates, durations, "ago", counts and plurals, used by the app and the CLI.
 - [ ] File tree (window list, menu list) and chooser models; the starting countdown.
-- [x] Menu bar model (sections, caps, signatures, Sharing and Folder Sync lines, icon state): `trs-ffi`'s `menu.rs`
+- [x] Menu bar model (sections, caps, signatures, Sharing and Folder Sync lines, icon state): `seedwell-ffi`'s `menu.rs`
       (`menu_model`, the `Arrivals` and `IconState` objects, `sync_summary`) and `row_text.rs` (the countdown phrase,
       the waiting and retry notes, category labels, the Play check); the Mac's menu and icon only draw them.
-- [x] Library window, step 1 (sidebar, title bar, lists): `trs-ffi`'s `library.rs` (the `Library` object: place,
+- [x] Library window, step 1 (sidebar, title bar, lists): `seedwell-ffi`'s `library.rs` (the `Library` object: place,
       search, category, folds and pages; its `LibraryViewModel` with the title and summary, the page, the refresh
       cadence and the fallbacks of a place that disappeared; `LocalClock`, the host's time and day styles),
       `library_rows.rs` (the Downloads, Sharing and tracker-tab groups, every row's lines in colour, rate slot,
       controls, category pill and filter chip, the empty notes), `sidebar.rs` (places, chats, private conversations,
       the trackers' order, the footer, the items' context menus) and `chat_text.rs`; the Mac draws them.
 - [ ] Get Info sections; a tracker's header and Info page; the conversation page.
-- [x] The Folder Sync page and its dialogs: `trs-ffi`'s `sync_page.rs` (`sync_page_model`: the folder list with its
+- [x] The Folder Sync page and its dialogs: `seedwell-ffi`'s `sync_page.rs` (`sync_page_model`: the folder list with its
       context menus, the header's buttons, place and status, the gone and Share Again prompts, the Stop Syncing
       question, the Members, Conflicts and Issues sections with the role and Keep menus, and the questions items ask
       first, as `SyncPageCommand`s), `sync_dialogs.rs` (Add Folder: `Core::sync_add_form`, `sync_add_set_link`,
-      `sync_add_window`, `sync_add_start`; Edit: `Core::sync_edit_form`, `sync_edit_window`, `sync_edit_save`) and
+      `sync_add_window`, `sync_add_start`, and a pasted link's places read off the UI thread with `sync_add_places`
+      and kept with `sync_add_set_places`; Edit: `Core::sync_edit_form`, `sync_edit_window`, `sync_edit_save`. The
+      calls made on the UI thread never look at the disk) and
       `sync_share.rs` (the Share dialog: `Core::sync_share_form`, `sync_share_window`, `sync_share_copy_link`); the Mac
       draws them.
-- [x] Row commands (a row's right-click menu in the window and the menu bar, the selection's menu): `trs-ffi`'s
+- [x] Row commands (a row's right-click menu in the window and the menu bar, the selection's menu): `seedwell-ffi`'s
       `row_commands.rs` (`row_commands`, `play_commands`: titles, order, checks, the red Remove, the shortcut, the
       Seeding Goal, Priority, Category and Rule submenus, Play and Play With with the episode labels and the capable
       players) and `row_text.rs` (held, Ask Tracker Again, may hold video). Each `RowCommand` is run by the host
-      (core call, file manager, pasteboard, window, dialog); "Show in Finder" names `trs_platform::file_manager!()`.
-- [x] Library window state, step 1b: `trs-ffi`'s `library_window.rs` (the selection with its anchor, ⇧-click ranges, ⌘A,
+      (core call, file manager, pasteboard, window, dialog); "Show in Finder" names `seedwell_platform::file_manager!()`.
+- [x] Library window state, step 1b: `seedwell-ffi`'s `library_window.rs` (the selection with its anchor, ⇧-click ranges, ⌘A,
       ↑/↓ and ⇧↑/⇧↓, and the rows that leave the screen; the Remove… question, where it is drawn and when it goes; the window's keys as
       `LibraryKey` → `KeyOutcome`, with the file-list parts left to the host as `LibraryKeyAction`; the place Get Info
       shows and how it follows the arrows; the new-download takeover, a click in the notifier, and the arrival while the window is closed (`Library`
       lives with the app); the add sheet's texts, what is typed in it and the link check); the Mac maps its keys and
       clicks and draws the model.
-- [x] Sync view model: `trs-ffi`'s `sync_text.rs` (folder lines and badges, roles and members, links, invitations and
+- [x] Sync view model: `seedwell-ffi`'s `sync_text.rs` (folder lines and badges, roles and members, links, invitations and
       the sharing period, the add form and rename check, the Share dialog's choices, the file-manager badge, error and
       alert texts) and `sync_menu.rs` (`sync_menu_model`, the `SyncRemoval` confirmation); the Mac only draws them.
-- [x] App commands and windows a host has: `trs-ffi`'s `app_commands.rs` (`Core::app_commands`: File's Add Torrent File…
+- [x] App commands and windows a host has: `seedwell-ffi`'s `app_commands.rs` (`Core::app_commands`: File's Add Torrent File…
       and Add Magnet Link or URL…, Transfers' Pause All, Resume All and Limit Speed with their shortcuts, enabled state
       and check mark) and `host.rs` (`HostWindow`, `host_windows_all`: `row_commands`, `Library::set_host_windows`,
       `menu_model`, `sync_menu_model`, `sync_page_model` and `GetInfoCard` leave out what needs a window the host
       lacks, never a placeholder; the window's keys and disclosure triangles too); the Mac's menu bar draws them.
-- [x] Chat dialogs: `trs-ffi`'s `chat_dialogs.rs` (New Channel / Join with a Link as `ChatNewForm` with
+- [x] Chat dialogs: `seedwell-ffi`'s `chat_dialogs.rs` (New Channel / Join with a Link as `ChatNewForm` with
       `chat_new_window` and `Core::chat_new_start`; New Topic, Rename, Wake Command, Leave, Delete Conversation and the
       sidebar's Agents question as `ChatDialog` with `chat_dialog_check`); the Mac draws them.
 - [ ] Chat view model (text, mail, tags, markdown).
-- [x] `seedwell://` link routing: `trs-ffi`'s `links.rs` (`link_route`, `Core::route_link`, `command_line_routes`).
-- [x] Notices: `trs-ffi`'s `notify.rs` (`Notices`: which core events notify, their texts, the finished burst and the keys
+- [x] `seedwell://` link routing: `seedwell-ffi`'s `links.rs` (`link_route`, `Core::route_link`, `command_line_routes`).
+- [x] Notices: `seedwell-ffi`'s `notify.rs` (`Notices`: which core events notify, their texts, the finished burst and the keys
       that replace a notice, hidden trackers, the settings, muted channels and the conversation on screen, the chat
       poll's cadence; `notice_route` for a click; `settings_banner`) and `prompts.rs` (the add request, location move and
       backlog questions); the Mac posts and draws them.

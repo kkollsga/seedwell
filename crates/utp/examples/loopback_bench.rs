@@ -1,11 +1,11 @@
-//! Loopback throughput: `cargo run --release -p trs-utp --example loopback_bench -- [payload] [MiB] [streams]`
+//! Loopback throughput: `cargo run --release -p seedwell-utp --example loopback_bench -- [payload] [MiB] [streams]`
 //! Run under `/usr/bin/time -l` to see CPU time and peak RSS.
 
 use std::net::SocketAddr;
 use std::time::Instant;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use trs_utp::{Config, UtpSocket};
+use seedwell_utp::{Config, UtpSocket};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {

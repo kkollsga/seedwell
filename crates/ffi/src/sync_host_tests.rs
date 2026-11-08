@@ -193,10 +193,10 @@ impl HostCore for Fake {
         }
         Ok(i.clone())
     }
-    fn delete(&self, _: &str, id: &str, seen: Option<trs_sync_net::DeleteSeen>) -> Result<SyncDeleted, OdError> {
+    fn delete(&self, _: &str, id: &str, seen: Option<seedwell_sync_net::DeleteSeen>) -> Result<SyncDeleted, OdError> {
         let changed = match &seen {
-            Some(trs_sync_net::DeleteSeen::Folder(s)) => *s < self.newest.load(Ordering::Relaxed),
-            Some(trs_sync_net::DeleteSeen::File(v)) => self.get(id).is_some_and(|i| &i.content_version != v),
+            Some(seedwell_sync_net::DeleteSeen::Folder(s)) => *s < self.newest.load(Ordering::Relaxed),
+            Some(seedwell_sync_net::DeleteSeen::File(v)) => self.get(id).is_some_and(|i| &i.content_version != v),
             None => false,
         };
         if changed {
@@ -215,9 +215,9 @@ impl HostCore for Fake {
     fn ignored(&self, _: &str, path: &str, _: bool) -> Result<Option<crate::sync::ondemand::SyncIgnored>, OdError> {
         Ok(path.ends_with(".tmp").then(|| crate::sync::ondemand::SyncIgnored { reason: "it matches “*.tmp”".into(), deletable: false }))
     }
-    fn replace_hold(&self, _: &str) -> Option<trs_sync::ondemand::Hold> {
+    fn replace_hold(&self, _: &str) -> Option<seedwell_sync::ondemand::Hold> {
         let writing = self.writing.load(Ordering::Relaxed);
-        self.hold.load(Ordering::Relaxed).then_some(trs_sync::ondemand::Hold { left: Duration::from_secs(1), writing })
+        self.hold.load(Ordering::Relaxed).then_some(seedwell_sync::ondemand::Hold { left: Duration::from_secs(1), writing })
     }
 }
 
@@ -282,7 +282,7 @@ fn what_a_user_may_do_follows_the_role() {
 
 #[test]
 fn core_errors_get_the_kind_the_system_needs() {
-    use trs_sync_net::{OnDemandError as E, SyncError};
+    use seedwell_sync_net::{OnDemandError as E, SyncError};
     let kind = |e: SyncError| HostError::from(crate::sync::ondemand::od_err(e)).kind;
     // From the service's typed errors, whatever their words.
     assert_eq!(kind(SyncError::OnDemand(E::NoItem, "Docs/a.txt: no such item in the folder".into())), ErrKind::NoSuchItem);
@@ -359,7 +359,7 @@ fn a_fetch_reports_progress_and_hands_over_a_copy() {
     // Folders have no content; a version no device can give says so at once.
     assert_eq!(err(&h, json!({"v":1,"op":"fetch","folder":"F","item":"d"})).0, "failed");
     let (kind, why) = err(&h, json!({"v":1,"op":"fetch","folder":"F","item":"u"}));
-    assert_eq!((kind.as_str(), why.as_str()), ("unreachable", trs_sync::ondemand::UNAVAILABLE));
+    assert_eq!((kind.as_str(), why.as_str()), ("unreachable", seedwell_sync::ondemand::UNAVAILABLE));
 }
 
 #[test]
@@ -1509,16 +1509,16 @@ fn the_containers_folders_are_the_users_alone() {
 
 /// The host's core calls made on a sync service of its own (a member device), as `BackendCore` makes them through the
 /// app's backend: the listing calls only.
-struct NetCore(trs_sync_net::SyncHandle);
+struct NetCore(seedwell_sync_net::SyncHandle);
 
-fn fid(f: &str) -> Result<trs_sync_proto::ids::FolderId, OdError> {
-    f.parse().map_err(|_| crate::sync::ondemand::od_err(trs_sync_net::SyncError::NotFound))
+fn fid(f: &str) -> Result<seedwell_sync_proto::ids::FolderId, OdError> {
+    f.parse().map_err(|_| crate::sync::ondemand::od_err(seedwell_sync_net::SyncError::NotFound))
 }
 
 impl HostCore for NetCore {
     fn folders(&self) -> Option<Vec<HostFolder>> {
         let all = self.0.snapshot().folders.into_iter().filter(|f| f.on_demand);
-        Some(all.map(|f| HostFolder { writable: f.access == trs_sync_proto::keys::Access::Write, id: f.id, name: f.name }).collect())
+        Some(all.map(|f| HostFolder { writable: f.access == seedwell_sync_proto::keys::Access::Write, id: f.id, name: f.name }).collect())
     }
     fn item(&self, f: &str, id: &str) -> Result<Option<SyncItem>, OdError> {
         let r = self.0.od_item(&fid(f)?, id).map_err(crate::sync::ondemand::od_err)?;
@@ -1553,7 +1553,7 @@ impl HostCore for NetCore {
     fn modify(&self, _: &str, id: &str, _: Option<&str>, _: Option<&str>, _: Option<&str>, _: Option<&str>) -> Result<SyncItem, OdError> {
         Err(no_item(id))
     }
-    fn delete(&self, _: &str, id: &str, _: Option<trs_sync_net::DeleteSeen>) -> Result<SyncDeleted, OdError> {
+    fn delete(&self, _: &str, id: &str, _: Option<seedwell_sync_net::DeleteSeen>) -> Result<SyncDeleted, OdError> {
         Err(no_item(id))
     }
 }
@@ -1570,12 +1570,12 @@ fn a_member_lists_at_once_while_its_owner_has_sent_nothing_and_is_signalled_when
     let tmp = tempfile::tempdir().unwrap();
     let start = |name: &str, dir: PathBuf| {
         rt.block_on(async {
-            let secrets = Arc::new(trs_sync_net::secrets::FileSecrets::new(dir.join("secrets")));
-            let mut o = trs_sync_net::Options::new(dir, "Seedwell test".into(), secrets);
+            let secrets = Arc::new(seedwell_sync_net::secrets::FileSecrets::new(dir.join("secrets")));
+            let mut o = seedwell_sync_net::Options::new(dir, "Seedwell test".into(), secrets);
             o.default_device_name = name.into();
             o.bind = IpAddr::V4(Ipv4Addr::LOCALHOST);
             o.lan_discovery = false;
-            trs_sync_net::SyncHandle::start(o).await.unwrap()
+            seedwell_sync_net::SyncHandle::start(o).await.unwrap()
         })
     };
     let (a, b) = (start("Alpha", tmp.path().join("a")), start("Beta", tmp.path().join("b")));
@@ -1587,7 +1587,7 @@ fn a_member_lists_at_once_while_its_owner_has_sent_nothing_and_is_signalled_when
     let f = fid(&id).unwrap();
     // The owner sends its list only after a while.
     a.test_announce_pause(&f, Duration::from_secs(5));
-    let link = a.create_invite(&f, trs_sync_proto::members::Role::ReadWrite, 1, 1).unwrap().link;
+    let link = a.create_invite(&f, seedwell_sync_proto::members::Role::ReadWrite, 1, 1).unwrap().link;
     rt.block_on(b.join_folder_on_demand(&link, tmp.path().join("place"))).unwrap();
     b.add_address(&f, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), a.port())).unwrap();
 

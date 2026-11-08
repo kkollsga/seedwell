@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use trs_control::display;
+use seedwell_control::display;
 
 use crate::chooser::{category_choices, held, home, shown_in, CategoryChoice, Choices, HeldActions};
 use crate::held::CancelNote;

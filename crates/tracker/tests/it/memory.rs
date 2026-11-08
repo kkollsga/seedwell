@@ -18,10 +18,10 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use trs_tracker::gate::GateConfig;
-use trs_tracker::hub::{TorrentSpec, TrackerHub};
-use trs_tracker::store::{StoreError, TimingKey, TimingRecord, TimingStore};
-use trs_tracker::{Millis, Stats, TorrentEvent, TrackerUrl};
+use seedwell_tracker::gate::GateConfig;
+use seedwell_tracker::hub::{TorrentSpec, TrackerHub};
+use seedwell_tracker::store::{StoreError, TimingKey, TimingRecord, TimingStore};
+use seedwell_tracker::{Millis, Stats, TorrentEvent, TrackerUrl};
 
 struct Counting;
 
@@ -144,10 +144,10 @@ fn heap_for(n: usize, shape: Shape, seeding: bool) -> isize {
             let _ = hub.take_reports();
             let _ = hub.take_gate_events();
             for r in hub.tick(now) {
-                let t = trs_tracker::clamp_timing(Some(1800), None);
+                let t = seedwell_tracker::clamp_timing(Some(1800), None);
                 hub.complete(
                     r.ticket(),
-                    Ok(trs_tracker::AnnounceResponse {
+                    Ok(seedwell_tracker::AnnounceResponse {
                         interval: t.interval,
                         min_interval: t.min_interval,
                         tracker_id: None,

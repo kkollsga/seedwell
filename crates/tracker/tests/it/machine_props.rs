@@ -5,9 +5,9 @@
 use std::time::Duration;
 
 use proptest::prelude::*;
-use trs_tracker::backoff::{nominal_delay, slow_nominal_delay};
-use trs_tracker::response::{FailureClass, ParseError, TransportError};
-use trs_tracker::*;
+use seedwell_tracker::backoff::{nominal_delay, slow_nominal_delay};
+use seedwell_tracker::response::{FailureClass, ParseError, TransportError};
+use seedwell_tracker::*;
 
 fn cfg() -> MachineConfig {
     let mut c = MachineConfig::new([3; 20], [4; 20], 0x1234, 6881);

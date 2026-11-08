@@ -18,7 +18,7 @@
 //!
 //! The manifest is carried as text, so the bytes signed are the bytes verified (no canonical JSON needed). What a
 //! build must be to install (this system's zip name for its version, newer than the running one, not failed before)
-//! is the updater's rule (`trs-ffi`'s `updates.rs`); this crate says only whether the manifest is the build key's.
+//! is the updater's rule (`seedwell-ffi`'s `updates.rs`); this crate says only whether the manifest is the build key's.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 

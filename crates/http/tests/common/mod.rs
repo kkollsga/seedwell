@@ -20,7 +20,7 @@ use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use trs_http::{BoxFuture, DownloadRequest, DownloaderConfig, RateGate};
+use seedwell_http::{BoxFuture, DownloadRequest, DownloaderConfig, RateGate};
 
 // ---------------------------------------------------------------- patterns
 
@@ -451,7 +451,7 @@ impl Dirs {
 }
 
 /// Wait until `cond(progress)` holds, with a deadline.
-pub async fn wait_until(task: &trs_http::DownloadTask, what: &str, cond: impl Fn(&trs_http::Progress) -> bool) -> trs_http::Progress {
+pub async fn wait_until(task: &seedwell_http::DownloadTask, what: &str, cond: impl Fn(&seedwell_http::Progress) -> bool) -> seedwell_http::Progress {
     let mut rx = task.subscribe();
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {

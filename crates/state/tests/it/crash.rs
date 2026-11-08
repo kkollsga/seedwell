@@ -7,7 +7,7 @@
 //! * counters never go backwards and cross-table invariants hold (they are written in one transaction).
 //!
 //! `CRASH_ITERS` sets the number of kills (default 40; the README records a run of 1000).
-//! The child is this same test binary re-run with `TRS_CRASH_CHILD_DIR` set.
+//! The child is this same test binary re-run with `SEEDWELL_CRASH_CHILD_DIR` set.
 
 use crate::common;
 
@@ -18,10 +18,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::{TempDir, id};
-use trs_state::{Counters, Day, OpenOptions, StatsBucket, StatsScope, Store, TorrentRecord};
-use trs_tracker::store::{TimingKey, TimingRecord, TimingStore};
+use seedwell_state::{Counters, Day, OpenOptions, StatsBucket, StatsScope, Store, TorrentRecord};
+use seedwell_tracker::store::{TimingKey, TimingRecord, TimingStore};
 
-const CHILD_ENV: &str = "TRS_CRASH_CHILD_DIR";
+const CHILD_ENV: &str = "SEEDWELL_CRASH_CHILD_DIR";
 
 fn timing_key(k: u64) -> TimingKey {
     TimingKey { info_hash: id(100_000 + (k % 997) as u32), tracker_url: format!("https://t{}.example.org/announce?passkey=SECRET{k}", k % 3) }

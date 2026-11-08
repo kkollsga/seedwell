@@ -1,12 +1,12 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
 /// <summary>
-/// The settings banner (the core's <c>settings_banner</c>, trs-ffi notify.rs): what a save or a rejected file said, the
+/// The settings banner (the core's <c>settings_banner</c>, seedwell-ffi notify.rs): what a save or a rejected file said, the
 /// values the core replaced (<c>Core::settings_problems</c>) and the settings that apply after a restart, problems
 /// first. Outside Settings it has Open Settings (only with problems); in Settings it is drawn without it.
 /// </summary>
@@ -48,7 +48,7 @@ sealed class SettingsBannerView
         Changed?.Invoke();
     }
 
-    internal SettingsBanner? Model(bool inSettings) => TrsFfiMethods.SettingsBanner(problems.ToArray(), notes, restart, inSettings);
+    internal SettingsBanner? Model(bool inSettings) => SeedwellFfiMethods.SettingsBanner(problems.ToArray(), notes, restart, inSettings);
 
     /// <summary>What the Settings page's model is built from (SettingsLive's problems, notes and restart list).</summary>
     internal string[] Problems => problems.ToArray();

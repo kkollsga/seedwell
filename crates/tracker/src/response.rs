@@ -5,7 +5,7 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
-use trs_bencode::{DecodeLimits, Value};
+use seedwell_bencode::{DecodeLimits, Value};
 
 use crate::types::{Peer, PeerId20};
 
@@ -502,7 +502,7 @@ fn parse_retry_in(v: &Value<'_>) -> Option<RetryIn> {
 
 /// Parse an HTTP announce response body.
 ///
-/// Strict about the bencode framing (via `trs-bencode`), defensive about
+/// Strict about the bencode framing (via `seedwell-bencode`), defensive about
 /// content: unknown keys are ignored, bad optional values are dropped, trailing
 /// bytes after the top-level dictionary are tolerated, and timing is clamped.
 pub fn parse_announce_response(body: &[u8]) -> Result<AnnounceResponse, AnnounceError> {
@@ -513,7 +513,7 @@ pub fn parse_announce_response(body: &[u8]) -> Result<AnnounceResponse, Announce
         max_items: 100_000,
         max_bytes: MAX_BODY,
     };
-    let (value, _rest) = trs_bencode::decode_prefix_with_limits(body, limits)
+    let (value, _rest) = seedwell_bencode::decode_prefix_with_limits(body, limits)
         .map_err(|_| AnnounceError::Garbage(ParseError::NotBencode))?;
     if value.as_dict().is_none() {
         return Err(AnnounceError::Garbage(ParseError::NotDict));

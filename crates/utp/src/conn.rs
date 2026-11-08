@@ -336,7 +336,7 @@ impl Connection {
         }
     }
 
-    /// One-line state dump for the opt-in trace (`TRS_UTP_TRACE`).
+    /// One-line state dump for the opt-in trace (`SEEDWELL_UTP_TRACE`).
     pub(crate) fn trace_line(&self) -> String {
         format!(
             "st={:?} cwnd={} fl={} pkts={} q={} pw={} rto={}ms srtt={}ms dly={}ms dg={} rec={} rtx={} to={} ss={} unsent={}",

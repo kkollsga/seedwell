@@ -4,7 +4,7 @@
 use crate::common;
 
 use common::*;
-use trs_utp::Config;
+use seedwell_utp::Config;
 
 const SEC: u64 = 1_000_000;
 

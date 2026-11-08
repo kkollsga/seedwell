@@ -1,12 +1,12 @@
 //! Read/write access to the on-disk state the protocol exposes: tracker profiles, rules,
-//! statistics and settings. Everything goes through `trs-state`, which validates.
+//! statistics and settings. Everything goes through `seedwell-state`, which validates.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use trs_state::{Config, DocError, DocStore, RuleSet, StateError, Store, TrackerProfiles};
+use seedwell_state::{Config, DocError, DocStore, RuleSet, StateError, Store, TrackerProfiles};
 
-/// Anything that holds an open `trs_state::Store`. redb opens a file once per process, so the
+/// Anything that holds an open `seedwell_state::Store`. redb opens a file once per process, so the
 /// control server borrows the engine's store instead of opening its own.
 pub trait StoreRef: Send + Sync {
     /// The database.
@@ -69,6 +69,11 @@ impl StateAccess {
     /// `rules.toml`.
     pub fn rules(&self) -> RuleSet {
         DocStore::<RuleSet>::new(&self.dir).load().value
+    }
+
+    /// Validate and save `rules.toml`; the running engine picks it up through its watcher.
+    pub fn save_rules(&self, set: &RuleSet) -> Result<(), DocError> {
+        DocStore::<RuleSet>::new(&self.dir).save(set)
     }
 
     /// `trackers.toml`.

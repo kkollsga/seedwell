@@ -1,10 +1,10 @@
-//! `config.toml` (`trs_state::Config`) to [`EngineConfig`], for the first start and for every hot reload.
+//! `config.toml` (`seedwell_state::Config`) to [`EngineConfig`], for the first start and for every hot reload.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use trs_state::Config;
-use trs_state::config::{AfterAdd as SAfter, WatchMode as SWatch};
+use seedwell_state::Config;
+use seedwell_state::config::{AfterAdd as SAfter, WatchMode as SWatch};
 
 use crate::config::{
     AfterAdd, AskMode, SmartAddConfig, DetectionConfig, DirectConfig, EngineConfig, PortmapConfig, TierTimings,
@@ -16,7 +16,7 @@ fn limit(v: u64) -> Option<u64> {
     (v != 0).then_some(v)
 }
 
-fn after(a: trs_state::config::AfterAdd, archive: Option<&str>) -> AfterAdd {
+fn after(a: seedwell_state::config::AfterAdd, archive: Option<&str>) -> AfterAdd {
     match a {
         SAfter::Trash => AfterAdd::Trash,
         SAfter::Leave => AfterAdd::Leave,
@@ -41,7 +41,7 @@ pub fn engine_config(cfg: &Config, base: &EngineConfig) -> EngineConfig {
         confidence_threshold: cfg.detection.confidence_threshold as f32,
     });
     e.by_status = f.by_status;
-    for c in trs_classify::Category::ALL {
+    for c in seedwell_classify::Category::ALL {
         let o = f.categories.get(c);
         e.category_locations[c.index()] = crate::config::CategoryLocation {
             incomplete: o.incomplete_dir.as_deref().map(expand_tilde),
@@ -50,9 +50,9 @@ pub fn engine_config(cfg: &Config, base: &EngineConfig) -> EngineConfig {
     }
     e.smart_add = SmartAddConfig {
         mode: match cfg.transfers.ask_before_adding {
-            trs_state::config::AskBeforeAdding::Never => AskMode::Never,
-            trs_state::config::AskBeforeAdding::MultiFile => AskMode::Smart,
-            trs_state::config::AskBeforeAdding::Always => AskMode::Always,
+            seedwell_state::config::AskBeforeAdding::Never => AskMode::Never,
+            seedwell_state::config::AskBeforeAdding::MultiFile => AskMode::Smart,
+            seedwell_state::config::AskBeforeAdding::Always => AskMode::Always,
         },
         large_bytes: u64::from(cfg.transfers.large_torrent_gb) * 1_000_000_000,
         free_space_override: base.smart_add.free_space_override,
@@ -97,9 +97,9 @@ pub fn engine_config(cfg: &Config, base: &EngineConfig) -> EngineConfig {
     e.pex_enabled = n.pex;
     e.utp = n.utp;
     e.encryption = match n.encryption {
-        trs_state::config::Encryption::Off => crate::config::EncryptionPolicy::Off,
-        trs_state::config::Encryption::Prefer => crate::config::EncryptionPolicy::Prefer,
-        trs_state::config::Encryption::Require => crate::config::EncryptionPolicy::Require,
+        seedwell_state::config::Encryption::Off => crate::config::EncryptionPolicy::Off,
+        seedwell_state::config::Encryption::Prefer => crate::config::EncryptionPolicy::Prefer,
+        seedwell_state::config::Encryption::Require => crate::config::EncryptionPolicy::Require,
     };
     // The file says whether torrents go through the proxy (SPEC §7H); the servers and the key come from the app
     // (`EngineHandle::set_proxy`), never from the file. A reload never turns the proxy off or replaces its servers
@@ -129,7 +129,7 @@ pub fn engine_config(cfg: &Config, base: &EngineConfig) -> EngineConfig {
     };
     e.write_cache_bytes = (a.write_cache_mib as usize) << 20;
     e.fd_cache = (a.fd_limit as usize).max(64);
-    e.preallocate = a.preallocation == trs_state::config::Preallocation::Full;
+    e.preallocate = a.preallocation == seedwell_state::config::Preallocation::Full;
     e
 }
 
@@ -151,10 +151,10 @@ pub fn restart_required(old: &EngineConfig, new: &EngineConfig) -> Vec<String> {
     v
 }
 
-/// Seedwell's state folder for the current user (`trs_platform::dirs::state_dir`:
+/// Seedwell's state folder for the current user (`seedwell_platform::dirs::state_dir`:
 /// `~/Library/Application Support/Seedwell` on macOS).
 pub fn default_state_dir() -> PathBuf {
-    trs_platform::dirs::state_dir().unwrap_or_else(|| PathBuf::from("Seedwell"))
+    seedwell_platform::dirs::state_dir().unwrap_or_else(|| PathBuf::from("Seedwell"))
 }
 
 #[cfg(test)]

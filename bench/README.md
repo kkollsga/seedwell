@@ -1,6 +1,6 @@
-# TorrentRS comparison benchmarks
+# Seedwell comparison benchmarks
 
-Compares TorrentRS with Transmission and qBittorrent on the claims that matter (SPEC §2, ENGINE §9):
+Compares Seedwell with Transmission and qBittorrent on the claims that matter (SPEC §2, ENGINE §9):
 fast downloads, low memory with hundreds of seeding torrents, near-zero idle CPU and wake-ups.
 
 Python 3 standard library only, run with `python3 -I`. Everything lives under `bench/`:
@@ -23,7 +23,7 @@ bench/
 * Transmission 4.1.3: `brew install transmission-cli` (`transmission-daemon` on `PATH`, or `TR_DAEMON=...`).
 * qBittorrent 5.2.3: a `qbittorrent-nox` binary on `PATH`, or `QBT=/path/to/qbittorrent-nox`.
 * `target/release/tracker-probe` (mock tracker; built on demand with `cargo build --release -p tracker-probe`).
-* TorrentRS: set `TRS_BENCH_BIN=/path/to/binary` (contract below). Without it the `torrentrs` client is skipped.
+* Seedwell: set `SEEDWELL_BENCH_BIN=/path/to/binary` (contract below). Without it the `seedwell` client is skipped.
 
 Isolation: every client runs with its own profile dir under `bench/runs/profiles/`. `~/Library/Preferences/org.m0k.transmission.plist`,
 Transmission.app state and any other existing client state are never read or written. No private trackers are used.
@@ -50,14 +50,14 @@ python3 -I bench/scripts/bench.py cleanup                         # kill leftove
 ```
 
 The whole baseline (netcheck, downloads, scale, hot, report; about 3 hours) is `bench/scripts/run-baseline.sh [campaign]`; it adds
-`torrentrs` automatically when `TRS_BENCH_BIN` is set. `bench/scripts/tests/` holds `fake-trs-bench` (a contract-conforming stand-in
-binary for testing the adapter) and `repro-seeder-reconnect.py` (TorrentRS seeder refusing a second leecher process from the same IP).
+`seedwell` automatically when `SEEDWELL_BENCH_BIN` is set. `bench/scripts/tests/` holds `fake-seedwell-bench` (a contract-conforming stand-in
+binary for testing the adapter) and `repro-seeder-reconnect.py` (Seedwell seeder refusing a second leecher process from the same IP).
 A hand-written `bench/reports/notes-<campaign>.md` is appended to the generated report.
 
 Useful flags: `--campaign ID` (group runs; default `YYYY-MM-DD`), `--resume` (skip runs already finished in the
 campaign; makes a re-run idempotent), `download --budget-gb 15 --seed-secs 120 --max-secs 3600`,
 `scale --idle-secs 600 --reps N`, `hot --rounds 10 --leecher transmission`.
-`--clients transmission,qbittorrent,torrentrs` once `TRS_BENCH_BIN` is available. Only run **one** benchmark at a
+`--clients transmission,qbittorrent,seedwell` once `SEEDWELL_BENCH_BIN` is available. Only run **one** benchmark at a
 time; the harness kills every client it started on exit, on error and on Ctrl-C/SIGTERM (process groups), deletes
 download dirs in `finally`, and `cleanup` kills strays by profile path.
 
@@ -74,13 +74,13 @@ perturb the measurement); a mock tracker (interval 1800 s) counts announces. *Ho
 Transmission leecher processes (default) download the 10 largest torrents from it, repeated for `--rounds` rounds; throughput is taken
 from the leechers' byte counters.
 
-## TorrentRS adapter contract
+## Seedwell adapter contract
 
-The harness drives TorrentRS through a small foreground binary (a headless mode of the engine, e.g. `trs bench` or a
-`crates/engine` example). The coordinator provides it; `TRS_BENCH_BIN` must point to it.
+The harness drives Seedwell through a small foreground binary (a headless mode of the engine, e.g. `seedwell bench` or a
+`crates/engine` example). The coordinator provides it; `SEEDWELL_BENCH_BIN` must point to it.
 
 ```
-$TRS_BENCH_BIN add <file.torrent> [--add <file.torrent>]... \
+$SEEDWELL_BENCH_BIN add <file.torrent> [--add <file.torrent>]... \
       --download-dir <dir> --state-dir <dir> --listen-port <port> \
       [--no-dht] [--no-pex] [--no-lsd] [--no-portmap] [--no-utp]
 ```
@@ -131,29 +131,29 @@ Subclass `Adapter` in `bench/scripts/benchlib/adapters.py` (`available`, `versio
 * Other agents compile on the same machine: the load average is stored per run (CSV column `load1`, `loadavg_start` in `results.jsonl`)
   and printed in the report; re-run outliers with `--resume` after deleting their records, or use a new `--campaign`.
 
-## TorrentRS adapter binary
+## Seedwell adapter binary
 
-`TRS_BENCH_BIN` for the contract above is the engine example `bench_client` (`crates/engine/examples/bench_client.rs`):
+`SEEDWELL_BENCH_BIN` for the contract above is the engine example `bench_client` (`crates/engine/examples/bench_client.rs`):
 
 ```sh
 cd "$(git rev-parse --show-toplevel)"
-CARGO_BUILD_JOBS=4 cargo build --release -p trs-engine --example bench_client
-export TRS_BENCH_BIN="$PWD/target/release/examples/bench_client"
+CARGO_BUILD_JOBS=4 cargo build --release -p seedwell-engine --example bench_client
+export SEEDWELL_BENCH_BIN="$PWD/target/release/examples/bench_client"
 ```
 
 Usage (exactly the contract; the first torrents may be positional after `add`, more via `--add`):
 
 ```sh
-$TRS_BENCH_BIN add a.torrent b.torrent [--add c.torrent]... \
+$SEEDWELL_BENCH_BIN add a.torrent b.torrent [--add c.torrent]... \
     --download-dir <dir> --state-dir <dir> --listen-port <port> \
     [--no-dht] [--no-pex] [--no-lsd] [--no-portmap] [--no-utp]
-$TRS_BENCH_BIN --version
+$SEEDWELL_BENCH_BIN --version
 ```
 
 * One JSON line per second on stdout, aggregated over all torrents:
   `{"done_bytes","total_bytes","down_rate","up_rate","peers","state"}` plus the optional extras `"torrents"`, `"seeding"`,
   `"checking"`. `state` is `checking` / `downloading` / `seeding` / `error` as specified above. Logs go to stderr.
-* The binary runs the real stack (`trs_engine::Host`) on `--state-dir` (a fresh `state.redb`, `torrents/`, default
+* The binary runs the real stack (`seedwell_engine::Host`) on `--state-dir` (a fresh `state.redb`, `torrents/`, default
   `config.toml` / `rules.toml` / `trackers.toml` are created there; nothing else is touched). Engine settings: no rate limits,
   no queueing (`max_active_downloads` 100000), 200 connections globally and 100 per torrent (the harness's equalised limits),
   DHT / PEX / port mapping on unless disabled, no staging, no organizing, no watch folders (data is written straight into
@@ -163,14 +163,14 @@ $TRS_BENCH_BIN --version
   statistics flushed, port mappings deleted) and exits 0; it normally returns in well under a second on loopback.
 * The seeder holds every torrent forever: the binary writes a `rules.toml` with the goal `forever` into a fresh state directory
   (the shipped default stops a torrent at ratio 1.0, and a stopped torrent refuses new leechers).
-* Measurement aids, off by default: `TRS_BENCH_DIAG=1` counts live heap bytes (a counting global allocator wrapped around `trs_storage::MappedAlloc`, the
+* Measurement aids, off by default: `SEEDWELL_BENCH_DIAG=1` counts live heap bytes (a counting global allocator wrapped around `seedwell_storage::MappedAlloc`, the
   allocator the apps install) and prints, every 10 s on stderr, the heap, connections, handshakes, an allocation histogram by size class,
-  the peak heap and the cumulative KiB allocated per size class (the churn of start-up); `TRS_BENCH_PROF=2048-8192` (with `TRS_BENCH_DIAG=1`)
+  the peak heap and the cumulative KiB allocated per size class (the churn of start-up); `SEEDWELL_BENCH_PROF=2048-8192` (with `SEEDWELL_BENCH_DIAG=1`)
   prints a source-line stack for every 8th allocation whose size is in that range, which is how the 4 KiB redb page buffers were found to be
-  the start-up churn (slow: every sample symbolizes a backtrace, use it with 100 torrents); `TRS_BENCH_TIER_SECS=15` shortens the
+  the start-up churn (slow: every sample symbolizes a backtrace, use it with 100 torrents); `SEEDWELL_BENCH_TIER_SECS=15` shortens the
   Hot to Warm and Warm to Cold timers, so that an idle seeder reaches its steady Cold state in half a minute. The status line uses
   `EngineHandle::totals()`, not `snapshot()`, so it costs nothing measurable with 500 idle torrents.
-* `--no-utp` turns uTP off (`BENCH_TRS_NO_UTP=1` makes the harness pass it, for a TCP-only comparison). The shipped defaults, uTP and
+* `--no-utp` turns uTP off (`BENCH_SEEDWELL_NO_UTP=1` makes the harness pass it, for a TCP-only comparison). The shipped defaults, uTP and
   encryption on, are what the harness runs: Transmission prefers encrypted connections and tries uTP first, which only works because the
   engine answers the encrypted handshake (MSE) on TCP and uTP.
 * `--no-lsd` is accepted and ignored (the engine has no LSD yet). `--no-portmap` disables UPnP / NAT-PMP / PCP; without it the
@@ -180,7 +180,7 @@ $TRS_BENCH_BIN --version
 
 ## uTP stall hunting
 
-`bench/scripts/utp-stall-loop.sh OUTDIR [max_runs] [rounds] [stall_s]` loops the hot bench with `TRS_UTP_TRACE=1`
+`bench/scripts/utp-stall-loop.sh OUTDIR [max_runs] [rounds] [stall_s]` loops the hot bench with `SEEDWELL_UTP_TRACE=1`
 (see `crates/utp/README.md`) and `BENCH_KEEP_PROFILE=1` (keeps the seeder's `stderr.log` instead of deleting the
 profile), next to `bench/scripts/lo0-timeline.py OUT.tsv [SECONDS]`, a 100 ms `netstat -I lo0 -b` sampler (wall ms,
 Obytes). Per run it keeps `bench.log`, `lo0.tsv` and `stderr.log` until a round takes at least `stall_s` seconds.

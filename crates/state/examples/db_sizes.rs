@@ -1,9 +1,9 @@
 //! Prints database file sizes for N torrents (diagnostic for the README).
-use trs_state::{Counters, OpenOptions, Store, TorrentRecord};
+use seedwell_state::{Counters, OpenOptions, Store, TorrentRecord};
 
 fn main() {
     let n: u32 = std::env::args().nth(1).and_then(|v| v.parse().ok()).unwrap_or(1000);
-    let dir = std::env::temp_dir().join(format!("trs-state-sizes-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("seedwell-state-sizes-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let size = |d: &std::path::Path| std::fs::metadata(d.join("state.redb")).map(|m| m.len()).unwrap_or(0);
     {

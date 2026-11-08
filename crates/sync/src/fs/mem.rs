@@ -31,7 +31,7 @@ use std::io;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use trs_sync_proto::model::FileKind;
+use seedwell_sync_proto::model::FileKind;
 
 use super::{DirEntry, FileHandle, Fs, Listing, Meta, components};
 use crate::path;

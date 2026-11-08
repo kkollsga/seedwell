@@ -6,8 +6,8 @@
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
 
-use trs_control::display as d;
-use trs_platform::file_manager;
+use seedwell_control::display as d;
+use seedwell_platform::file_manager;
 
 use crate::menu::APP_NAME;
 use crate::row_commands::RowCommand;

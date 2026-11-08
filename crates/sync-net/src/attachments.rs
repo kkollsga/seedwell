@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use trs_sync_proto::attach::{AttachmentRef, Attachments, KIND_FILE, MAX_ATTACHMENTS, MAX_EXTRA, safe_name};
-use trs_sync_proto::members::hex;
+use seedwell_sync_proto::attach::{AttachmentRef, Attachments, KIND_FILE, MAX_ATTACHMENTS, MAX_EXTRA, safe_name};
+use seedwell_sync_proto::members::hex;
 
 use crate::blobs::BlobState;
 use crate::chat::{AttachmentBytes, AttachmentInfo, MessageInfo, MessageKind, NewAttachment, NewImage};
@@ -23,7 +23,7 @@ pub fn folder_refused(name: &str) -> String {
 
 /// The line a version without attachments shows for one (`[image: shot.png, 240 KB]`, `[file: report.pdf, 1.2 GB]`).
 fn fallback_line(file: bool, name: &str, size: u64) -> String {
-    format!("[{}: {name}, {}]", if file { "file" } else { "image" }, trs_media::size_text(size))
+    format!("[{}: {name}, {}]", if file { "file" } else { "image" }, seedwell_media::size_text(size))
 }
 
 /// An attachment of a message as callers see it; `mine`: the message was sent from this device.
@@ -45,13 +45,13 @@ pub(crate) fn attachment_info(room: &dyn Room, ix: &Index, r: &AttachmentRef, mi
             thumb: Vec::new(),
         };
     }
-    let kind = trs_media::Kind::from_byte(r.kind);
+    let kind = seedwell_media::Kind::from_byte(r.kind);
     let state = crate::blobs::state_of(room.blobs(), r.kind, r.size, &r.hash, ix.budget_set.contains(&r.hash));
     AttachmentInfo {
         hash: hex(&r.hash),
         kind: kind.map_or("other", |k| k.name()).into(),
         // Another device's name for it: cleaned like one sent from here.
-        name: trs_media::file_name(&r.name, kind.unwrap_or(trs_media::Kind::Png)),
+        name: seedwell_media::file_name(&r.name, kind.unwrap_or(seedwell_media::Kind::Png)),
         size: r.size,
         width: r.width,
         height: r.height,
@@ -86,7 +86,7 @@ fn find(ix: &Index, s: &str) -> Result<[u8; 32], SyncError> {
 
 /// What one item of a send became.
 enum Item {
-    Image(trs_media::Prepared),
+    Image(seedwell_media::Prepared),
     File { path: PathBuf, name: String },
 }
 
@@ -98,18 +98,18 @@ fn classify(items: Vec<NewAttachment>) -> Result<Vec<Item>, String> {
         .map(|i| match i {
             NewAttachment::Image(NewImage { name, bytes }) => {
                 let shown = name.rsplit(['/', '\\']).next().filter(|n| !n.trim().is_empty()).unwrap_or("image").to_string();
-                trs_media::prepare(&name, &bytes).map(Item::Image).map_err(|e| format!("{shown}: {e}"))
+                seedwell_media::prepare(&name, &bytes).map(Item::Image).map_err(|e| format!("{shown}: {e}"))
             }
             NewAttachment::Path(path) => {
                 let name = safe_name(&path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
-                let meta = std::fs::metadata(&path).map_err(|e| format!("{name}: {}", if trs_platform::fs::is_not_found(&e) { "there is no such file".to_string() } else { e.to_string() }))?;
+                let meta = std::fs::metadata(&path).map_err(|e| format!("{name}: {}", if seedwell_platform::fs::is_not_found(&e) { "there is no such file".to_string() } else { e.to_string() }))?;
                 if meta.is_dir() {
                     return Err(folder_refused(&name));
                 }
-                if meta.len() <= trs_media::MAX_IMAGE as u64 {
+                if meta.len() <= seedwell_media::MAX_IMAGE as u64 {
                     let bytes = std::fs::read(&path).map_err(|e| format!("{name}: {e}"))?;
-                    if trs_media::sniff(&bytes).is_some()
-                        && let Ok(p) = trs_media::prepare(&name, &bytes)
+                    if seedwell_media::sniff(&bytes).is_some()
+                        && let Ok(p) = seedwell_media::prepare(&name, &bytes)
                     {
                         return Ok(Item::Image(p));
                     }
@@ -131,7 +131,7 @@ impl SyncHandle {
 
     /// Posts a text message with images and files (SPEC §7G.7 *Attachments*), at most
     /// [`MAX_ATTACHMENTS`], to a channel (`topic` there) or a private conversation. An image is checked, its metadata
-    /// stripped and capped ([`trs_media::prepare`]), and kept here sealed. A file of any size is read once for its
+    /// stripped and capped ([`seedwell_media::prepare`]), and kept here sealed. A file of any size is read once for its
     /// hash and piece table (off the service's locks; meanwhile [`SyncHandle::chat_preparing`] shows it), then shared
     /// from where it is: never copied. The message is posted when that is done. The body is `caption` and, for devices
     /// without attachments, a line per attachment.
@@ -172,7 +172,7 @@ impl SyncHandle {
             .iter()
             .map(|i| match i {
                 NewAttachment::Path(p) => (safe_name(&p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()), std::fs::metadata(p).map_or(0, |m| m.len())),
-                NewAttachment::Image(im) => (trs_media::file_name(&im.name, trs_media::sniff(&im.bytes).unwrap_or(trs_media::Kind::Png)), im.bytes.len() as u64),
+                NewAttachment::Image(im) => (seedwell_media::file_name(&im.name, seedwell_media::sniff(&im.bytes).unwrap_or(seedwell_media::Kind::Png)), im.bytes.len() as u64),
             })
             .collect();
         let (id, done) = room.files().preparing(named.iter().map(|n| n.0.clone()).collect(), named.iter().map(|n| n.1).sum());
@@ -276,7 +276,7 @@ impl SyncHandle {
     }
 
     /// Posts a text message with images to a channel (pictures' bytes; see [`SyncHandle::chat_send_attachments`]).
-    pub async fn chat_send_images(&self, id: &trs_sync_proto::ids::FolderId, topic: Option<&str>, caption: &str, reply_to: Option<&str>, agent: Option<&str>, images: Vec<NewImage>) -> Result<MessageInfo, SyncError> {
+    pub async fn chat_send_images(&self, id: &seedwell_sync_proto::ids::FolderId, topic: Option<&str>, caption: &str, reply_to: Option<&str>, agent: Option<&str>, images: Vec<NewImage>) -> Result<MessageInfo, SyncError> {
         self.chat_send_attachments(id, topic, caption, reply_to, agent, images.into_iter().map(NewAttachment::Image).collect()).await
     }
 
@@ -324,7 +324,7 @@ impl SyncHandle {
     }
 
     /// The small preview a message carries for an image (a JPEG from its author; empty: none). Check it before
-    /// showing it ([`trs_media::thumb_png`]).
+    /// showing it ([`seedwell_media::thumb_png`]).
     pub fn chat_attachment_preview(&self, place: impl Into<Place>, hash: &str) -> Result<Vec<u8>, SyncError> {
         let place = place.into();
         let room = self.room(&place)?;
@@ -346,7 +346,7 @@ impl SyncHandle {
         }
         let to = match to {
             Some(t) => t,
-            None => DownloadTo::Folder(trs_platform::dirs::downloads().ok_or_else(|| invalid("there is no Downloads folder: choose where to save it"))?),
+            None => DownloadTo::Folder(seedwell_platform::dirs::downloads().ok_or_else(|| invalid("there is no Downloads folder: choose where to save it"))?),
         };
         let n = crate::room::named(&self.inner.ctx, &*room, &h).ok_or(SyncError::NotFound)?;
         crate::files::download(&self.inner.ctx, &room, &n, to).map_err(invalid)?;
@@ -366,7 +366,7 @@ impl SyncHandle {
         let room = self.room(&place.into())?;
         let (h, _) = self.attachment_now(&*room, hash)?;
         if !room.files().stop_sharing(&h)? {
-            return Err(invalid(concat!("that file is not shared from this ", trs_platform::computer!())));
+            return Err(invalid(concat!("that file is not shared from this ", seedwell_platform::computer!())));
         }
         Ok(self.attachment_now(&*room, &hex(&h))?.1)
     }
@@ -392,7 +392,7 @@ impl SyncHandle {
     }
 
     /// Whether a private message to `device` can be written now (the reason when not).
-    pub fn chat_direct_ready(&self, device: &trs_sync_proto::ids::DeviceId) -> Result<(), SyncError> {
+    pub fn chat_direct_ready(&self, device: &seedwell_sync_proto::ids::DeviceId) -> Result<(), SyncError> {
         self.direct_ready(device)
     }
 

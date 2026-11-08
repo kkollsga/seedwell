@@ -15,11 +15,11 @@ use std::time::Duration;
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio_rustls::TlsStream;
-use trs_sync::folder::RemoteIndex;
-use trs_sync_proto::ids::{DeviceId, FolderId, ShortId};
-use trs_sync_proto::keys::Access;
-use trs_sync_proto::model::FileKind;
-use trs_sync_proto::msg::{
+use seedwell_sync::folder::RemoteIndex;
+use seedwell_sync_proto::ids::{DeviceId, FolderId, ShortId};
+use seedwell_sync_proto::keys::Access;
+use seedwell_sync_proto::model::FileKind;
+use seedwell_sync_proto::msg::{
     Close, DirectJoin, Hello, Incompatible, Index, Join, JoinFolder, MAX_INDEX_ENTRIES, Members, Message, Request,
     Response, ResponseCode, agree,
 };
@@ -93,11 +93,11 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>, on_u
                 return Err(bad(format!("{VERSION_REFUSED}{reason}")));
             }
         };
-        let chat = agreed.features & trs_sync_proto::msg::FEATURE_CHAT != 0;
+        let chat = agreed.features & seedwell_sync_proto::msg::FEATURE_CHAT != 0;
         // The user's own devices (0.1.13): a DevicesJoin follows the DirectJoin both ways.
-        let devices = agreed.features & trs_sync_proto::msg::FEATURE_DEVICES != 0;
+        let devices = agreed.features & seedwell_sync_proto::msg::FEATURE_DEVICES != 0;
         // A conversation may stand for a session only when no other device relays it.
-        let direct = agreed.features & trs_sync_proto::msg::FEATURE_DIRECT != 0;
+        let direct = agreed.features & seedwell_sync_proto::msg::FEATURE_DIRECT != 0;
         let conversation = direct && via != crate::session::Via::Relay && ctx.direct.has(&est.peer_pk);
         let user_name = lock(&ctx.user_name).clone();
         let mut sent: BTreeSet<FolderId> = BTreeSet::new();
@@ -226,7 +226,7 @@ pub async fn run(ctx: Arc<Ctx>, conn: Connected, candidates: Vec<FolderId>, on_u
         n.incompatible.remove(&device);
         n.unreachable.remove(&device);
     }
-    note_unadmitted(&ctx, &hello, &sent, &checked, agreed.features & trs_sync_proto::msg::FEATURE_CHAT != 0, &asked);
+    note_unadmitted(&ctx, &hello, &sent, &checked, agreed.features & seedwell_sync_proto::msg::FEATURE_CHAT != 0, &asked);
     for id in &checked.changed {
         if let Some(f) = ctx.registry.space(id) {
             let ctx = ctx.clone();
@@ -328,7 +328,7 @@ async fn offer_joining(ctx: &Ctx, peer: &PeerHandle, sent: &BTreeSet<FolderId>) 
                     let _ = peer.control.send(Message::ChatJoin(join)).await;
                 }
             }
-            SpaceKind::Devices if peer.has(trs_sync_proto::msg::FEATURE_DEVICES) && peer.access(&f.id).is_none() => {
+            SpaceKind::Devices if peer.has(seedwell_sync_proto::msg::FEATURE_DEVICES) && peer.access(&f.id).is_none() => {
                 let join = crate::devices::own_devices_join(ctx, &[f.id], &peer.device_pk, &peer.exporter, false);
                 if !join.groups.is_empty() {
                     let _ = peer.control.send(Message::DevicesJoin(join)).await;
@@ -353,7 +353,7 @@ fn version_reason(e: Incompatible, peer_name: &str, client: &str) -> String {
     let runs = |what: &str| if client.is_empty() { format!("{who} runs {what}") } else { format!("{who} runs {client}, {what}") };
     match e {
         Incompatible::PeerTooOld => format!("{} that cannot sync with this one: update it", runs("an older Seedwell")),
-        Incompatible::PeerTooNew => format!(concat!("{} that this one cannot sync with: update this ", trs_platform::computer!()), runs("a newer Seedwell")),
+        Incompatible::PeerTooNew => format!(concat!("{} that this one cannot sync with: update this ", seedwell_platform::computer!()), runs("a newer Seedwell")),
     }
 }
 
@@ -391,7 +391,7 @@ fn note_refusal(ctx: &Ctx, candidates: &[FolderId], device: DeviceId, hello: Opt
             }
             // A device unknown here that could not even say what it wanted, where links of ours are out: likely
             // someone joining with one (its own side says the same).
-            if candidates.is_empty() && !known && !lock(&f.links).is_empty() && f.role_of(me).is_some_and(trs_sync_proto::members::Role::admits) {
+            if candidates.is_empty() && !known && !lock(&f.links).is_empty() && f.role_of(me).is_some_and(seedwell_sync_proto::members::Role::admits) {
                 f.note_attempt(attempt(device, hello, reason.to_string()));
             }
         }
@@ -485,7 +485,7 @@ pub(crate) async fn own_join(ctx: &Ctx, folders: &[FolderId], exporter: &[u8; 32
         // From the index's read-only view: a Join never waits for a scan or a pull that holds the core.
         let state = tokio::task::spawn_blocking(move || {
             let view = f2.index.view();
-            let theirs = trs_sync::index::IndexStore::peer(&view, peer.short()).map(Option::unwrap_or_default);
+            let theirs = seedwell_sync::index::IndexStore::peer(&view, peer.short()).map(Option::unwrap_or_default);
             (f2.index_state().ok(), theirs.ok())
         })
         .await
@@ -713,7 +713,7 @@ async fn replace_hold(f: &FolderShared) {
 
 /// Splits a batch into frames of about [`INDEX_BATCH_BYTES`] (a big file's chunk list alone can be
 /// megabytes).
-fn split_by_size(entries: Vec<trs_sync_proto::model::IndexEntry>) -> Vec<Vec<trs_sync_proto::model::IndexEntry>> {
+fn split_by_size(entries: Vec<seedwell_sync_proto::model::IndexEntry>) -> Vec<Vec<seedwell_sync_proto::model::IndexEntry>> {
     let mut out = Vec::new();
     let mut cur = Vec::new();
     let mut bytes = 0;
@@ -840,7 +840,7 @@ async fn read_loop(
                     links.push(start_chat_link(ctx, peer, channel, access));
                 }
             }
-            Message::DevicesJoin(j) if peer.has(trs_sync_proto::msg::FEATURE_DEVICES) => {
+            Message::DevicesJoin(j) if peer.has(seedwell_sync_proto::msg::FEATURE_DEVICES) => {
                 // The devices group, made or joined (or a pairing confirmed) while connected.
                 let c = crate::devices::check_devices_join(ctx, &j, &est.peer_pk, &est.exporter, &BTreeSet::new(), &peer.name);
                 if c.changed
@@ -903,7 +903,7 @@ async fn read_loop(
                 // A piece of an unhashed file of ours (SPEC §7G.11): read and hashed on a blocking thread, within the
                 // serving budget and the upload limit, as a chunk is.
                 let Some(f) = shared_folder(ctx, peer, &req.folder_id) else {
-                    let refused = trs_sync_proto::msg::StreamData { id: req.id, code: ResponseCode::Invalid, data: vec![], chunks: vec![], sig: None };
+                    let refused = seedwell_sync_proto::msg::StreamData { id: req.id, code: ResponseCode::Invalid, data: vec![], chunks: vec![], sig: None };
                     let _ = peer.data.send(Message::StreamData(refused)).await;
                     continue;
                 };
@@ -913,7 +913,7 @@ async fn read_loop(
                 tokio::spawn(async move {
                     let id = req.id;
                     let (f2, ctx3, from) = (f.clone(), ctx2.clone(), peer2.device.short());
-                    let d = tokio::task::spawn_blocking(move || serve_stream(&f2, &ctx3, from, &req)).await.unwrap_or(trs_sync_proto::msg::StreamData {
+                    let d = tokio::task::spawn_blocking(move || serve_stream(&f2, &ctx3, from, &req)).await.unwrap_or(seedwell_sync_proto::msg::StreamData {
                         id,
                         code: ResponseCode::Generic,
                         data: vec![],
@@ -931,7 +931,7 @@ async fn read_loop(
             }
             Message::StreamData(d) => peer.answer_stream(d),
             // (A build without the feature does not know the type: it skips it.)
-            Message::HoldQuery(_) if ctx.silent_ondemand.load(Ordering::SeqCst) || ctx.features & trs_sync_proto::msg::FEATURE_HOLDS == 0 => {}
+            Message::HoldQuery(_) if ctx.silent_ondemand.load(Ordering::SeqCst) || ctx.features & seedwell_sync_proto::msg::FEATURE_HOLDS == 0 => {}
             Message::HoldQuery(q) => {
                 // Answered from our index as it is now, through its read-only handle, so a pull that holds the folder's
                 // core never makes the asker wait (a folder not shared with the peer, gone, paused or missing holds
@@ -954,7 +954,7 @@ async fn read_loop(
                         Some(f) => tokio::task::spawn_blocking(move || {
                             let (view, fs, ignore) = (f.index.view(), f.fs(), f.ignore.get());
                             let freeing = |p: &str| lock(&f.freeing).contains_key(p);
-                            let holder = trs_sync::ondemand::Holder { store: &view, fs: &*fs, me, writer, on_demand: f.on_demand, freeing: &freeing, ignore: &ignore };
+                            let holder = seedwell_sync::ondemand::Holder { store: &view, fs: &*fs, me, writer, on_demand: f.on_demand, freeing: &freeing, ignore: &ignore };
                             holder.answer(asker, &q.files)
                         })
                         .await
@@ -962,21 +962,21 @@ async fn read_loop(
                         None => vec![false; n],
                     };
                     let held = if lie { vec![true; n] } else { held };
-                    let _ = peer2.control.send(Message::HoldReply(trs_sync_proto::msg::HoldReply { id: q.id, held })).await;
+                    let _ = peer2.control.send(Message::HoldReply(seedwell_sync_proto::msg::HoldReply { id: q.id, held })).await;
                 });
             }
             Message::HoldReply(r) => peer.answer_holds(r),
-            Message::BlobWant(w) if peer.chat() && peer.has(trs_sync_proto::msg::FEATURE_BLOBS) => {
+            Message::BlobWant(w) if peer.chat() && peer.has(seedwell_sync_proto::msg::FEATURE_BLOBS) => {
                 // An attachment of a channel shared with the peer, or of the private conversation with it (only over a
                 // direct session), answered on the data queue (bulk), within the upload limit.
                 let room: Option<Arc<dyn crate::room::Room>> = match w.scope {
-                    trs_sync_proto::msg::BlobScope::Channel(id) => shared_channel(ctx, peer, &id).map(|c| c as Arc<dyn crate::room::Room>),
-                    trs_sync_proto::msg::BlobScope::Direct if crate::direct::direct_ok(peer) => crate::direct::room_of(ctx, &peer.device_pk),
-                    trs_sync_proto::msg::BlobScope::Direct => None,
+                    seedwell_sync_proto::msg::BlobScope::Channel(id) => shared_channel(ctx, peer, &id).map(|c| c as Arc<dyn crate::room::Room>),
+                    seedwell_sync_proto::msg::BlobScope::Direct if crate::direct::direct_ok(peer) => crate::direct::room_of(ctx, &peer.device_pk),
+                    seedwell_sync_proto::msg::BlobScope::Direct => None,
                 };
                 let (peer2, ctx2) = (peer.clone(), ctx.clone());
                 tokio::spawn(async move {
-                    let refused = trs_sync_proto::msg::BlobData { id: w.id, code: trs_sync_proto::msg::BlobCode::Refused, total: 0, data: Vec::new() };
+                    let refused = seedwell_sync_proto::msg::BlobData { id: w.id, code: seedwell_sync_proto::msg::BlobCode::Refused, total: 0, data: Vec::new() };
                     let ctx3 = ctx2.clone();
                     let d = match room {
                         Some(room) => tokio::task::spawn_blocking(move || crate::blobs::serve(&ctx3, &*room, &w)).await.unwrap_or(refused),
@@ -990,8 +990,8 @@ async fn read_loop(
                     let _ = peer2.data.send(Message::BlobData(d)).await;
                 });
             }
-            Message::BlobData(d) if peer.has(trs_sync_proto::msg::FEATURE_BLOBS) => peer.answer_blob(d),
-            Message::RenameRequest(_) if ctx.silent_ondemand.load(Ordering::SeqCst) || ctx.features & trs_sync_proto::msg::FEATURE_RENAMES == 0 => {}
+            Message::BlobData(d) if peer.has(seedwell_sync_proto::msg::FEATURE_BLOBS) => peer.answer_blob(d),
+            Message::RenameRequest(_) if ctx.silent_ondemand.load(Ordering::SeqCst) || ctx.features & seedwell_sync_proto::msg::FEATURE_RENAMES == 0 => {}
             Message::RenameRequest(q) => {
                 // Made here as this device's own rename, only for a writer of a folder it shares with us that runs here,
                 // and only if it can start within the request's time to live (counted from now); answered either way.
@@ -1005,14 +1005,14 @@ async fn read_loop(
                 let writer = f.as_ref().is_some_and(|f| f.role_of(&peer.device_pk).is_some_and(|r| r.access() == Access::Write));
                 let peer2 = peer.clone();
                 tokio::spawn(async move {
-                    use trs_sync_proto::msg::RenameOutcome;
+                    use seedwell_sync_proto::msg::RenameOutcome;
                     let (outcome, reason) = match f {
                         Some(f) if writer => rename_for_peer(f, q.from, q.to, q.seen, by).await,
                         Some(_) => (RenameOutcome::Refused, "only a member that can write may rename".to_string()),
                         None => (RenameOutcome::Refused, "the folder is not running here".to_string()),
                     };
-                    let mut reply = trs_sync_proto::msg::RenameReply { id: q.id, outcome, reason };
-                    reply.reason.truncate(reply.reason.floor_char_boundary(trs_sync_proto::msg::MAX_RENAME_REASON));
+                    let mut reply = seedwell_sync_proto::msg::RenameReply { id: q.id, outcome, reason };
+                    reply.reason.truncate(reply.reason.floor_char_boundary(seedwell_sync_proto::msg::MAX_RENAME_REASON));
                     let _ = peer2.control.send(Message::RenameReply(reply)).await;
                 });
             }
@@ -1029,8 +1029,8 @@ async fn read_loop(
                     crate::removals::on_reply(&f, peer, r);
                 }
             }
-            Message::ReachAsk(q) if peer.has(trs_sync_proto::msg::FEATURE_REACH) => crate::inbound::on_ask(ctx, peer, q),
-            Message::ReachAnswer(a) if peer.has(trs_sync_proto::msg::FEATURE_REACH) => crate::inbound::on_answer(ctx, peer, a),
+            Message::ReachAsk(q) if peer.has(seedwell_sync_proto::msg::FEATURE_REACH) => crate::inbound::on_ask(ctx, peer, q),
+            Message::ReachAnswer(a) if peer.has(seedwell_sync_proto::msg::FEATURE_REACH) => crate::inbound::on_answer(ctx, peer, a),
             Message::Join(j) => {
                 // A folder added while connected (a refused invitation is not worth ending the session over).
                 let at_gen = ctx.folder_gen.load(Ordering::SeqCst);
@@ -1079,7 +1079,7 @@ async fn read_loop(
                     // every Join for a folder it has not linked, so an answer to our own offer is answered too, and
                     // its reply to that is noted the same way. An earlier build does not reply to the answer of an
                     // offer of ours: its Join for one we offered is that answer.
-                    let earlier = !peer.has(trs_sync_proto::msg::FEATURE_HOLDS);
+                    let earlier = !peer.has(seedwell_sync_proto::msg::FEATURE_HOLDS);
                     let ours_first = lock(&peer.offered).remove(&folder) && earlier;
                     if !ours_first {
                         let join = own_join(ctx, &[folder], &est.exporter, &peer.device_pk, peer.lan).await;
@@ -1131,12 +1131,12 @@ async fn read_loop(
 
 /// What the peer sent that changes a membership, a folder's core or a channel's messages.
 enum Apply {
-    Members(Arc<Space>, Vec<trs_sync_proto::members::Statement>),
+    Members(Arc<Space>, Vec<seedwell_sync_proto::members::Statement>),
     /// The folder (or channel) secret from an owner (its key), for this device as a new co-owner.
     OwnerKey(Arc<Space>, [u8; 32], [u8; 32]),
     Index(Arc<FolderShared>, RemoteIndex),
-    Chat(Arc<crate::chat::ChannelShared>, Vec<trs_sync_proto::chat::ChatMessage>),
-    Direct(Vec<trs_sync_proto::direct::DirectMessage>),
+    Chat(Arc<crate::chat::ChannelShared>, Vec<seedwell_sync_proto::chat::ChatMessage>),
+    Direct(Vec<seedwell_sync_proto::direct::DirectMessage>),
 }
 
 /// Hands a frame to the applier. When its queue is full the session stops reading until the applier takes one, and
@@ -1229,16 +1229,16 @@ fn shared_channel(ctx: &Ctx, peer: &PeerHandle, id: &FolderId) -> Option<Arc<cra
 }
 
 /// A folder this session shares with the peer (and is not paused).
-/// Renames `from` to `to` for a writer that asked ([`trs_sync::folder::FolderCore::rename_for_peer`]), on the folder's
+/// Renames `from` to `to` for a writer that asked ([`seedwell_sync::folder::FolderCore::rename_for_peer`]), on the folder's
 /// core, and tells the sessions of the change. The error is the reason sent back.
 /// Longest time to live of a rename request this device honours.
 const MAX_RENAME_TTL_MS: u64 = 60_000;
 
-/// Renames `from` to `to` for a writer that asked ([`trs_sync::folder::FolderCore::rename_for_peer`]), on the folder's
+/// Renames `from` to `to` for a writer that asked ([`seedwell_sync::folder::FolderCore::rename_for_peer`]), on the folder's
 /// core, if it gets the core by `by` (a pull may hold it): otherwise busy, and it never starts later. Tells the
 /// sessions of the change. Returns the outcome and, when it is not done, why.
-async fn rename_for_peer(f: Arc<FolderShared>, from: String, to: String, seen: [u8; 32], by: std::time::Instant) -> (trs_sync_proto::msg::RenameOutcome, String) {
-    use trs_sync_proto::msg::RenameOutcome;
+async fn rename_for_peer(f: Arc<FolderShared>, from: String, to: String, seen: [u8; 32], by: std::time::Instant) -> (seedwell_sync_proto::msg::RenameOutcome, String) {
+    use seedwell_sync_proto::msg::RenameOutcome;
     let f2 = f.clone();
     let done = tokio::task::spawn_blocking(move || loop {
         let core = match f2.core.try_lock() {
@@ -1318,8 +1318,8 @@ fn serve_chunk(f: &FolderShared, req: &Request) -> Response {
     }
     // An unhashed version of ours (SPEC §7G.11) has no list to look the chunk up in: a device asks for the chunks of its
     // hashed form, which we signed, and what is read below must hash to the chunk's hash all the same.
-    let listed = info.is_unhashed() || trs_sync::index::offsets(&info.chunks).any(|(off, c)| off == req.offset && c.len == req.len && c.hash == req.hash);
-    if !listed || req.len > trs_sync_proto::model::MAX_CHUNK || req.offset.saturating_add(u64::from(req.len)) > info.size {
+    let listed = info.is_unhashed() || seedwell_sync::index::offsets(&info.chunks).any(|(off, c)| off == req.offset && c.len == req.len && c.hash == req.hash);
+    if !listed || req.len > seedwell_sync_proto::model::MAX_CHUNK || req.offset.saturating_add(u64::from(req.len)) > info.size {
         return fail(ResponseCode::Invalid);
     }
     let fs = f.fs();
@@ -1343,16 +1343,16 @@ fn serve_chunk(f: &FolderShared, req: &Request) -> Response {
 /// each later one must follow the one before (else busy: start again). Every byte is read once and run through the
 /// chunker; with the last piece, the file unchanged since its record and throughout, the version goes back signed
 /// with its chunk list. A file that changed is answered *changed* and its read dropped: nothing of it is signed.
-pub(crate) fn serve_stream(f: &FolderShared, ctx: &Ctx, from: trs_sync_proto::ids::ShortId, req: &trs_sync_proto::msg::StreamRequest) -> trs_sync_proto::msg::StreamData {
-    use trs_sync::lazy::{Stream, StreamError};
-    let fail = |code| trs_sync_proto::msg::StreamData { id: req.id, code, data: vec![], chunks: vec![], sig: None };
+pub(crate) fn serve_stream(f: &FolderShared, ctx: &Ctx, from: seedwell_sync_proto::ids::ShortId, req: &seedwell_sync_proto::msg::StreamRequest) -> seedwell_sync_proto::msg::StreamData {
+    use seedwell_sync::lazy::{Stream, StreamError};
+    let fail = |code| seedwell_sync_proto::msg::StreamData { id: req.id, code, data: vec![], chunks: vec![], sig: None };
     let Some(rec) = f.index.local(&req.path).ok().flatten() else { return fail(ResponseCode::NoSuchFile) };
     let info = &rec.file.info;
     let ours = info.modified_by == ctx.me.short() && info.version == req.version && info.is_unhashed();
     if !ours || rec.invalid || rec.dataless || f.ignore.get().is_ignored(&req.path, false) {
         return fail(ResponseCode::NoSuchFile);
     }
-    if req.len == 0 || req.len > trs_sync_proto::msg::STREAM_PIECE {
+    if req.len == 0 || req.len > seedwell_sync_proto::msg::STREAM_PIECE {
         return fail(ResponseCode::Invalid);
     }
     let wait = *lock(&ctx.stream_wait);
@@ -1403,15 +1403,15 @@ pub(crate) fn serve_stream(f: &FolderShared, ctx: &Ctx, from: trs_sync_proto::id
         // the way is asked for again, once.)
         Ok(p) => {
             let sig = p.done.map(|h| {
-                let signed = trs_sync::scan::Signer::sign(&trs_sync::folder::DeviceSigner::new(ctx.key.clone(), f.id), h.info);
+                let signed = seedwell_sync::scan::Signer::sign(&seedwell_sync::folder::DeviceSigner::new(ctx.key.clone(), f.id), h.info);
                 // What was signed, noted (the file unchanged throughout): this device's scans know the version's chunks
                 // even if the receiver never announces them.
-                if let Err(e) = trs_sync::lazy::note_hashed(&*fs, &signed) {
+                if let Err(e) = seedwell_sync::lazy::note_hashed(&*fs, &signed) {
                     eprintln!("seedwell sync: {}: its hashes could not be noted ({e})", req.path);
                 }
                 signed.sig
             });
-            trs_sync_proto::msg::StreamData { id: req.id, code: ResponseCode::Ok, data: p.data, chunks: p.chunks, sig }
+            seedwell_sync_proto::msg::StreamData { id: req.id, code: ResponseCode::Ok, data: p.data, chunks: p.chunks, sig }
         }
         Err(StreamError::OutOfOrder) => fail(ResponseCode::Busy),
         Err(StreamError::Changed) => {

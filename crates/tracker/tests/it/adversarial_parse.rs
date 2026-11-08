@@ -3,13 +3,13 @@
 use std::time::Duration;
 
 use proptest::prelude::*;
-use trs_tracker::response::{
+use seedwell_tracker::response::{
     AnnounceError, MAX_BODY, MAX_INTERVAL, MAX_PEERS, MAX_TEXT_CHARS, MAX_TRACKER_ID, ParseError,
     parse_announce_response,
 };
-use trs_tracker::retry_after::parse_retry_after;
-use trs_tracker::scrape::parse_scrape_response;
-use trs_tracker::udp_proto::{self, Reply};
+use seedwell_tracker::retry_after::parse_retry_after;
+use seedwell_tracker::scrape::parse_scrape_response;
+use seedwell_tracker::udp_proto::{self, Reply};
 
 fn bytes(b: &[u8]) -> Vec<u8> {
     let mut v = format!("{}:", b.len()).into_bytes();
@@ -31,7 +31,7 @@ fn dict(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
     out
 }
 
-fn check_ok_invariants(r: &trs_tracker::AnnounceResponse) {
+fn check_ok_invariants(r: &seedwell_tracker::AnnounceResponse) {
     assert!(r.interval <= MAX_INTERVAL);
     assert!(r.interval >= Duration::from_secs(60), "{:?}", r.interval);
     match r.min_interval {
@@ -356,7 +356,7 @@ proptest! {
     fn retry_after_never_panics_and_is_bounded_by_the_class(s in "\\PC{0,40}", now in any::<u64>()) {
         let r = parse_retry_after(&s, now);
         let e = AnnounceError::Http { status: 503, retry_after: r };
-        if let trs_tracker::response::FailureClass::Backoff { hint: Some(h) } = e.class() {
+        if let seedwell_tracker::response::FailureClass::Backoff { hint: Some(h) } = e.class() {
             prop_assert!(h <= MAX_INTERVAL);
         }
     }

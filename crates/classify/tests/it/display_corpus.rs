@@ -1,8 +1,8 @@
 //! `display_name` over every row of the labelled corpora: readable, never invents words.
-//! `DISPLAY_VERBOSE=1 cargo test -p trs-classify --test display_corpus -- --nocapture` prints every title.
+//! `DISPLAY_VERBOSE=1 cargo test -p seedwell-classify --test display_corpus -- --nocapture` prints every title.
 
 use std::collections::HashSet;
-use trs_classify::{Category, FileEntry, Input, classify, display_name};
+use seedwell_classify::{Category, FileEntry, Input, classify, display_name};
 
 struct Row {
     expect: Category,

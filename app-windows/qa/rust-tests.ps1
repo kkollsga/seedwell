@@ -7,7 +7,7 @@
   From bash: powershell.exe -NoProfile -ExecutionPolicy Bypass -File app-windows/qa/rust-tests.ps1
 
   Runs `cargo nextest run --workspace --locked --profile ci` in the repository with CI's environment (the windows job
-  of .github/workflows/ci.yml: TRS_FORBID_REAL_HOME=1, CARGO_INCREMENTAL=0; only the colours are off, for the log), so
+  of .github/workflows/ci.yml: SEEDWELL_FORBID_REAL_HOME=1, CARGO_INCREMENTAL=0; only the colours are off, for the log), so
   a test that would fail on Windows CI fails here first. Keep the command the same as CI's when ci.yml changes.
   Run it on every bundle from the Mac, beside qa\run.ps1 all (.claude/skills/windows-bridge).
 
@@ -54,7 +54,7 @@ if (-not $Log) { $Log = Join-Path ([IO.Path]::GetTempPath()) "seedwell-rust-test
 $OutFile = "$Log.stdout"
 
 # CI's environment (ci.yml: env), for this process and cargo's.
-$env:TRS_FORBID_REAL_HOME = '1'
+$env:SEEDWELL_FORBID_REAL_HOME = '1'
 $env:CARGO_INCREMENTAL = '0'
 $env:CARGO_TERM_COLOR = 'never'
 # GitHub's Windows runner sets no HOME, but Git Bash does: a run started from it would hide what fails there.

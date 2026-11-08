@@ -9,9 +9,9 @@
 use std::fmt::Write as _;
 use std::io::{BufRead, IsTerminal, Write as _};
 
-use trs_control::human;
-use trs_control::proto::*;
-use trs_control::types::*;
+use seedwell_control::human;
+use seedwell_control::proto::*;
+use seedwell_control::types::*;
 
 use crate::args::{Opts, Usage, parse_rate};
 use crate::commands::{CliError, Global, R, ask, connect, json_text, show};
@@ -90,7 +90,7 @@ pub enum Cmd {
 /// What `sync mode` did, as it happened: a folder whose files are here stays as it is when it becomes on demand; one
 /// switched to full has its files back in place, and only files that were online only are fetched.
 fn mode_words(d: &SyncFolderDto, free_space: bool) -> String {
-    let pc = trs_platform::computer!();
+    let pc = seedwell_platform::computer!();
     if d.on_demand {
         let moved = if free_space { format!(" Its files moved to this {pc}'s cache.") } else { String::new() };
         format!("{} is on demand: every file stays listed, and only what you fetch or pin is on this {pc}.{moved}", d.name)
@@ -369,7 +369,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         }
         Cmd::Add { path, on_demand } => {
             let (raw, d): (_, SyncFolderDto) = ask(&mut c, Request::SyncAdd(SyncAddParams { path: abs(&path)?, on_demand })).await?;
-            show(g, &raw, || format!(concat!("Sharing {} from {} (this ", trs_platform::computer!(), " is its owner).\nInvite another device: seedwell sync share {}"), d.name, d.path, first_group(&d.id)));
+            show(g, &raw, || format!(concat!("Sharing {} from {} (this ", seedwell_platform::computer!(), " is its owner).\nInvite another device: seedwell sync share {}"), d.name, d.path, first_group(&d.id)));
         }
         Cmd::Mode { folder: f, on_demand, to, free_space } => {
             let path = to.as_deref().map(abs).transpose()?;
@@ -386,7 +386,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
             let p = SyncFetchParams { folder: f, item: None, path: Some(path.clone()), wait_s: Some(wait_s) };
             let (raw, d): (_, SyncFetchDto) = ask(&mut c, Request::SyncFetch(p)).await?;
             show(g, &raw, || match &d.local_path {
-                Some(at) => format!("{} is on this {} ({}).", shown(&path), trs_platform::computer!(), at),
+                Some(at) => format!("{} is on this {} ({}).", shown(&path), seedwell_platform::computer!(), at),
                 None if wait_s == 0 => format!("Fetching {}.", shown(&path)),
                 None => format!("Fetching {}: {} of {} so far.", shown(&path), human::bytes(d.done), human::bytes(d.total)),
             });
@@ -397,9 +397,9 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
             let (raw, _d): (_, SyncHostDto) = ask(&mut c, r).await?;
             show(g, &raw, || {
                 if on {
-                    format!("{} stays on this {}: what is not here yet is on its way, and new files there come too.", shown(&path), trs_platform::computer!())
+                    format!("{} stays on this {}: what is not here yet is on its way, and new files there come too.", shown(&path), seedwell_platform::computer!())
                 } else {
-                    format!("{} is no longer kept on this {}; what is here stays (seedwell sync evict frees it).", shown(&path), trs_platform::computer!())
+                    format!("{} is no longer kept on this {}; what is here stays (seedwell sync evict frees it).", shown(&path), seedwell_platform::computer!())
                 }
             });
         }
@@ -488,7 +488,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
                 format!(
                     concat!(
                         "{} is a new folder now ({}), owned by this ",
-                        trs_platform::computer!(),
+                        seedwell_platform::computer!(),
                         ", its files where they were: {}. The old folder is left. Make a link for it with `seedwell sync share {}`."
                     ),
                     d.name,
@@ -563,7 +563,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
     Ok(())
 }
 
-async fn remove(g: &Global, mut c: trs_control::Client, f: String, delete_files: bool, yes: bool) -> R {
+async fn remove(g: &Global, mut c: seedwell_control::Client, f: String, delete_files: bool, yes: bool) -> R {
     let (raw, plan): (_, SyncRemovePlanDto) = ask(&mut c, Request::SyncRemove(SyncRemoveParams { folder: f, delete_files })).await?;
     if !yes {
         if g.json {
@@ -617,15 +617,15 @@ pub fn parse_relay(args_in: Vec<String>) -> Result<RelayArgs, Usage> {
 /// Where the relay keeps its key by default: in Seedwell's state folder.
 #[cfg(feature = "daemon")]
 fn default_relay_key_file() -> R<std::path::PathBuf> {
-    let dir = trs_platform::dirs::state_dir().ok_or_else(|| CliError::plain(1, "no home folder is set; give --key-file"))?;
+    let dir = seedwell_platform::dirs::state_dir().ok_or_else(|| CliError::plain(1, "no home folder is set; give --key-file"))?;
     Ok(dir.join("relay.key"))
 }
 
 /// The relay's key: read from `path`, or made on first start and written there (0600).
 #[cfg(feature = "daemon")]
-fn relay_key(path: &std::path::Path) -> R<trs_sync_proto::device::DeviceKey> {
-    use trs_sync_net::secrets::{FileSecrets, SecretStore};
-    use trs_sync_proto::device::DeviceKey;
+fn relay_key(path: &std::path::Path) -> R<seedwell_sync_proto::device::DeviceKey> {
+    use seedwell_sync_net::secrets::{FileSecrets, SecretStore};
+    use seedwell_sync_proto::device::DeviceKey;
     let fail = |e: &dyn std::fmt::Display| CliError::plain(1, format!("relay key {}: {e}", path.display()));
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| fail(&e))?;
@@ -644,7 +644,7 @@ fn relay_key(path: &std::path::Path) -> R<trs_sync_proto::device::DeviceKey> {
 /// `seedwell relay ready address=relay://<ip:port>#<relay id> pid=<pid>`.
 #[cfg(feature = "daemon")]
 pub async fn relay(a: RelayArgs) -> R {
-    use trs_sync_net::RelayOptions;
+    use seedwell_sync_net::RelayOptions;
     let key_file = match &a.key_file {
         Some(k) => std::path::PathBuf::from(k),
         None => default_relay_key_file()?,
@@ -656,14 +656,14 @@ pub async fn relay(a: RelayArgs) -> R {
     };
     let port = a.port.unwrap_or(RELAY_PORT);
     // `--bind ::` takes IPv4 too, on every system (Windows' default for `[::]` is IPv6 only).
-    let listener = trs_platform::net::listen_tcp(std::net::SocketAddr::new(bind, port)).map_err(|e| CliError::plain(1, format!("cannot listen on {bind}:{port}: {e}")))?;
+    let listener = seedwell_platform::net::listen_tcp(std::net::SocketAddr::new(bind, port)).map_err(|e| CliError::plain(1, format!("cannot listen on {bind}:{port}: {e}")))?;
     let local = listener.local_addr().map_err(|e| CliError::plain(1, e.to_string()))?;
     let opts = RelayOptions::new(key);
     println!("seedwell relay ready address={} pid={}", opts.url(&local.to_string()), std::process::id());
     let _ = std::io::stdout().flush();
-    let mut stop = trs_platform::signal::Shutdown::new().map_err(|e| CliError::plain(1, e.to_string()))?;
+    let mut stop = seedwell_platform::signal::Shutdown::new().map_err(|e| CliError::plain(1, e.to_string()))?;
     tokio::select! {
-        _ = trs_sync_net::run_relay(listener, opts) => {}
+        _ = seedwell_sync_net::run_relay(listener, opts) => {}
         _ = stop.recv() => {}
     }
     eprintln!("seedwell relay: stopped");
@@ -726,7 +726,7 @@ pub fn list(l: &SyncListDto) -> String {
     let mut o = String::new();
     let _ = writeln!(
         o,
-        concat!("This ", trs_platform::computer!(), ": {}  (device {})  port {}{}"),
+        concat!("This ", seedwell_platform::computer!(), ": {}  (device {})  port {}{}"),
         l.device_name,
         first_group(&l.device_id),
         l.port,
@@ -793,7 +793,7 @@ pub(crate) fn away_lines(o: &mut String, indent: &str, cmd: &str, id: &str, wait
             o,
             concat!(
                 "{indent}nobody can admit devices or change roles any more (every owner and admin is gone): `seedwell sync reshare {id}` makes it a new folder owned by this ",
-                trs_platform::computer!(),
+                seedwell_platform::computer!(),
                 ", its files kept where they are"
             ),
             indent = indent,
@@ -847,10 +847,11 @@ pub fn status(f: &SyncFolderDto) -> String {
         );
     }
     if f.need_files > 0 || f.need_bytes > 0 {
-        let _ = writeln!(o, "  to fetch   {} files, {}", f.need_files, human::bytes(f.need_bytes));
+        let eta = f.eta_secs.map_or(String::new(), |e| format!(", eta {}", human::duration(e)));
+        let _ = writeln!(o, "  to fetch   {} files, {}{eta}", f.need_files, human::bytes(f.need_bytes));
     }
     if f.on_demand {
-        let _ = writeln!(o, "  on demand  {} files ({}) on this {}; the rest online only", f.files, human::bytes(f.bytes), trs_platform::computer!());
+        let _ = writeln!(o, "  on demand  {} files ({}) on this {}; the rest online only", f.files, human::bytes(f.bytes), seedwell_platform::computer!());
     } else if f.on_demand_others {
         let _ = writeln!(o, "  on demand  on the devices that don't have its files; every file is here, where it is");
     }
@@ -981,7 +982,7 @@ pub fn members(m: &SyncMembersDto) -> String {
     let _ = writeln!(o, "Devices of {}:", m.name);
     for d in &m.members {
         let name = crate::chat::with_user(&d.user, if d.name.is_empty() { "(not met yet)" } else { &d.name });
-        let tail = if d.me { concat!("  (this ", trs_platform::computer!(), ")") } else if d.online { "  (online)" } else { "" };
+        let tail = if d.me { concat!("  (this ", seedwell_platform::computer!(), ")") } else if d.online { "  (online)" } else { "" };
         let until = d.expires_at.map(|t| format!("  ({})", shared_until(t))).unwrap_or_default();
         let _ = writeln!(o, "  {:<7}  {:<13} {name}{tail}{until}", first_group(&d.device_id), role(&d.role));
     }
@@ -1024,8 +1025,8 @@ pub fn settings(s: &SyncSettingsDto) -> String {
 fn read_only_text(d: &SyncReadOnlyDto) -> String {
     let state = if d.read_only { "is Read only: only its owners' changes count" } else { "is not Read only" };
     let mine = match (d.may_switch, d.held) {
-        (true, _) => concat!("this ", trs_platform::computer!(), " is an owner and may switch it"),
-        (false, true) => concat!("changes made on this ", trs_platform::computer!(), " stay here until an owner turns it off"),
+        (true, _) => concat!("this ", seedwell_platform::computer!(), " is an owner and may switch it"),
+        (false, true) => concat!("changes made on this ", seedwell_platform::computer!(), " stay here until an owner turns it off"),
         (false, false) => "only an owner of the folder may switch it",
     };
     format!("{} {state}; {mine}.", d.name)
@@ -1033,10 +1034,10 @@ fn read_only_text(d: &SyncReadOnlyDto) -> String {
 
 fn removed(r: &SyncRemovedDto) -> String {
     match &r.trashed_to {
-        Some(t) => format!(concat!("{} no longer syncs on this ", trs_platform::computer!(), "; the folder is in the ", trs_platform::trash!(), " ({t})."), r.name, t = t),
+        Some(t) => format!(concat!("{} no longer syncs on this ", seedwell_platform::computer!(), "; the folder is in the ", seedwell_platform::trash!(), " ({t})."), r.name, t = t),
         // The Recycle Bin has no path to show.
-        None if r.files == "trashed" => format!(concat!("{} no longer syncs on this ", trs_platform::computer!(), "; the folder is in the ", trs_platform::trash!(), "."), r.name),
-        None => format!(concat!("{} no longer syncs on this ", trs_platform::computer!(), "; its files stay in {}."), r.name, r.path),
+        None if r.files == "trashed" => format!(concat!("{} no longer syncs on this ", seedwell_platform::computer!(), "; the folder is in the ", seedwell_platform::trash!(), "."), r.name),
+        None => format!(concat!("{} no longer syncs on this ", seedwell_platform::computer!(), "; its files stay in {}."), r.name, r.path),
     }
 }
 

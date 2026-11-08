@@ -6,7 +6,7 @@
 //! * `SYNC_SIM_SEEDS=5000` runs more seeds (default 300, spread over the shard tests), `SYNC_SIM_STEPS`
 //!   longer runs (default 200).
 //! * A failure prints the seed and the action log. Replay it exactly with
-//!   `SYNC_SIM_SEED=<seed> cargo nextest run -p trs-sync -E 'test(=sim::replay)' --no-capture`
+//!   `SYNC_SIM_SEED=<seed> cargo nextest run -p seedwell-sync -E 'test(=sim::replay)' --no-capture`
 //!   (plus `SYNC_SIM_MODE=<mode>` for the mode tests, `SYNC_SIM_TRACE=<path>` to log every device's
 //!   view of one path after each step).
 //! * Modes (each its own test): `race-after-rename`, `case-insensitive`, `resets`, `kinds`,
@@ -40,19 +40,19 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
-use trs_sync::folder::{FolderConfig, FolderCore, RemoteIndex};
-use trs_sync::fs::{FileHandle, Fs, Listing, MemFs, MemFsOptions, Meta, read_all, write_all};
-use trs_sync::ignore::Ignore;
-use trs_sync::index::{IndexStore, LocalRecord, MemStore, Meta as IndexMeta, NeedRecord, Op, PeerState, offsets};
-use trs_sync::pull::{ChunkRequest, ChunkSource, FetchError};
-use trs_sync::scan::ScanError;
-use trs_sync_proto::device::DeviceKey;
+use seedwell_sync::folder::{FolderConfig, FolderCore, RemoteIndex};
+use seedwell_sync::fs::{FileHandle, Fs, Listing, MemFs, MemFsOptions, Meta, read_all, write_all};
+use seedwell_sync::ignore::Ignore;
+use seedwell_sync::index::{IndexStore, LocalRecord, MemStore, Meta as IndexMeta, NeedRecord, Op, PeerState, offsets};
+use seedwell_sync::pull::{ChunkRequest, ChunkSource, FetchError};
+use seedwell_sync::scan::ScanError;
+use seedwell_sync_proto::device::DeviceKey;
 
 use crate::flow::{Key, learn_writers};
-use trs_sync_proto::ids::ShortId;
-use trs_sync_proto::keys::Access;
-use trs_sync_proto::model::{FileKind, IndexEntry, STATE_DIR};
-use trs_sync_proto::sign::Writer;
+use seedwell_sync_proto::ids::ShortId;
+use seedwell_sync_proto::keys::Access;
+use seedwell_sync_proto::model::{FileKind, IndexEntry, STATE_DIR};
+use seedwell_sync_proto::sign::Writer;
 
 const START_NS: i64 = 1_767_225_600_000_000_000;
 
@@ -453,10 +453,10 @@ impl IndexStore for SimStore {
         tick(&self.ctl, "commit")?;
         self.s().apply(ops)
     }
-    fn ignore(&self) -> Option<Arc<trs_sync::ignore::Ignore>> {
+    fn ignore(&self) -> Option<Arc<seedwell_sync::ignore::Ignore>> {
         self.s().ignore()
     }
-    fn set_ignore(&mut self, ignore: Option<Arc<trs_sync::ignore::Ignore>>) {
+    fn set_ignore(&mut self, ignore: Option<Arc<seedwell_sync::ignore::Ignore>>) {
         self.s().set_ignore(ignore);
     }
     fn ignore_applied(&self) -> io::Result<Option<String>> {
@@ -470,7 +470,7 @@ struct SimClock {
     skew: i64,
 }
 
-impl trs_sync::clock::Clock for SimClock {
+impl seedwell_sync::clock::Clock for SimClock {
     fn now_ns(&self) -> i64 {
         self.base.load(Ordering::SeqCst) + self.skew
     }
@@ -734,7 +734,7 @@ struct Sim {
     /// Contents a user on a writer replaced or removed.
     replaced: BTreeSet<u64>,
     /// Every tombstone version any device recorded, per path.
-    tombs: BTreeMap<String, Vec<trs_sync_proto::model::Version>>,
+    tombs: BTreeMap<String, Vec<seedwell_sync_proto::model::Version>>,
     /// Those another device received (announced at least once).
     announced: BTreeSet<(String, Vec<(u64, u64)>)>,
     /// (origin device, origin is a writer, path, content, exec): a user removed that content from that
@@ -950,7 +950,7 @@ impl Sim {
         paths.push(STATE_DIR.to_string());
         if let Ok(needs) = self.devs[d].core.store().needs(None, 100) {
             for (p, _) in needs {
-                paths.push(trs_sync::pull::temp_path(&p));
+                paths.push(seedwell_sync::pull::temp_path(&p));
                 paths.push(p);
             }
         }
@@ -1061,7 +1061,7 @@ impl Sim {
         }
     }
 
-    fn pull(&mut self, d: usize, race: Option<Race>) -> R<trs_sync::pull::PullReport> {
+    fn pull(&mut self, d: usize, race: Option<Race>) -> R<seedwell_sync::pull::PullReport> {
         let peers: Vec<(ShortId, MemFs)> = (0..self.devs.len())
             .filter(|&k| k != d && self.up[d][k] && !self.devs[k].unmounted())
             .map(|k| (self.devs[k].short, self.devs[k].real.clone()))
@@ -1821,7 +1821,7 @@ impl Sim {
     /// Every device's view of one path, for failure messages.
     fn explain(&self, p: &str) -> String {
         let mut s = String::new();
-        let ver = |f: &trs_sync_proto::model::SignedFile| {
+        let ver = |f: &seedwell_sync_proto::model::SignedFile| {
             let v: Vec<String> = f.info.version.counters().iter().map(|c| format!("{}:{}", self.name_of(c.id), c.value)).collect();
             format!(
                 "[{}]{} by {} size {} exec {} mtime {}",
@@ -1985,7 +1985,7 @@ impl Sim {
             if self.was_reset.contains(origin) {
                 continue;
             }
-            if trs_sync::conflict::looks_like_conflict(p) {
+            if seedwell_sync::conflict::looks_like_conflict(p) {
                 continue;
             }
             let devices: Vec<usize> = if *writer { (0..n).collect() } else { vec![*origin] };
@@ -2008,7 +2008,7 @@ impl Sim {
                     // and then absorbed it. Telling them apart needs the tombstone to name what it
                     // deleted. (A delete that has *not* been seen by the current version, one that
                     // dominates it, is a dropped history: always a failure.)
-                    use trs_sync_proto::model::Causality;
+                    use seedwell_sync_proto::model::Causality;
                     let cur = self.devs[d].store.lock().unwrap().local(p).unwrap().map(|r| r.file.info.version);
                     // The other known gap: the deleter took a change over its delete before the delete
                     // ever reached another device, so no holder of the change could absorb it, and a
@@ -2044,12 +2044,12 @@ impl Sim {
     }
 }
 
-fn key_of(v: &trs_sync_proto::model::Version) -> Vec<(u64, u64)> {
+fn key_of(v: &seedwell_sync_proto::model::Version) -> Vec<(u64, u64)> {
     v.counters().iter().map(|c| (c.id.0, c.value)).collect()
 }
 
-fn stamp(m: &Meta) -> trs_sync::index::Stamp {
-    trs_sync::index::Stamp { size: m.size, mtime_ns: m.mtime_ns, ctime_ns: m.ctime_ns, inode: m.inode }
+fn stamp(m: &Meta) -> seedwell_sync::index::Stamp {
+    seedwell_sync::index::Stamp { size: m.size, mtime_ns: m.mtime_ns, ctime_ns: m.ctime_ns, inode: m.inode }
 }
 
 fn diff(a: &BTreeMap<String, Node>, b: &BTreeMap<String, Node>) -> String {
@@ -2121,7 +2121,7 @@ fn run_seed(seed: u64, steps: usize, mode: &str) -> Result<(), String> {
     };
     let tail = sim.log.len().saturating_sub(400);
     Err(format!(
-        "seed {seed} (mode {mode:?}, {steps} steps) failed: {err}\nconfig {cfg:?}\nreplay: SYNC_SIM_SEED={seed}{} cargo nextest run -p trs-sync -E 'test(=sim::replay)' --no-capture\nlog (last {} lines):\n{}",
+        "seed {seed} (mode {mode:?}, {steps} steps) failed: {err}\nconfig {cfg:?}\nreplay: SYNC_SIM_SEED={seed}{} cargo nextest run -p seedwell-sync -E 'test(=sim::replay)' --no-capture\nlog (last {} lines):\n{}",
         if mode.is_empty() { String::new() } else { format!(" SYNC_SIM_MODE={mode}") },
         sim.log.len() - tail,
         sim.log[tail..].join("\n")

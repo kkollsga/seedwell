@@ -11,9 +11,9 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use trs_sync_proto::attach::{AttachmentRef, Attachments};
-use trs_sync_proto::ids::{DeviceId, FolderId};
-use trs_sync_proto::msg::BlobScope;
+use seedwell_sync_proto::attach::{AttachmentRef, Attachments};
+use seedwell_sync_proto::ids::{DeviceId, FolderId};
+use seedwell_sync_proto::msg::BlobScope;
 
 use crate::blobs::Blobs;
 use crate::files::Files;
@@ -38,7 +38,7 @@ impl fmt::Display for Place {
 }
 
 impl FromStr for Place {
-    type Err = trs_sync_proto::ids::IdError;
+    type Err = seedwell_sync_proto::ids::IdError;
     fn from_str(s: &str) -> Result<Place, Self::Err> {
         match s.trim().strip_prefix("dm:") {
             Some(d) => d.parse().map(Place::Direct),
@@ -110,7 +110,7 @@ impl Index {
     }
 
     /// The images the room wants that are not failed: (hash, kind, size), in the budget's order and then `pinned`.
-    pub(crate) fn wanted_images(&self, pinned: &HashSet<[u8; 32]>) -> Vec<([u8; 32], trs_media::Kind, u64)> {
+    pub(crate) fn wanted_images(&self, pinned: &HashSet<[u8; 32]>) -> Vec<([u8; 32], seedwell_media::Kind, u64)> {
         let mut seen = HashSet::new();
         self.budget
             .iter()
@@ -118,7 +118,7 @@ impl Index {
             .filter(|h| seen.insert(**h))
             .filter_map(|h| {
                 let n = self.refs.get(h)?;
-                let k = trs_media::Kind::from_byte(n.r.kind)?;
+                let k = seedwell_media::Kind::from_byte(n.r.kind)?;
                 (n.r.size > 0 && n.r.size <= k.max_bytes() as u64).then_some((*h, k, n.r.size))
             })
             .collect()
@@ -127,7 +127,7 @@ impl Index {
 
 /// A channel or a private conversation, for fetching and serving its attachments.
 pub(crate) trait Room: Send + Sync + 'static {
-    /// What a [`trs_sync_proto::msg::BlobWant`] for it says.
+    /// What a [`seedwell_sync_proto::msg::BlobWant`] for it says.
     fn scope(&self) -> BlobScope;
     /// The connected devices its attachments may be fetched from (with the blobs bit).
     fn peers(&self, ctx: &Ctx) -> Vec<Arc<PeerHandle>>;

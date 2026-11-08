@@ -1,11 +1,11 @@
 //! The words of the Settings window's Folders tab and of the watch folders (SPEC §8.4, concept 7) that name the Trash:
 //! what happens to a `.torrent` file after it was added, a watch folder's line, and the offer of the files that were
 //! already in a watch folder. Rust words them (docs/CROSS-PLATFORM.md §1), with the system's name for the Trash
-//! (`trs_platform::trash!`: the Recycle Bin on Windows); the host draws them.
+//! (`seedwell_platform::trash!`: the Recycle Bin on Windows); the host draws them.
 
 use std::path::Path;
 
-use trs_platform::trash;
+use seedwell_platform::trash;
 
 use crate::menu::APP_NAME;
 use crate::row_text::category_label;

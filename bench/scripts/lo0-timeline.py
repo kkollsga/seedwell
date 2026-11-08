@@ -3,7 +3,7 @@
 
     python3 -I bench/scripts/lo0-timeline.py OUT.tsv [SECONDS]
 
-Writes `wall_ms<TAB>Obytes` lines (wall clock, so it lines up with TRS_UTP_TRACE output and the
+Writes `wall_ms<TAB>Obytes` lines (wall clock, so it lines up with SEEDWELL_UTP_TRACE output and the
 harness log). Stops after SECONDS (default: until SIGTERM)."""
 import subprocess, sys, time
 

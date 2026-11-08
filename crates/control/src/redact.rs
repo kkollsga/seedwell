@@ -1,7 +1,7 @@
 //! Keeping secrets out of everything an agent can read or the activity log keeps: passkeys in
 //! tracker URLs and magnet links, query strings of direct-download URLs, folder-sync keys.
 
-use trs_state::url::redact_url;
+use seedwell_state::url::redact_url;
 
 /// Replace every `scheme://...` URL inside free text by its redacted form. Tracker errors and
 /// log lines sometimes quote the announce URL; this makes sure a passkey cannot ride along.

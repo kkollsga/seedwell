@@ -6,7 +6,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
 use libfuzzer_sys::fuzz_target;
-use trs_portmap::{Config, HttpFailure, Input, Millis, NetInfo, Output, PortMapper, Wanted};
+use seedwell_portmap::{Config, HttpFailure, Input, Millis, NetInfo, Output, PortMapper, Wanted};
 
 fuzz_target!(|data: &[u8]| {
     let gw = Ipv4Addr::new(10, 0, 0, 1);

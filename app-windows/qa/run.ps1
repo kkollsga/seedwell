@@ -12,7 +12,8 @@
   the network either (no DHT, PEX, LSD, UPnP or NAT-PMP).
 
   Checks: render, handoff, separate, gate, selection, keys, removal, info, alert, trash, choice, move, add, chat,
-  dialogs, newchannel, links, tray, scheme, rendezvous, follow, firewall, proxy, proxysecrets, navpane, listen, readonly, adminremove, folders, chatpage, chatslowdisk, platform, slowstart, damaged, notices, settingspage, requests, files, chooser, play, favorites, rules, cloudfiles, ondemand, ondemandfetch, ondemandpin, ondemandchanges, ondemandwrites, ondemandstale, ondemandfirst, notray, settings, quit (all of them: all, the default).
+  dialogs, newchannel, links, tray, scheme, rendezvous, follow, firewall, proxy, proxysecrets, navpane, listen, readonly, adminremove, folders, chatpage, chatslowdisk, platform, slowstart, damaged, notices, settingspage, requests, files, chooser, play, favorites, rules, cloudfiles, ondemand, ondemandfetch, ondemandpin, ondemandchanges, ondemandwrites, ondemandstale, ondemandfirst, ondemandbusy, startturns, shotturns, addbigfolder, timeleft, hangwatch, shareopening, shellstarts, addlink, dialogfocus, focuswalk, leaks, notray, settings, quit (all of them: all, the default).
+  By name only, not in all: interactive (the first seconds of a large add, measured against the user's limits; see the check).
   -Build builds the app first (build.ps1; -CoreProfile Debug builds its core from the debug test build, as CI does).
   -Out keeps the pictures in <dir> (default: a temp folder, printed).
   Flyouts (menus, the members panel and its role menus) are drawn by the render run (SnapshotRenderer.cs, check
@@ -34,7 +35,7 @@ $Repo = Split-Path $App -Parent
 $Exe = Join-Path $App 'bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\Seedwell.exe'
 $Cli = Join-Path $Repo 'target\debug\seedwell.exe'
 $Fixtures = Join-Path $Repo 'crates\metainfo\tests\fixtures'
-$All = @('render', 'handoff', 'separate', 'gate', 'selection', 'keys', 'removal', 'info', 'alert', 'trash', 'choice', 'move', 'add', 'chat', 'dialogs', 'newchannel', 'links', 'tray', 'scheme', 'rendezvous', 'follow', 'firewall', 'proxy', 'proxysecrets', 'navpane', 'listen', 'readonly', 'adminremove', 'folders', 'chatpage', 'chatslowdisk', 'platform', 'slowstart', 'damaged', 'notices', 'settingspage', 'requests', 'files', 'chooser', 'play', 'favorites', 'rules', 'cloudfiles', 'ondemand', 'ondemandfetch', 'ondemandpin', 'ondemandchanges', 'ondemandwrites', 'ondemandstale', 'ondemandfirst', 'notray', 'settings', 'quit')
+$All = @('render', 'handoff', 'separate', 'gate', 'selection', 'keys', 'removal', 'info', 'alert', 'trash', 'choice', 'move', 'add', 'chat', 'dialogs', 'groups', 'syncinplace', 'clisettings', 'restart', 'newchannel', 'links', 'tray', 'scheme', 'rendezvous', 'follow', 'firewall', 'proxy', 'proxysecrets', 'navpane', 'listen', 'readonly', 'adminremove', 'folders', 'chatpage', 'chatslowdisk', 'platform', 'slowstart', 'damaged', 'notices', 'settingspage', 'requests', 'files', 'chooser', 'play', 'favorites', 'rules', 'cloudfiles', 'ondemand', 'ondemandfetch', 'ondemandpin', 'ondemandchanges', 'ondemandwrites', 'ondemandstale', 'ondemandfirst', 'ondemandbusy', 'startturns', 'shotturns', 'addbigfolder', 'timeleft', 'hangwatch', 'shareopening', 'shellstarts', 'addlink', 'dialogfocus', 'focuswalk', 'leaks', 'notray', 'settings', 'quit')
 
 if ($Build) {
   & powershell -NoProfile -File (Join-Path $App 'build.ps1') -CoreProfile $CoreProfile | Out-Host
@@ -53,7 +54,7 @@ Get-ChildItem ([IO.Path]::GetTempPath()) -Directory -Filter 'seedwell-*' -ErrorA
 if (-not $Out) { $Out = Join-Path ([IO.Path]::GetTempPath()) "seedwell-qa-$([DateTime]::Now.ToString('yyyyMMdd-HHmmss'))" }
 New-Item -ItemType Directory -Force $Out | Out-Null
 $names = if ($Names -contains 'all') { $All } else { $Names }
-foreach ($n in $names) { if ($All -notcontains $n) { throw "Unknown check '$n'. Checks: $($All -join ', ')" } }
+foreach ($n in $names) { if ($All + 'interactive' -notcontains $n) { throw "Unknown check '$n'. Checks: $($All -join ', '), interactive" } }
 
 # ---------------------------------------------------------------------------------------------- helpers
 
@@ -92,8 +93,60 @@ public static class QaHolder {
     } finally { RmEndSession(session); }
   }
 }
+// A process's handles of the two types a timer holds, from the system's list (the process itself is not opened).
+public static class QaHandles {
+  [DllImport("ntdll.dll")] static extern int NtQuerySystemInformation(int c, IntPtr b, int l, out int r);
+  [DllImport("ntdll.dll")] static extern int NtQueryObject(IntPtr h, int c, IntPtr b, int l, out int r);
+  static System.Collections.Generic.HashSet<int> TimerTypes() {
+    int len = 1 << 20, r; var b = Marshal.AllocHGlobal(len);
+    try {
+      int s = NtQueryObject(IntPtr.Zero, 3, b, len, out r);
+      if (s != 0) throw new Exception("the type list: " + s.ToString("x"));
+      var found = new System.Collections.Generic.HashSet<int>();
+      int n = Marshal.ReadInt32(b); long at = b.ToInt64() + 8;
+      for (int i = 0; i < n; i++) {
+        var entry = new IntPtr(at);
+        var name = Marshal.PtrToStringUni(Marshal.ReadIntPtr(entry, 8));
+        if (name == "Timer" || name == "WaitCompletionPacket") found.Add(i + 2);
+        at += 0x68 + ((Marshal.ReadInt16(entry, 2) + 7) & ~7);
+      }
+      if (found.Count != 2) throw new Exception("the type list has " + found.Count + " of Timer and WaitCompletionPacket");
+      return found;
+    } finally { Marshal.FreeHGlobal(b); }
+  }
+  public static int Timers(int pid) {
+    var types = TimerTypes();
+    int len = 64 << 20, r, s; IntPtr b;
+    while (true) {
+      b = Marshal.AllocHGlobal(len);
+      s = NtQuerySystemInformation(64, b, len, out r);
+      if (s == 0) break;
+      Marshal.FreeHGlobal(b);
+      len *= 2;
+      if (len > (1 << 30)) throw new Exception("the handle list: " + s.ToString("x"));
+    }
+    try {
+      long n = Marshal.ReadInt64(b); int count = 0;
+      for (long i = 0; i < n; i++) {
+        var e = new IntPtr(b.ToInt64() + 16 + i * 40);
+        if (Marshal.ReadInt64(e, 8) == pid && types.Contains(Marshal.ReadInt16(e, 30))) count++;
+      }
+      return count;
+    } finally { Marshal.FreeHGlobal(b); }
+  }
+}
 // Another process freeing a placeholder's space, as Storage Sense does (the app's NOTIFY_DEHYDRATE decides).
 public static class QaCloud {
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool DeviceIoControl(Microsoft.Win32.SafeHandles.SafeFileHandle h, uint code, IntPtr inBuf, uint inSize, IntPtr outBuf, uint outSize, out uint returned, IntPtr overlapped);
+  // A file of this size that takes no room on the disk (FSCTL_SET_SPARSE), as big as a film.
+  public static void Sparse(string path, long length) {
+    using (var f = new System.IO.FileStream(path, System.IO.FileMode.Create, System.IO.FileAccess.Write, System.IO.FileShare.None)) {
+      uint returned;
+      if (!DeviceIoControl(f.SafeFileHandle, 0x000900C4, IntPtr.Zero, 0, IntPtr.Zero, 0, out returned, IntPtr.Zero)) throw new System.ComponentModel.Win32Exception();
+      f.SetLength(length);
+    }
+  }
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
   static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
   [DllImport("cldapi.dll")]
@@ -202,7 +255,8 @@ function Qa([string]$dir, [string[]]$words, [int]$ms = 10000) {
   # (The app's QaSaid: what a credential field is given never reaches the log.)
   $said = if ($words[0] -eq 'proxy-window' -and $words[1] -in 'fill', 'custom', 'copied', 'last') { "proxy-window $($words[1]) [*][*][*]" } else { $words -join ' ' }
   $pattern = "qa ${said}:"
-  WaitFor { Log $dir | Select-Object -Skip $before | Where-Object { $_ -like "*$pattern*" -or $_ -like '*qa refused*' } | Select-Object -Last 1 } $ms "'$pattern' in app.log"
+  # (Not "waits for the core": the app is still making what needs the core, and the command's own line comes after.)
+  WaitFor { Log $dir | Select-Object -Skip $before | Where-Object { ($_ -like "*$pattern*" -and $_ -notlike '*: waits for the core*') -or $_ -like '*qa refused*' } | Select-Object -Last 1 } $ms "'$pattern' in app.log"
 }
 
 # Folder sync starts in the background, a moment after the core answers.
@@ -216,7 +270,7 @@ function Stop-App([string]$dir, $p) {
     if (-not $p.WaitForExit(30000)) { $p.Kill(); Fail 'the app did not quit within 30 s' }
   }
   # The app never hangs: a stall of the core's fail_ms in the run fails it (HangWatch's line in app.log).
-  $hang = Log $dir | Where-Object { $_ -like '*ui stall:*this run fails*' } | Select-Object -First 1
+  $hang = Log $dir | Where-Object { $_ -like '*ui stall:*this run fails*' -or $_ -like '*ui stutter:*this run fails*' } | Select-Object -First 1
   if ($hang) {
     # A debug core (CI's) says which of folder sync's locks anything waited for.
     $waits = @(CoreLog $dir | Where-Object { $_ -like '*waited * ms for a lock at*' } | Select-Object -Last 8) -join ' | '
@@ -246,11 +300,11 @@ $checks.render = {
     $front = 0
     while (-not $p.HasExited) { if ([QaForeground]::Pid() -eq $p.Id) { $front++ }; Start-Sleep -Milliseconds 50 }
     # With every stall of the run (its log, beside the pictures), so a failure on CI names the step.
-    if ($p.ExitCode -ne 0) { Fail "the $theme render ended with $($p.ExitCode): $(Get-Content "$dir\error-$theme.txt" -TotalCount 1) || $((Get-Content "$dir\logs\app.log" -ErrorAction SilentlyContinue | Where-Object { $_ -like '*ui stall*' }) -join ' || ')" }
+    if ($p.ExitCode -ne 0) { Fail "the $theme render ended with $($p.ExitCode): $(Get-Content "$dir\error-$theme.txt" -TotalCount 1) || $((Get-Content "$dir\logs\app.log" -ErrorAction SilentlyContinue | Where-Object { $_ -like '*ui stall*' -or $_ -like '*ui stutter*' }) -join ' || ')" }
     if ($front -gt 0) { Fail "the $theme render held the foreground ($front samples)" }
   }
   $pictures = @(Get-ChildItem $dir -Filter *.png | ForEach-Object FullName)
-  foreach ($must in 'library-files-dark', 'library-files-light', 'menu-files-dark', 'library-chat-notes-dark', 'library-chat-notes-light', 'library-chat-hover-light', 'library-chat-reply-dark', 'chat-images-light', 'chat-gallery-dark', 'menu-dark', 'menu-sync-confirm-light', 'row-menu-dark', 'remove-light', 'library-downloads-dark', 'library-info-light', 'library-removal-dark', 'library-foldersync-light', 'library-settings-dark', 'channel-menu-light', 'tray-menu-dark', 'new-channel-light', 'new-channel-join-dark', 'dialog-new-topic-dark', 'dialog-leave-light', 'dialog-agents-dark', 'library-foldersync-dark', 'foldersync-remove-light', 'add-folder-dark', 'add-folder-shared-light', 'edit-folder-dark', 'share-light', 'library-chat-dark', 'library-direct-light', 'chat-menu-dark', 'chat-files-light', 'prompt-add-request-dark', 'prompt-location-move-light', 'prompt-backlog-dark', 'settings-general-dark', 'settings-transfers-light', 'settings-folders-dark', 'settings-network-light', 'settings-agents-dark', 'settings-advanced-light', 'file-icons-dark', 'tray-both-32') {
+  foreach ($must in 'library-files-dark', 'library-files-light', 'menu-files-dark', 'library-chat-notes-dark', 'library-chat-notes-light', 'library-chat-hover-light', 'library-chat-reply-dark', 'chat-images-light', 'chat-gallery-dark', 'menu-dark', 'menu-sync-hover-dark', 'menu-sync-hover-light', 'menu-sync-confirm-light', 'row-menu-dark', 'remove-light', 'library-downloads-dark', 'library-info-light', 'library-removal-dark', 'library-foldersync-light', 'library-settings-dark', 'channel-menu-light', 'tray-menu-dark', 'new-channel-light', 'new-channel-join-dark', 'dialog-new-topic-dark', 'dialog-leave-light', 'dialog-agents-dark', 'library-foldersync-dark', 'foldersync-remove-light', 'add-folder-dark', 'add-folder-shared-light', 'edit-folder-dark', 'share-light', 'library-chat-dark', 'library-direct-light', 'chat-menu-dark', 'chat-files-light', 'prompt-add-request-dark', 'prompt-location-move-light', 'prompt-backlog-dark', 'settings-general-dark', 'settings-transfers-light', 'settings-folders-dark', 'settings-network-light', 'settings-agents-dark', 'settings-advanced-light', 'file-icons-dark', 'tray-both-32') {
     if (-not (Test-Path "$dir\$must.png")) { Fail "missing $must.png" }
   }
   $pictures
@@ -373,6 +427,103 @@ $checks.removal = {
     WaitFor { -not (List $dir | Where-Object { $_ -match 'Debian' }) } 10000 'the torrent to be removed' | Out-Null
   } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
   @("$Out\removal.png")
+}
+
+# The failure: something made over and over is never let go, and the app grows for as long as it runs (0.1.20: a timer for
+# each text field of each Settings draw and for Cancel's Shift caption in each of the notifier's draws, each keeping itself
+# alive with the draw's tree; 15.8 GB and 232,000 handles after 22 hours). What such a timer holds is counted by type (Timer and
+# WaitCompletionPacket, one of each for each): the handle total also holds what the thread pool keeps for a while. After a
+# collection, as what can still be collected is no leak. Each surface opened and closed again and again, Settings drawn again
+# and again, and each surface left alone. Every miss is printed, not only the first.
+$checks.leaks = {
+  $dir = New-State 'control'
+  New-Item -ItemType Directory -Force "$dir\Shared" | Out-Null
+  $p = Start-App $dir -QaControl -extra @($fixture.debian)
+  $misses = @()
+  try {
+    WaitForSync $dir
+    WaitFor { List $dir | Where-Object { $_ -match 'Debian' } } 10000 'the torrent' | Out-Null
+    & $Cli --socket "$dir\state\control.sock" sync add "$dir\Shared" | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "the CLI could not add a folder (exit $LASTEXITCODE)" }
+    Qa $dir @('window') | Out-Null
+    Qa $dir @('favorite', 'save', 'debian') | Out-Null
+    function Timers { [QaHandles]::Timers($p.Id) }
+    function Held { $s = Qa $dir @('memory'); $m = [regex]::Match($s, 'handles (\d+) private (\d+) managed (\d+)'); if (-not $m.Success) { Fail "memory said: $s" }; [pscustomobject]@{ Timers = (Timers); Handles = [int]$m.Groups[1].Value; Private = [int]$m.Groups[2].Value; Managed = [int]$m.Groups[3].Value } }
+    $tabs = 'General', 'Transfers', 'Folders', 'Rules', 'Network', 'FolderSync', 'Devices', 'Agents', 'Advanced'
+    $rounds = [ordered]@{
+      'the pages' = @(@('place', 'downloads'), @('place', 'sharing'), @('place', 'foldersync'), @('syncpage'), @('place', 'settings'))
+      'the Settings tabs' = @($tabs | ForEach-Object { , @('settings', 'tab', $_) })
+      'the sync flyout' = @(@('sync-flyout', 'open'), @('sync-flyout', 'close'))
+      'the Get Info card' = @(@('place', 'downloads'), @('info', 'debian'))
+      'the tracker page' = @(@('place', 'downloads'), @('tracker-info', 'debian'))
+      'the Add window' = @(@('add-folder', 'open'), @('add-folder', 'cancel'))
+      'the Edit window' = @(@('edit-folder', 'open', 'Shared'), @('edit-folder', 'cancel'))
+      'the Share window' = @(@('share', 'open', 'Shared'), @('share', 'cancel'))
+      'the proxy window' = @(@('proxy-window', 'open'), @('proxy-window', 'close'))
+    }
+    # First visits make what stays for the app's life (a page, a window's resources): these are not what is measured.
+    foreach ($steps in $rounds.Values) { foreach ($s in $steps) { Qa $dir $s | Out-Null } }
+
+    # Each surface alone for a while: what leaks by itself, as nobody clicks for 22 hours. 0.1.20 made 2.9 of these a second.
+    # First, while the torrent is still in its start countdown: the notifier's window, drawn at every tick, goes when that ends.
+    $idle = @(
+      @{ name = 'Downloads'; go = @(, @('place', 'downloads')) }
+      @{ name = 'Sharing'; go = @(, @('place', 'sharing')) }
+      @{ name = 'Folder Sync'; go = @(, @('place', 'foldersync')) }
+    ) + @($tabs | ForEach-Object { @{ name = "Settings, $_"; go = @(@('place', 'settings'), @('settings', 'tab', $_)) } }) + @(
+      @{ name = 'the sync flyout'; go = @(@('place', 'downloads'), @('sync-flyout', 'open')) }
+      @{ name = 'the Get Info card'; go = @(@('sync-flyout', 'close'), @('info', 'debian')) }
+    )
+    $seconds = 10
+    $first = Held
+    foreach ($s in $idle) {
+      foreach ($w in $s.go) { Qa $dir $w | Out-Null }
+      Start-Sleep 2
+      $from = Timers
+      Start-Sleep $seconds
+      $to = Timers
+      Write-Host "  leaks: left on $($s.name) for $seconds s: timers $from to $to"
+      if ($to - $from -ge 6) { $misses += "left on $($s.name) for $seconds s, timer handles climbed from $from to $to" }
+    }
+    $last = Held
+    Write-Host "  leaks: over all the idling: timers $($first.Timers) to $($last.Timers), handles $($first.Handles) to $($last.Handles), private $($first.Private) to $($last.Private) MB, managed $($first.Managed) to $($last.Managed) MB"
+    if ($last.Private - $first.Private -ge 40) { $misses += "private bytes climbed from $($first.Private) to $($last.Private) MB while nobody did anything" }
+
+    # Under one a round: what each round leaves behind is at least one, and a self-holding timer two (and the stream of a
+    # second or so a round, whichever surface is up).
+    $times = 8
+    foreach ($name in $rounds.Keys) {
+      $before = Held
+      foreach ($i in 1..$times) { foreach ($s in $rounds[$name]) { Qa $dir $s | Out-Null } }
+      $after = Held
+      $grew = $after.Timers - $before.Timers
+      Write-Host "  leaks: $name, $times rounds: timers $($before.Timers) to $($after.Timers), handles $($before.Handles) to $($after.Handles), managed $($before.Managed) to $($after.Managed) MB"
+      # The count wanders by some ten either way with nothing leaking (a first visit's, the system's own). A leak does it again.
+      if ($grew -ge $times) {
+        $longer = $times * 3
+        $before = Held
+        foreach ($i in 1..$longer) { foreach ($s in $rounds[$name]) { Qa $dir $s | Out-Null } }
+        $after = Held
+        $again = $after.Timers - $before.Timers
+        Write-Host "  leaks: $name again, $longer rounds: timers $($before.Timers) to $($after.Timers)"
+        if ($again -ge $longer) { $misses += "$name left $grew timer handles behind in $times rounds and $again in $longer more" }
+      }
+    }
+
+    # Settings drawn anew: what a change in the model does, on the tab with the most fields. (These draws are of one model, so
+    # the idle part below does not see them on code that keeps what it drew.)
+    Qa $dir @('place', 'settings') | Out-Null
+    Qa $dir @('settings', 'tab', 'Transfers') | Out-Null
+    Qa $dir @('settings', 'redraw', '3') | Out-Null
+    $before = Held
+    Qa $dir @('settings', 'redraw', '40') 60000 | Out-Null
+    $after = Held
+    $grew = $after.Timers - $before.Timers
+    Write-Host "  leaks: 40 Settings draws: timers $($before.Timers) to $($after.Timers), handles $($before.Handles) to $($after.Handles), managed $($before.Managed) to $($after.Managed) MB"
+    if ($grew -ge 40) { $misses += "40 draws of Settings left $grew timer handles behind" }
+
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  if ($misses) { Fail ($misses -join ' | ') }
 }
 
 $checks.info = {
@@ -586,6 +737,331 @@ $checks.dialogs = {
   @('dialog-new-topic', 'dialog-rename', 'dialog-wake-command', 'dialog-leave') | ForEach-Object { "$Out\$_.png" }
 }
 
+# The sidebar's groups of channels (SPEC 7G.7 Groups), made through the CLI as an agent would. The failures caught: a
+# channel drawn both under its group and in the plain list, or left behind in its old place when it moves between groups
+# (the Mac had a lingering row); a closed group that still draws its channels, or doesn't mark the selection it holds;
+# the menus without Move to Group, its check, or the group's own commands; a group command or dialog that never reaches
+# the core; a deleted group taking its channels with it. Shots: open, closed, holding the selection.
+$checks.groups = {
+  $dir = New-State 'control'
+  $p = Start-App $dir -QaControl
+  $pictures = New-Object Collections.Generic.List[string]
+  try {
+    WaitForSync $dir
+    function GroupCli([string[]]$words) { $o = (& $Cli --socket "$dir\state\control.sock" @words 2>&1) -join ' '; if ($LASTEXITCODE -ne 0) { Fail "seedwell $($words -join ' ') failed ($LASTEXITCODE): $o" }; $o }
+    function Rows { (Qa $dir @('sidebar-rows')) -replace '^.*?rows ', '' -replace '; place .*$', '' }
+    # Each name drawn exactly once, at the indent given (0: the plain list, 1: under a group).
+    function Once([string]$rows, [string]$name, [int]$indent) {
+      $all = @($rows -split ' \| ' | Where-Object { $_.TrimStart('.') -eq $name })
+      if ($all.Count -ne 1) { Fail "$name is drawn $($all.Count) times: $rows" }
+      if ($all[0] -ne ('.' * $indent + $name)) { Fail "$name is drawn at the wrong place ($($all[0]), wanted indent $indent): $rows" }
+    }
+    function Absent([string]$rows, [string]$name) { if (@($rows -split ' \| ' | Where-Object { $_.TrimStart('.') -eq $name }).Count -ne 0) { Fail "$name is drawn: $rows" } }
+    function Shot([string]$name) { Qa $dir @('shot', $name) | Out-Null; Copy-Item "$dir\state\qa\$name.png" "$Out\$name.png"; $pictures.Add("$Out\$name.png") }
+    GroupCli @('chat', 'new', 'QA-Channel') | Out-Null
+    GroupCli @('chat', 'new', 'QA-Other') | Out-Null
+    Qa $dir @('window') | Out-Null
+    $plain = WaitFor { $r = Rows; if ($r -match '(^| \| )QA-Other( \||$)' -and $r -match '(^| \| )QA-Channel( \||$)') { $r } } 5000 'the channels in the sidebar'
+    if ($plain -match '\[group') { Fail "a group drawn before there is one: $plain" }
+    Once $plain 'QA-Channel' 0
+    # The CLI's group: Agents gets sparkles from its name.
+    GroupCli @('chat', 'group', 'new', 'Agents') | Out-Null
+    $listed = GroupCli @('chat', 'group', 'list')
+    if ($listed -notmatch 'sparkles') { Fail "the CLI's Agents group has no sparkles: $listed" }
+    GroupCli @('chat', 'group', 'move', 'QA-Channel', 'Agents') | Out-Null
+    $open = WaitFor { $r = Rows; if ($r -match '\[group Agents open Sparkles\]' -and $r -match '\.QA-Channel') { $r } } 5000 'the channel under its group'
+    Once $open 'QA-Channel' 1
+    Once $open 'QA-Other' 0
+    $groupAt = [array]::IndexOf(@($open -split ' \| '), '[group Agents open Sparkles]')
+    $otherAt = [array]::IndexOf(@($open -split ' \| '), 'QA-Other')
+    if ($groupAt -lt 0 -or $otherAt -lt $groupAt) { Fail "the groups are not drawn before the plain channels: $open" }
+    Shot 'groups-open'
+    # The menus: the channel's Move to Group with its group checked, and the group's own.
+    $channelMenu = Qa $dir @('menu-of', 'channel', 'QA-Channel')
+    if ($channelMenu -notmatch 'Move to Group > \[[^\]]*Agents \[x\]' -or $channelMenu -notmatch 'New Group' -or $channelMenu -notmatch 'Remove from Group') { Fail "the channel's Move to Group is not right: $channelMenu" }
+    $otherMenu = Qa $dir @('menu-of', 'channel', 'QA-Other')
+    if ($otherMenu -notmatch 'Move to Group > \[' -or $otherMenu -match 'Agents \[x\]' -or $otherMenu -match 'Remove from Group') { Fail "a channel in no group: its Move to Group is not right: $otherMenu" }
+    $groupMenu = Qa $dir @('menu-of', 'group', 'Agents')
+    if ($groupMenu -notmatch 'Rename Group' -or $groupMenu -notmatch 'Icon > \[[^\]]*Sparkles \[x\]' -or $groupMenu -notmatch 'Delete Group !') { Fail "the group's menu is not right: $groupMenu" }
+    # Closed while it holds the channel shown: no channel rows, the selection marked; then closed holding nothing.
+    Qa $dir @('place', 'chat', 'QA-Channel') | Out-Null
+    $holding = (Qa $dir @('group-open', 'Agents', 'false')) -replace '^.*?rows ', ''
+    if ($holding -notmatch '\[group Agents closed holds Sparkles\]') { Fail "the closed group does not hold the selection: $holding" }
+    Absent $holding 'QA-Channel'
+    Shot 'groups-holding'
+    Qa $dir @('place', 'chat', 'QA-Other') | Out-Null
+    $closed = Rows
+    if ($closed -notmatch '\[group Agents closed Sparkles\]') { Fail "the closed group still holds a selection it hasn't: $closed" }
+    Shot 'groups-closed'
+    Qa $dir @('group-open', 'Agents', 'true') | Out-Null
+    # The app's own commands: New Group… from a channel's menu (its dialog), Move to Group, the icon, the order, Rename.
+    Qa $dir @('sidebar', 'qa-other', 'NewGroup') | Out-Null
+    Qa $dir @('dialog', 'type', 'Work') | Out-Null
+    Qa $dir @('dialog', 'confirm') | Out-Null
+    $work = WaitFor { $r = Rows; if ($r -match '\[group Work open Briefcase\]' -and $r -match '\.QA-Other') { $r } } 5000 'New Group… to make Work with the channel'
+    Once $work 'QA-Other' 1
+    # A channel moved between groups: drawn once, under the new one (no row left in the old).
+    $moved = Qa $dir @('sidebar', 'qa-channel', 'MoveToGroup', 'Work')
+    $moved = WaitFor { $r = Rows; if (($r -split ' \| ' | Where-Object { $_ -eq '.QA-Channel' }).Count -eq 1 -and $r -match '\[group Agents open Sparkles\] \| \[group Work') { $r } } 5000 "the channel under Work only ($moved)"
+    Once $moved 'QA-Channel' 1
+    $icon = Qa $dir @('group', 'Work', 'SetGroupIcon', 'Star')
+    if ($icon -notmatch '\[group Work open Star\]') { Fail "the icon did not change: $icon" }
+    $up = Qa $dir @('group', 'Work', 'MoveGroupUp')
+    if ($up -notmatch '\[group Work open Star\] \|.*\[group Agents') { Fail "Move Up did not move Work first: $up" }
+    Qa $dir @('group', 'Work', 'RenameGroup') | Out-Null
+    Qa $dir @('dialog', 'type', 'Projects') | Out-Null
+    Qa $dir @('dialog', 'confirm') | Out-Null
+    WaitFor { $r = Rows; if ($r -match '\[group Projects open Star\]') { $r } } 5000 'the group renamed' | Out-Null
+    Qa $dir @('sidebar', 'qa-other', 'RemoveFromGroup') | Out-Null
+    $removed = WaitFor { $r = Rows; if ($r -match '(^| \| )QA-Other( \||$)') { $r } } 5000 'QA-Other back in the plain list'
+    Once $removed 'QA-Other' 0
+    # Deleted: its channel back in the plain list, nothing lost.
+    $deleted = Qa $dir @('group', 'Projects', 'DeleteGroup')
+    $deleted = WaitFor { $r = Rows; if ($r -notmatch '\[group Projects') { $r } } 5000 "the group deleted ($deleted)"
+    Once $deleted 'QA-Channel' 0
+    $groups = GroupCli @('chat', 'group', 'list')
+    if ($groups -match 'Projects') { Fail "the CLI still lists the deleted group: $groups" }
+    if (Log $dir | Where-Object { $_ -like '*nothing to run*' -or $_ -like '*placeholder*' }) { Fail "a command ran nothing: $((Log $dir | Where-Object { $_ -like '*nothing to run*' }) -join ' | ')" }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  $pictures
+}
+
+# The Folder Sync page updated in place (the model's structure apart from its values, win-101). The failures caught: a
+# value drawn stale (the status the page shows is not the model's), and the page built anew for every value that changes
+# while a folder is added (each build made enough WinRT objects for a blocking full collection every few draws).
+$checks.syncinplace = {
+  $dir = New-State 'full'
+  New-Item -ItemType Directory -Force "$dir\Movies" | Out-Null
+  1..400 | ForEach-Object { [IO.File]::WriteAllBytes("$dir\Movies\film$_.bin", [byte[]]::new(65536)) }
+  $p = Start-App $dir -QaControl
+  try {
+    WaitForSync $dir
+    Qa $dir @('window') | Out-Null
+    Qa $dir @('place', 'foldersync') | Out-Null
+    $said = (& $Cli --socket "$dir\state\control.sock" sync add "$dir\Movies" 2>&1) -join ' '
+    if ($said -notlike 'Sharing Movies*') { Fail "sync add: $said" }
+    function Page {
+      $d = Qa $dir @('syncpage')
+      if ($d -notmatch 'status "([^"]*)".*drawn (\d+), in place (\d+), status drawn "([^"]*)"') { Fail "no page: $d" }
+      $r = [pscustomobject]@{ status = $Matches[1]; draws = [int]$Matches[2]; inPlace = [int]$Matches[3]; drawn = $Matches[4] }
+      if ($r.status -ne $r.drawn) { Fail "the page shows a stale status: model '$($r.status)', drawn '$($r.drawn)'" }
+      $r
+    }
+    # Settled: the folder listed and up to date.
+    $settled = WaitFor { $r = Page; if ($r.status -match 'Up to date') { $r } } 60000 'the folder up to date'
+    # Values only: more files in the folder change its counts and status, not the page's elements.
+    401..1200 | ForEach-Object { [IO.File]::WriteAllBytes("$dir\Movies\film$_.bin", [byte[]]::new(65536)) }
+    $seen = @(); $clock = [Diagnostics.Stopwatch]::StartNew()
+    while ($clock.Elapsed.TotalSeconds -lt 15) { $seen += Page }
+    $last = $seen[-1]
+    $statuses = @($seen | ForEach-Object { $_.status } | Select-Object -Unique)
+    Write-Host ("  syncinplace: settled at {0} draws; then {1} statuses, {2} more draws, {3} more in place" -f $settled.draws, $statuses.Count, ($last.draws - $settled.draws), ($last.inPlace - $settled.inPlace))
+    Write-Host ("  syncinplace: statuses {0}" -f ($statuses -join ' | '))
+    if ($last.inPlace -le $settled.inPlace) { Fail "the new files changed nothing in place (statuses: $($statuses -join ' | '))" }
+    if ($last.draws -ne $settled.draws) { Fail "the page was built again $($last.draws - $settled.draws) times for values only (statuses: $($statuses -join ' | '))" }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir }
+  @()
+}
+
+# Every setting from the CLI (934aaf5f), as the Windows app takes it. The failures caught: a change the CLI makes that
+# the app never applies (launch at login, the sleep holds, the updater's switches) or that an open Settings page never
+# shows; the proxy's shield left as it was after `seedwell proxy`; a key on standard input refused or misread from
+# PowerShell 5.1 (CRLF, its own encoding) or from Git Bash; a JSON value that PowerShell 5.1's argument quoting turns into
+# something else stored without a word; `log trackers --clear` failing on Windows. The run's own state folder: launch at
+# login is never written to the registry here (only the installed app's is).
+$checks.clisettings = {
+  $dir = New-State 'full'
+  $qa = "$dir\state\qa"
+  New-Item -ItemType Directory -Force $qa | Out-Null
+  $free = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0); $free.Start(); $port = $free.LocalEndpoint.Port; $free.Stop()
+  $socks = Resolve-Path "$PSScriptRoot\..\..\app\qa\fake_socks5.py"
+  $fake = Start-Process python -ArgumentList @('-I', "`"$socks`"", "`"$qa`"", $port, 'fake-user', 'fake-pass') -PassThru -WindowStyle Hidden
+  $p = Start-App $dir -QaControl
+  $sock = "$dir\state\control.sock"
+  $bash = Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
+  function SetCli([string[]]$pairs) {
+    $o = (& $Cli --socket $sock settings set @pairs 2>&1) -join ' '
+    if ($LASTEXITCODE -ne 0) { Fail "settings set $($pairs -join ' ') failed ($LASTEXITCODE): $o" }
+    $o
+  }
+  function Applied([string]$what, [string]$like) { WaitFor { Log $dir | Where-Object { $_ -like $like } | Select-Object -Last 1 } 10000 $what }
+  function BashCli([string]$line) {
+    $cli = $Cli -replace '\\', '/'; $s = $sock -replace '\\', '/'
+    $o = (& $bash -c ($line -replace '\{cli\}', "'$cli' --socket '$s'") 2>&1) -join ' '
+    @{ Exit = $LASTEXITCODE; Out = $o }
+  }
+  try {
+    WaitForSync $dir
+    if ($fake.HasExited) { Fail 'the fake SOCKS5 server did not start (python?)' }
+    if (-not (Test-Path $bash)) { Fail "no Git Bash at $bash" }
+    Qa $dir @('window') | Out-Null
+
+    # 1, 2. Launch at login and the sleep holds reach the app (and the Run entry stays the installed app's).
+    $runBefore = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -ErrorAction SilentlyContinue).Seedwell
+    SetCli @('general.launch_at_login=true', 'general.prevent_sleep_while_downloading=false', 'general.keep_awake_for_agents=false') | Out-Null
+    Applied 'launch at login and the sleep holds' '*settings applied: launch at login True (not written*, awake while downloading False, awake for agents False*' | Out-Null
+    SetCli @('general.launch_at_login=false', 'general.prevent_sleep_while_downloading=true', 'general.keep_awake_for_agents=true') | Out-Null
+    Applied 'the settings back' '*settings applied: launch at login False*, awake while downloading True, awake for agents True*' | Out-Null
+    $runAfter = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -ErrorAction SilentlyContinue).Seedwell
+    if ($runAfter -ne $runBefore) { Fail "a QA run changed the user's Run entry: '$runBefore' became '$runAfter'" }
+
+    # 3. updates.* reach the app, and the updater plans again with them (the core reads the switches itself: a local
+    # build on a temporary state never plans an automatic check, so its line stays "no automatic check").
+    foreach ($w in 'false', 'true') {
+      $v = @($w, ($w.Substring(0, 1).ToUpper() + $w.Substring(1)))
+      $n = @(Log $dir).Count
+      SetCli @("updates.check=$($v[0])", "updates.auto_install=$($v[0])") | Out-Null
+      WaitFor { $l = @(Log $dir | Select-Object -Skip $n); $i = [array]::FindIndex($l, [Predicate[object]]{ param($x) $x -like "*settings applied:*update checks $($v[1]), automatic install $($v[1])*" }); $i -ge 0 -and @($l | Select-Object -Skip $i | Where-Object { $_ -like '*update: *automatic check*' }).Count -gt 0 } 10000 "updates.check=$($v[0]) to reach the app and the updater to plan again" | Out-Null
+    }
+
+    # 4. An open Settings page reads the change again.
+    Qa $dir @('settings', 'tab', 'Transfers') | Out-Null
+    SetCli @('transfers.max_active_downloads=7') | Out-Null
+    WaitFor { $r = Qa $dir @('settings', 'row', 'queue.active'); if ($r -match 'Active downloads: 7\b') { $r } } 10000 'Settings to show 7 active downloads' | Out-Null
+
+    # 5, 6. The proxy from the CLI, its key on standard input from Git Bash, then from PowerShell 5.1; the shield follows.
+    $none = Qa $dir @('proxy-model')
+    if ($none -notmatch 'icon NoKey') { Fail "not the no-key state: $none" }
+    $b = BashCli "printf '%s\n%s\n' fake-user fake-pass | {cli} proxy custom 127.0.0.1 $port --key"
+    if ($b.Exit -ne 0) { Fail "the key from Git Bash was refused ($($b.Exit)): $($b.Out)" }
+    $on = WaitFor { $m = Qa $dir @('proxy-model'); if ($m -notmatch 'icon NoKey' -and $m -match 'has key True') { $m } } 10000 'the shield to show the key from Git Bash'
+    & $Cli --socket $sock proxy off 2>&1 | Out-Null
+    $off = WaitFor { $m = Qa $dir @('proxy-model'); if ($m -ne $on -and $m -match 'has key True') { $m } } 10000 "the shield to change on proxy off (was: $on)"
+    & $Cli --socket $sock proxy remove-key 2>&1 | Out-Null
+    WaitFor { (Qa $dir @('proxy-model')) -match 'icon NoKey' } 10000 'the shield back to no key' | Out-Null
+    $ps = ("fake-user`nfake-pass" | & $Cli --socket $sock proxy custom 127.0.0.1 $port --key 2>&1) -join ' '
+    if ($LASTEXITCODE -ne 0) { Fail "the key from PowerShell 5.1 was refused ($LASTEXITCODE): $ps" }
+    WaitFor { (Qa $dir @('proxy-model')) -match 'has key True' } 10000 'the shield to show the key from PowerShell' | Out-Null
+    & $Cli --socket $sock proxy remove-key 2>&1 | Out-Null
+    $logs = @(Get-ChildItem "$dir\state\logs" -File | ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName -ErrorAction SilentlyContinue }) -join "`n"
+    if ($logs -match 'fake-pass') { Fail 'the key reached a log' }
+
+    # 7. JSON quoting: Git Bash keeps the quotes; PowerShell 5.1 drops them on the way to a native program, and the CLI
+    # must then refuse with its sentence rather than store something else.
+    $j = BashCli "{cli} settings set transfers.alt='{\`"schedule\`":{\`"enabled\`":true}}'"
+    if ($j.Exit -ne 0) { Fail "a JSON table from Git Bash was refused ($($j.Exit)): $($j.Out)" }
+    $got = (& $Cli --socket $sock --json settings get transfers.alt 2>&1) -join ''
+    if ($got -notmatch '"enabled":\s*true') { Fail "the JSON table from Git Bash did not arrive: $got" }
+    SetCli @('transfers.alt.schedule.enabled=false') | Out-Null
+    $psJson = (& $Cli --socket $sock settings set 'transfers.alt={"schedule":{"enabled":true}}' 2>&1) -join ' '
+    $psExit = $LASTEXITCODE
+    $after = (& $Cli --socket $sock --json settings get transfers.alt 2>&1) -join ''
+    if ($psExit -eq 0 -and $after -notmatch '"enabled":\s*true') { Fail "PowerShell's JSON was taken as something else without a word: $psJson; now $after" }
+    # (win-101: the CLI refuses it itself, exit 2, naming the key and how to quote.)
+    if ($psExit -ne 0 -and ($psExit -ne 2 -or $psJson -notmatch 'transfers\.alt' -or $psJson -notmatch 'PowerShell' -or $psJson -notmatch '--%')) { Fail "PowerShell's JSON was refused, but not naming the key and how to quote (exit $psExit): $psJson" }
+    if ($after -match '"schedule":\s*"') { Fail "PowerShell's JSON was stored as a string: $after" }
+    Write-Host "  clisettings: PowerShell 5.1 'transfers.alt={...}': exit $psExit, $psJson"
+
+    # 8. log trackers --clear.
+    & $Cli --socket $sock dev on 2>&1 | Out-Null
+    $cleared = (& $Cli --socket $sock --json log trackers --clear 2>&1) -join ''
+    if ($LASTEXITCODE -ne 0 -or $cleared -notmatch '"cleared"') { Fail "log trackers --clear: $cleared" }
+    & $Cli --socket $sock dev off 2>&1 | Out-Null
+  } finally {
+    & $Cli --socket "$dir\state\control.sock" proxy remove-key 2>&1 | Out-Null
+    Stop-App $dir $p
+    if (-not $fake.HasExited) { Stop-Process -Id $fake.Id -Force -ErrorAction SilentlyContinue }
+    Remove-Item -Recurse -Force $dir
+  }
+  @()
+}
+
+# seedwell restart (e713c893) on an installed copy (a temporary folder with the app, its install.ps1 and the CLI, on a
+# temporary state), never the user's app. The failures caught: the app not back, or back on another state folder; the
+# CLI that waits ended by the quit (it runs from the install folder); another Seedwell from the same folder quit too;
+# update.log without the restart's lines; --no-wait waiting; a run below permission Full let through, or refused
+# without naming `seedwell agents request full`; the activity log losing "restart Seedwell" across the restart; a copy
+# without its installer (a build run from its build folder) restarting rather than saying why not.
+$checks.restart = {
+  $root = Join-Path ([IO.Path]::GetTempPath()) "seedwell-qa-restart-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
+  $inst = "$root\Programs\Seedwell"
+  New-Item -ItemType Directory -Force "$inst\cli" | Out-Null
+  Copy-Item -Recurse "$(Split-Path $Exe)\*" $inst
+  Copy-Item "$Repo\install.ps1" $inst
+  Copy-Item $Cli "$inst\cli\seedwell.exe"
+  $icli = "$inst\cli\seedwell.exe"
+  $a = New-State 'full'; $b = New-State 'full'; $low = New-State 'control'
+  $procs = @()
+  # -AtOnce: back as soon as the socket answers, the app maybe still starting (its updater not there yet).
+  function StartInstalled([string]$dir, [switch]$AtOnce) {
+    $p = Start-Process "$inst\Seedwell.exe" -ArgumentList @('--state-dir', "$dir\state", '--qa-control') -WorkingDirectory $inst -PassThru
+    WaitFor { & $icli --socket "$dir\state\control.sock" status 2>&1 | Out-Null; $LASTEXITCODE -eq 0 } 20000 'the installed copy to answer' | Out-Null
+    if (-not $AtOnce) { Started $dir }
+    $p
+  }
+  # The control socket answers once the core runs; restart needs the app's updater, made in a later startup turn. Until
+  # win-102 the core answered then as a daemon would; now it waits for the updater. The first restart of each copy asks
+  # at once, the others once the app has started.
+  function Early([string]$dir) { if (Log $dir | Where-Object { $_ -like '*launch: on the UI thread*' }) { 'after the app had started' } else { 'while the app was still starting' } }
+  function Started([string]$dir) { WaitFor { Log $dir | Where-Object { $_ -like '*launch: on the UI thread*' } } 20000 'the app to finish starting' | Out-Null }
+  function AppPid([string]$dir) { ((& $icli --socket "$dir\state\control.sock" --json status 2>&1) -join '' | ConvertFrom-Json).pid }
+  function OnState([string]$dir) { @(Get-CimInstance Win32_Process -Filter "Name='Seedwell.exe'" | Where-Object { $_.CommandLine -like "*$dir\state*" -and $_.CommandLine -notmatch '--qa |--quit' }) }
+  try {
+    $pb = StartInstalled $b; $pa = StartInstalled $a -AtOnce; $procs += $pa, $pb
+    $oldA = $pa.Id
+    # a) From the installed location, waiting, asked as soon as the socket answers; c) the waiting CLI is the install
+    # folder's own.
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $when = Early $a
+    $said = (& $icli --socket "$a\state\control.sock" restart 2>&1) -join ' '
+    $exit = $LASTEXITCODE
+    Write-Host "  restart: the installed copy asked at once ($when)"
+    if ($said -match 'cannot restart itself') { Fail "an app still starting answered as a daemon: $said" }
+    if ($exit -ne 0) { Fail "restart failed ($exit) after $([int]$clock.Elapsed.TotalSeconds) s: $said" }
+    if ($said -notmatch 'running again: process (\d+)') { Fail "restart did not say the new run: $said" }
+    $newA = [int]$Matches[1]
+    if ($newA -eq $oldA) { Fail "the same process answers: $said" }
+    $running = @(OnState $a)
+    if ($running.Count -ne 1 -or $running[0].ProcessId -ne $newA -or $running[0].ExecutablePath -ne "$inst\Seedwell.exe") { Fail "not back as the installed copy on its state: $($running | ForEach-Object { "$($_.ProcessId) $($_.CommandLine)" })" }
+    if ($pb.HasExited) { Fail 'the other Seedwell from the same folder was quit' }
+    Write-Host ("  restart: back in {0:n1} s as process {1}" -f $clock.Elapsed.TotalSeconds, $newA)
+    # d) update.log.
+    $ulog = Get-ChildItem "$a\state" -Recurse -Filter 'update.log' | Select-Object -First 1
+    if (-not $ulog) { Fail 'no update.log' }
+    $u = Get-Content -Raw $ulog.FullName
+    if ($u -notmatch "Restarting Seedwell \(process $oldA\)" -or $u -notmatch 'Started Seedwell again') { Fail "update.log has not the restart's lines: $u" }
+    # The activity log across the restart.
+    $act = (& $icli --socket "$a\state\control.sock" activity --limit 20 2>&1) -join ' '
+    if ($act -notmatch 'restart Seedwell') { Fail "the activity log lost the restart: $act" }
+    # --no-wait answers once accepted.
+    Start-Sleep -Seconds 1
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $quick = (& $icli --socket "$a\state\control.sock" restart --no-wait 2>&1) -join ' '
+    if ($LASTEXITCODE -ne 0) {
+      # Within a moment of the last, the core refuses (a restart is under way): say so, wait, try again.
+      if ($quick -notmatch 'under way') { Fail "restart --no-wait failed: $quick" }
+      Start-Sleep -Seconds 20; $clock.Restart()
+      $quick = (& $icli --socket "$a\state\control.sock" restart --no-wait 2>&1) -join ' '
+      if ($LASTEXITCODE -ne 0) { Fail "restart --no-wait failed: $quick" }
+    }
+    if ($clock.Elapsed.TotalSeconds -gt 5) { Fail "--no-wait waited $([int]$clock.Elapsed.TotalSeconds) s: $quick" }
+    WaitFor { $r = @(OnState $a); if ($r.Count -eq 1 -and $r[0].ProcessId -ne $newA) { & $icli --socket "$a\state\control.sock" status 2>&1 | Out-Null; $LASTEXITCODE -eq 0 } } 180000 'the app back after --no-wait' | Out-Null
+    # Below Full: refused, exit 4, naming the way to ask.
+    $pl = Start-App $low -QaControl; $procs += $pl
+    Started $low
+    $no = (& $Cli --socket "$low\state\control.sock" restart 2>&1) -join ' '
+    if ($LASTEXITCODE -ne 4 -or $no -notmatch 'seedwell agents request full') { Fail "below Full: exit $LASTEXITCODE, $no" }
+    if ($pl.HasExited) { Fail 'the app below Full was restarted' }
+  } finally {
+    foreach ($d in $a, $b) { foreach ($r in @(OnState $d)) { Start-Process "$inst\Seedwell.exe" -ArgumentList @('--state-dir', "`"$d\state`"", '--quit') -Wait; $q = Get-Process -Id $r.ProcessId -ErrorAction SilentlyContinue; if ($q -and -not $q.WaitForExit(30000)) { $q.Kill() } } }
+    Stop-App $low $pl
+    Remove-Item -Recurse -Force $a, $b, $low, $root -ErrorAction SilentlyContinue
+  }
+  # A build folder's copy: refused, with the reason.
+  $dev = New-State 'full'
+  $pd = Start-App $dev -QaControl
+  try {
+    # Asked as soon as the socket answers (Start-App waits for no more): the app's own answer, never a daemon's.
+    $when = if (Log $dev | Where-Object { $_ -like '*launch: on the UI thread*' }) { 'after the app had started' } else { 'while the app was still starting' }
+    $why = (& $Cli --socket "$dev\state\control.sock" restart 2>&1) -join ' '
+    Write-Host "  restart: the build-folder copy asked at once ($when)"
+    if ($why -match 'cannot restart itself') { Fail "an app still starting answered as a daemon: $why" }
+    if ($LASTEXITCODE -eq 0 -or $why -notmatch 'no installer') { Fail "a build-folder copy: exit $LASTEXITCODE, $why" }
+    if ($pd.HasExited) { Fail 'the build-folder copy quit' }
+  } finally { Stop-App $dev $pd; Remove-Item -Recurse -Force $dev }
+  @()
+}
+
 # New Channel / Join with a Link: the New side makes a channel (named as typed, Agents as chosen) and opens it; the
 # Join side reads a link through the core and says why one cannot be joined (Start stays off).
 $checks.newchannel = {
@@ -607,8 +1083,9 @@ $checks.newchannel = {
     $list = (& $Cli --socket "$dir\state\control.sock" chat list 2>&1) -join ' '
     if ($list -notmatch 'Family') { Fail "no channel Family: $list" }
     # A new channel's next step is its Share dialog (the Mac's), once New Channel has closed.
-    $share = Qa $dir @('share', 'status')
-    if ($share -notmatch 'share Share .Family.') { Fail "no Share dialog after New Channel: $share" }
+    # (It opens once New Channel has closed.)
+    try { $share = WaitFor { $l = Qa $dir @('share', 'status'); if ($l -match 'share Share .Family.') { $l } } 10000 'the Share dialog after New Channel' }
+    catch { Fail "no Share dialog after New Channel: $_; now: $(Qa $dir @('share', 'status'))" }
     Qa $dir @('shot', 'share-channel', 'dialog') | Out-Null
     Copy-Item "$dir\state\qa\share-channel.png" "$Out\share-channel.png"; $pictures += "$Out\share-channel.png"
     Qa $dir @('share', 'cancel') | Out-Null
@@ -633,7 +1110,7 @@ $checks.links = {
     Qa $dir @('window') | Out-Null
     Launch $dir @('seedwell://chat/not-a-real-link') | Out-Null
     WaitFor { Log $dir | Where-Object { $_ -like '*second launch: 1 to open*' } } 5000 'the hand-off' | Out-Null
-    WaitFor { Log $dir | Where-Object { $_ -like '*new channel: open on Join*' } } 5000 'New Channel on Join' | Out-Null
+    WaitFor { Log $dir | Where-Object { $_ -like '*new channel: open on Join*' } } 20000 'New Channel on Join' | Out-Null
     $join = Qa $dir @('new-channel', 'status')
     if ($join -notmatch 'link line "[^"]+"') { Fail "the link was not filled in and read: $join" }
     Qa $dir @('new-channel', 'cancel') | Out-Null
@@ -1416,7 +1893,9 @@ $checks.folders = {
     Qa $dir @('window') | Out-Null
     $pictures = [System.Collections.Generic.List[string]]::new()
     function Shot([string]$name, [switch]$Dialog) {
-      Qa $dir (@('shot', $name) + $(if ($Dialog) { @('dialog') } else { @() })) | Out-Null
+      $said = Qa $dir (@('shot', $name) + $(if ($Dialog) { @('dialog') } else { @() }))
+      if (-not (Test-Path "$dir\state\qa\$name.png")) { Fail "no picture ${name}: $said" }
+      if ($said -match 'drawn only at try') { Write-Host "  folders: ${name}: $([regex]::Match($said, 'drawn only at try \d+').Value): $((Log $dir | Where-Object { $_ -like "*picture ${name}.png:*" }) -join ' | ')" }
       Copy-Item "$dir\state\qa\$name.png" "$Out\$name.png"
       $pictures.Add("$Out\$name.png")
     }
@@ -1722,6 +2201,715 @@ $checks.slowstart = {
   @()
 }
 
+# The failure: the start after the core is ready runs as one turn of the UI thread, so the app does not answer until all
+# of it is done (2.3 s under a Rust compile). Each step is made to take 900 ms (SEEDWELL_QA_SLOW_START_STEP_MS, isolated
+# runs only): the three before the flyout's (making that window pumps messages, so a beat gets through there) are past
+# the watchdog's fail_ms together, one alone is not, so only steps in turns of their own pass. And what arrives between
+# the steps finds no half-made app: a command waits for the end, a core event (the settings changing) too, and a quit
+# between them ends the app cleanly.
+$checks.startturns = {
+  function Slow([string]$dir) {
+    $env:SEEDWELL_QA_SLOW_START_STEP_MS = '900'
+    try { Start-Process $Exe -ArgumentList @('--state-dir', "$dir\state", '--qa-control') -PassThru }
+    finally { Remove-Item env:SEEDWELL_QA_SLOW_START_STEP_MS -ErrorAction SilentlyContinue }
+  }
+  $dir = New-State
+  $p = Slow $dir
+  try {
+    WaitFor { Log $dir | Where-Object { $_ -like '*launch: core ready after*' } } 20000 'the core' | Out-Null
+    Add-Content -Encoding utf8 "$dir\state\config.toml" '# changed while the app starts'
+    Launch $dir @('--qa', 'window') | Out-Null
+    $steps = WaitFor { Log $dir | Where-Object { $_ -like '*launch: on the UI thread, ms:*' } | Select-Object -First 1 } 20000 'the steps to end'
+    if (-not (Log $dir | Where-Object { $_ -like '*qa window: waits for the core*' })) { Fail 'the command did not wait for the steps' }
+    WaitFor { Log $dir | Where-Object { $_ -like '*qa window: *' -and $_ -notlike '*waits for the core*' } } 10000 'the waiting command to run' | Out-Null
+    $took = @([regex]::Matches($steps, ' (\d+)(,|$)') | ForEach-Object { [int]$_.Groups[1].Value })
+    if ($took.Count -lt 5 -or ($took | Measure-Object -Sum).Sum -lt 3000) { Fail "the steps did not take the time they were made to: $steps" }
+    if ($p.HasExited) { Fail "the app ended with $($p.ExitCode): $((Log $dir | Select-Object -Last 5) -join ' | ')" }
+    $window = Qa $dir @('shot', 'after-steps')
+    if ($window -match 'failed') { Fail "the window after the steps: $window" }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+
+  $dir = New-State
+  $p = Slow $dir
+  try {
+    WaitFor { Log $dir | Where-Object { $_ -like '*launch: core ready after*' } } 20000 'the core' | Out-Null
+    Launch $dir @('--quit') | Out-Null
+    if (-not $p.WaitForExit(30000)) { Fail 'a quit during the steps did not end the app within 30 s' }
+    $done = Log $dir | Where-Object { $_ -like '*quit: shutdown*' } | Select-Object -Last 1
+    if ($done -notmatch 'finished True') { Fail "a quit during the steps: no finished shutdown: $((Log $dir | Select-Object -Last 5) -join ' | ')" }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+  @()
+}
+
+# The failure: a QA shot encodes its PNG on the UI thread (it stalled 2.2 s twice under a Rust compile, which failed the
+# run). Writing a picture is made to take 3 s (SEEDWELL_QA_SLOW_SHOT_MS, isolated runs only), past the watchdog's fail_ms:
+# it passes only off the UI thread, and the picture must still be there, whole, when the command answers.
+$checks.shotturns = {
+  $dir = New-State
+  $env:SEEDWELL_QA_SLOW_SHOT_MS = '3000'
+  try { $p = Start-App $dir -QaControl } finally { Remove-Item env:SEEDWELL_QA_SLOW_SHOT_MS -ErrorAction SilentlyContinue }
+  try {
+    Qa $dir @('window') | Out-Null
+    $said = Qa $dir @('shot', 'slow') 30000
+    if ($said -match 'failed') { Fail "the shot: $said" }
+    $bytes = [IO.File]::ReadAllBytes("$dir\state\qa\slow.png")
+    if ($bytes.Length -lt 1000 -or $bytes[1] -ne 0x50 -or $bytes[-4] -ne 0xAE) { Fail "the picture is not a whole PNG ($($bytes.Length) bytes)" }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+  @()
+}
+
+# The failures: every core error tried again for a minute (or none), so a lasting one fails late and a file another
+# program holds is lost. The core's Busy (held with no sharing, opened just after the host looked that it is closed) is
+# offered again and works once let go, for a new file and for a change; Busy's answer to a callback is "in use"; a file
+# that goes away before the core is asked (a lasting error) fails at once, said once, never offered again.
+$checks.ondemandbusy = {
+  $dir = New-State 'full'
+  $docs = "$dir\state\od\Docs"
+  New-Item -ItemType Directory -Force $docs | Out-Null
+  'alpha text' | Set-Content -NoNewline "$docs\a.txt"
+  'bravo text' | Set-Content -NoNewline "$docs\b.txt"
+  $sock = "$dir\state\control.sock"
+  $p = Start-App $dir -QaControl
+  try {
+    WaitForSync $dir
+    $added = (& $Cli --socket $sock sync add $docs 2>&1) -join ' '
+    if ($added -notlike 'Sharing Docs*') { throw "sync add: $added" }
+    $mode = (& $Cli --socket $sock sync mode Docs on-demand --free-space 2>&1) -join ' '
+    if ($mode -notlike 'Docs is on demand*') { throw "sync mode: $mode" }
+    WaitFor { (Qa $dir @('ondemand')) -match 'connected True placed 2 files \[a\.txt:p, b\.txt:p\]' } 20000 'the placeholders' | Out-Null
+    $read = Qa $dir @('ondemand', 'read', 'a.txt')
+    if ($read -notmatch 'read "alpha text"') { throw "read a.txt: $read" }
+    WaitFor { Log $dir | Where-Object { $_ -like '*on-demand: a.txt filled (*' } } 5000 'the core to adopt a.txt' | Out-Null
+    $status = Qa $dir @('ondemand', 'busy-status')
+    if ($status -notmatch 'busy status 0xC000CF14') { throw "Busy's answer to a callback is not STATUS_CLOUD_FILE_IN_USE: $status" }
+
+    # A new file, held.
+    Qa $dir @('ondemand', 'hold', 'new.txt', 'held text') | Out-Null
+    WaitFor { Log $dir | Where-Object { $_ -like '*on-demand: new.txt offered again*' } } 10000 'a held new file to be offered again' | Out-Null
+    Start-Sleep -Milliseconds 1500
+    if (Log $dir | Where-Object { $_ -like '*on-demand: new.txt added here*' -or $_ -like '*on-demand: new.txt not added*' }) { Fail "a held file was added or given up: $((Log $dir | Select-Object -Last 5) -join ' | ')" }
+    Qa $dir @('ondemand', 'release') | Out-Null
+    WaitFor { Log $dir | Where-Object { $_ -like '*on-demand: new.txt added here*' } } 10000 'the new file to be added once let go' | Out-Null
+
+    # A change, held.
+    $before = (Log $dir).Count
+    Qa $dir @('ondemand', 'hold', 'a.txt', 'changed while held') | Out-Null
+    WaitFor { Log $dir | Select-Object -Skip $before | Where-Object { $_ -like '*on-demand: a.txt offered again*' } } 10000 'a held change to be offered again' | Out-Null
+    Start-Sleep -Milliseconds 1500
+    if (Log $dir | Select-Object -Skip $before | Where-Object { $_ -like '*on-demand: a.txt changed here*' -or $_ -like '*on-demand: a.txt not reported*' }) { Fail "a held change was reported or given up: $((Log $dir | Select-Object -Last 5) -join ' | ')" }
+    Qa $dir @('ondemand', 'release') | Out-Null
+    WaitFor { Log $dir | Select-Object -Skip $before | Where-Object { $_ -like '*on-demand: a.txt changed here*' } } 15000 'the change to be reported once let go' | Out-Null
+
+    # A file overwritten (no placeholder any more), held.
+    Qa $dir @('ondemand', 'read', 'b.txt') | Out-Null
+    WaitFor { Log $dir | Where-Object { $_ -like '*on-demand: b.txt filled (*' } } 5000 'the core to adopt b.txt' | Out-Null
+    Qa $dir @('ondemand', 'hold-overwrite', 'b.txt', 'overwritten while held') | Out-Null
+    WaitFor { Log $dir | Where-Object { $_ -like '*on-demand: b.txt offered again*' } } 10000 'a held overwrite to be offered again' | Out-Null
+    Start-Sleep -Milliseconds 1500
+    if (Log $dir | Where-Object { $_ -like '*on-demand: b.txt changed here*' -or $_ -like '*on-demand: b.txt overwritten, not reported*' }) { Fail "a held overwrite was reported or given up: $((Log $dir | Select-Object -Last 5) -join ' | ')" }
+    Qa $dir @('ondemand', 'release') | Out-Null
+    WaitFor { Log $dir | Where-Object { $_ -like '*on-demand: b.txt changed here*' } } 15000 'the overwrite to be reported once let go' | Out-Null
+
+    # A lasting error.
+    Qa $dir @('ondemand', 'vanish', 'gone.txt') | Out-Null
+    WaitFor { Log $dir | Where-Object { $_ -like '*on-demand: gone.txt not added*' } } 10000 'a vanished file to fail at once' | Out-Null
+    Start-Sleep -Milliseconds 1500
+    $tries = @(Log $dir | Where-Object { $_ -like '*on-demand: gone.txt*' })
+    if ($tries.Count -ne 1) { Fail "a lasting error must be said once and never offered again: $($tries -join ' || ')" }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+  @()
+}
+
+# The failures: a big folder added "On all my devices" holds up the UI thread while it is added (the Mac froze on 914 GB
+# in 407 files, on demand for the other devices, 2026-11-06), and the Share dialog opening by itself after that add (the
+# user wants sharing from the right-click menu only). The same folder here, in sparse files, both PCs' watchdogs watching:
+# the Add's Start, the page after it, and B taking it up. And a PC downloading all of it: B must get placeholders, a working
+# Cloud Files root with nothing fetched and no "joined in full" on its page, which still works after a restart: a read
+# fetches, the system frees it again (B stays capped at 1 MB/s, a safety net for this disk). An add without "On all my
+# devices" still opens Share. Every stall the watchdog noted, short ones too, is printed.
+$checks.interactive = {
+  # The failure: a large folder's add leaves the app sluggish in its first seconds, in holds each too short for the watchdog
+  # (a report at 1 s), or a core lock held for seconds that the UI happens not to wait on. The same 914 GB as addbigfolder,
+  # added through the Add window on all my devices, on demand for the others, with B joining. A baseline of 10 s without an
+  # add, then 15 s from the press of Start, both apps cycling through every surface throughout. During the add: no beat over
+  # 100 ms outside the renderer's own captures, every surface command within 500 ms, every CLI round trip within 1 s, the core
+  # probe under 500 ms. A miss is a finding: the limits are the user's ask, not to be tuned. First the verdict itself is proved
+  # against a hold of the UI thread, a capture and a slow core answer.
+  function Verdict($report, $cli, [string]$who) {
+    $misses = @()
+    if ($report.ui.over100 -gt 0) { $misses += "$who beat of $($report.ui.max) ms (last action: $($report.ui.maxAction)), $($report.ui.over100) over 100 ms" }
+    $slow = @($report.commands | Where-Object { $_.ms -gt 500 })
+    foreach ($c in ($slow | Sort-Object ms -Descending | Select-Object -First 5)) { $misses += "$who surface command '$($c.name)' took $($c.ms) ms at $($c.at) s" }
+    if ($slow.Count -gt 5) { $misses += "$who $($slow.Count) surface commands over 500 ms in all" }
+    foreach ($c in @($report.commands | Where-Object { $_.result -like 'failed:*' -or $_.result -like 'not *' -or $_.result -like 'no *' })) { $misses += "$who surface command '$($c.name)' answered: $($c.result)" }
+    foreach ($c in @($cli | Where-Object { $_.ms -gt 1000 })) { $misses += "$who CLI $($c.what) took $($c.ms) ms at $($c.at) s" }
+    if ($report.core.max -ge 500) { $misses += "$who core probe of $($report.core.max) ms (last action: $($report.core.worst[0].action))" }
+    if ($report.core.failures -gt 0) { $misses += "$who core probe failed $($report.core.failures) times" }
+    $misses
+  }
+  function ReadReport([string]$file) { Get-Content $file -Raw -Encoding utf8 | ConvertFrom-Json }
+  function Worst($items) { if ($items) { ($items | Measure-Object -Maximum).Maximum } else { 0 } }
+  # A phase on both apps: probes, the cycle, and the CLI timed from outside until both cycles are over.
+  function Phase([string]$name, [double]$seconds, [string]$channel, [string]$firstOnA, [string]$folder, [scriptblock]$each) {
+    $words = @('interactive', 'cycle', "$seconds", "channel=$channel") + $(if ($folder) { @("folder=$folder") } else { @() })
+    Qa $a @('interactive', 'start') | Out-Null
+    Qa $b @('interactive', 'start') | Out-Null
+    Qa $b $words | Out-Null
+    Qa $a ($words + $(if ($firstOnA) { @("first=$firstOnA") } else { @() })) | Out-Null
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $cliA = New-Object Collections.ArrayList; $cliB = New-Object Collections.ArrayList
+    while ($clock.Elapsed.TotalSeconds -lt $seconds) {
+      foreach ($d in @{ list = $cliA; sock = "$a\state\control.sock"; who = 'A' }, @{ list = $cliB; sock = "$b\state\control.sock"; who = 'B' }) {
+        # (--version: the CLI's start alone, no connection: a slow sync list beside a slow --version is the process start.)
+        foreach ($what in @('status'), @('sync', 'list'), @('--version')) {
+          $at = $clock.Elapsed.TotalSeconds
+          $one = [Diagnostics.Stopwatch]::StartNew()
+          $said = & $Cli --socket $d.sock @what 2>&1 | Out-String
+          $d.list.Add([pscustomobject]@{ what = $what -join ' '; ms = [math]::Round($one.Elapsed.TotalMilliseconds); at = [math]::Round($at, 1); ok = ($LASTEXITCODE -eq 0) }) | Out-Null
+          if ($each) { & $each $d.who $what $said $at }
+        }
+      }
+    }
+    # A slow sync list: which call of the phase it was, and the CLI's start alone (--version) just before and after it.
+    foreach ($c in @{ who = 'A'; list = $cliA }, @{ who = 'B'; list = $cliB }) {
+      $all = @($c.list)
+      $lists = @($all | Where-Object { $_.what -eq 'sync list' })
+      for ($k = 0; $k -lt $lists.Count; $k++) {
+        if ($lists[$k].ms -lt 300) { continue }
+        $at = [array]::IndexOf($all, $lists[$k])
+        $versions = @($all[[math]::Max(0, $at - 3)..[math]::Min($all.Count - 1, $at + 3)] | Where-Object { $_.what -eq '--version' } | ForEach-Object { "$($_.ms) ms" })
+        $versionMax = @($all | Where-Object { $_.what -eq '--version' } | Measure-Object ms -Maximum).Maximum
+        Write-Host ("  interactive: {0} {1}: slow sync list, call {2} of {3}, {4} ms at {5} s; --version beside it: {6}; --version max in the phase {7} ms" -f $name, $c.who, ($k + 1), $lists.Count, $lists[$k].ms, $lists[$k].at, ($versions -join ', '), $versionMax)
+      }
+    }
+    foreach ($d in $a, $b) { WaitFor { (Qa $d @('interactive', 'done')) -match 'finished' } 30000 'the cycle to end' | Out-Null }
+    $ra = (Qa $a @('interactive', 'report', "$name-a") 20000); $rb = (Qa $b @('interactive', 'report', "$name-b") 20000)
+    foreach ($r in $ra, $rb) { if ($r -match 'no probe|failed') { Fail "the probe's report: $r" } }
+    Copy-Item "$a\state\qa\$name-a.json", "$b\state\qa\$name-b.json" $Out
+    @{ A = @{ report = ReadReport "$a\state\qa\$name-a.json"; cli = $cliA }; B = @{ report = ReadReport "$b\state\qa\$name-b.json"; cli = $cliB } }
+  }
+  function Row([string]$phase, [string]$who, $p) {
+    $r = $p.report; $worstCommand = $r.commands | Sort-Object ms -Descending | Select-Object -First 1
+    $status = Worst (@($p.cli | Where-Object { $_.what -eq 'status' }) | ForEach-Object { $_.ms })
+    $list = Worst (@($p.cli | Where-Object { $_.what -eq 'sync list' }) | ForEach-Object { $_.ms })
+    $version = Worst (@($p.cli | Where-Object { $_.what -eq '--version' }) | ForEach-Object { $_.ms })
+    "| $phase | $who | $($r.ui.beats) | $($r.ui.max) ($($r.ui.maxAction -replace '^qa ', '')) | $($r.ui.p99) | $($r.ui.over50) | $($r.ui.over100) | $($r.ui.own.beats) / $($r.ui.own.max) | $($r.commands.Count) | $($worstCommand.ms) ($($worstCommand.name)) | $(@($r.commands | Where-Object { $_.ms -gt 500 }).Count) | $status | $list | $version | $($r.core.calls) | $($r.core.max) | $($r.core.p99) |"
+  }
+
+  $a = New-State 'control'; $b = New-State 'control'
+  $movies = "$a\Movies"
+  New-Item -ItemType Directory -Force $movies | Out-Null
+  $size = [long](914GB / 407)
+  foreach ($i in 1..407) { [QaCloud]::Sparse(("$movies\Film {0:000}.mkv" -f $i), $size) }
+  'note text' | Set-Content -NoNewline "$movies\note.txt"
+  $pa = Start-App $a -QaControl
+  $env:SEEDWELL_QA_LIMIT_LAN = '1'
+  try { $pb = Start-App $b -QaControl } finally { Remove-Item Env:SEEDWELL_QA_LIMIT_LAN }
+  try {
+    WaitForSync $a; WaitForSync $b
+    & $Cli --socket "$b\state\control.sock" sync settings --down 1M 2>&1 | Out-Null
+    foreach ($d in $a, $b) {
+      & $Cli --socket "$d\state\control.sock" chat new 'QA-Live' | Out-Null
+      if ($LASTEXITCODE -ne 0) { Fail "the CLI could not make a channel (exit $LASTEXITCODE)" }
+      Qa $d @('window') | Out-Null
+    }
+
+    # The verdict sees what it is there to see: a hold of the UI thread under the watchdog's report, with what was done last;
+    # the same hold as a capture, said apart; a slow core answer. And none of them is a miss when it did not happen.
+    Qa $a @('interactive', 'start') | Out-Null
+    Qa $a @('hangwatch', 'hold', '250', '1') | Out-Null
+    Qa $a @('hangwatch', 'hold', '250', '1', 'capture') | Out-Null
+    Qa $a @('interactive', 'core-delay', '700') | Out-Null
+    WaitFor { Start-Sleep -Milliseconds 300; $true } 1000 'the core probe' | Out-Null
+    Qa $a @('interactive', 'report', 'proof') 20000 | Out-Null
+    $proof = ReadReport "$a\state\qa\proof.json"
+    $said = (Verdict $proof @([pscustomobject]@{ what = 'status'; ms = 1500; at = 0 }) 'proof') -join ' | '
+    if ($said -notmatch 'beat of .*hangwatch hold 250 1\)') { Fail "a hold of 250 ms is no miss, or not named: $said" }
+    if ($proof.ui.maxAction -match 'capture') { Fail "a capture counted against the verdict: $($proof.ui | ConvertTo-Json -Compress)" }
+    if ($proof.ui.own.max -lt 200) { Fail "the capture's hold is not said apart: $($proof.ui.own | ConvertTo-Json -Compress)" }
+    if ($said -notmatch 'core probe of') { Fail "a slow core answer is no miss: $said" }
+    if ($said -notmatch 'CLI status took') { Fail "a slow CLI answer is no miss: $said" }
+    if ($proof.ui.beats -lt 20) { Fail "the probe hardly ran: $($proof.ui.beats) beats" }
+    if ($proof.core.calls -lt 5) { Fail "the core probe hardly ran: $($proof.core.calls) calls" }
+
+    # Paired before the baseline, as the add will be: On all my devices needs another device, and the two phases differ by the add alone.
+    $link = [regex]::Match((Qa $a @('pair', 'link')), 'link (\S+) ;').Groups[1].Value
+    if (-not $link) { Fail 'A made no pairing link' }
+    Qa $b @('pair', 'join', $link) 30000 | Out-Null
+    WaitFor { $s = Qa $a @('pair', 'status'); if ($s -match 'requests 1') { $s } } 30000 'B asking to pair on A' | Out-Null
+    Qa $a @('pair', 'confirm') 30000 | Out-Null
+    WaitFor { $s = Qa $b @('pair', 'status'); if ($s -match 'devices Paired') { $s } } 30000 'B to be paired' | Out-Null
+
+    $base = Phase 'baseline' 10 'QA-Live' '' '' $null
+
+    Qa $a @('place', 'foldersync') | Out-Null
+    Qa $a @('add-folder', 'open') | Out-Null
+    Qa $a @('add-folder', 'folder', $movies) | Out-Null
+    Qa $a @('add-folder', 'ondemand', 'on') | Out-Null
+    $form = Qa $a @('add-folder', 'devices', 'on')
+    if ($form -notmatch 'all devices True enabled True') { Fail "On all my devices is not on: $form" }
+
+    $script:seenOnA = $null; $script:seenOnB = $null
+    $add = Phase 'add' 15 'QA-Live' 'add-folder,start' 'Movies' {
+      param($who, $what, $said, $at)
+      if ($what[0] -eq 'sync' -and $said -match 'Movies') {
+        if ($who -eq 'A' -and $null -eq $script:seenOnA) { $script:seenOnA = [math]::Round($at, 1) }
+        if ($who -eq 'B' -and $null -eq $script:seenOnB) { $script:seenOnB = [math]::Round($at, 1) }
+      }
+    }
+
+    # What the window covered: it proves nothing unless the add and B's taking it up happened in it.
+    $listed = WaitFor { $f = ((& $Cli --socket "$a\state\control.sock" sync list --json 2>&1) -join '' | ConvertFrom-Json).folders | Where-Object { $_.name -eq 'Movies' }; if ($f -and $f.files -ge 408) { $f } } 60000 'the films to be listed'
+    try { $placed = WaitFor { $s = Qa $b @('ondemand'); if ($s -match 'roots 1 \[\S+ connected True placed 408 files') { $s } } 60000 'B to place the films' }
+    catch { Fail "$_; B's log: $((Log $b | Select-Object -Last 12 | ForEach-Object { if ($_.Length -gt 300) { $_.Substring(0, 300) } else { $_ } }) -join ' | ')" }
+    if ($placed -match 'Film \d+\.mkv:f') { Fail "B fetched a film: $([regex]::Match($placed, 'Film \d+\.mkv:f').Value)" }
+
+    $table = @(
+      "Movies seen by the CLI after the cycle's start: A at $script:seenOnA s, B at $script:seenOnB s.",
+      '',
+      '| phase | app | beats | beat max ms (last action) | p99 | >50 | >100 | own captures beats / max | commands | command max ms | >500 | CLI status max | CLI sync list max | CLI --version max | core calls | core max | core p99 |',
+      '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|',
+      (Row 'baseline' 'A' $base.A), (Row 'add' 'A' $add.A), (Row 'baseline' 'B' $base.B), (Row 'add' 'B' $add.B)
+    )
+    foreach ($p in @{ n = 'baseline A'; r = $base.A.report }, @{ n = 'add A'; r = $add.A.report }, @{ n = 'baseline B'; r = $base.B.report }, @{ n = 'add B'; r = $add.B.report }) {
+      $table += ''
+      $table += "$($p.n), five worst beats: " + (($p.r.ui.worst | ForEach-Object { "$($_.ms) ms at $($_.at) s ($($_.action -replace '^qa ', ''), GC $($_.gc) ms)" }) -join '; ')
+      $table += "$($p.n), collector: $($p.r.gc | ConvertTo-Json -Compress)"
+      $table += "$($p.n), five worst core calls: " + (($p.r.core.worst | ForEach-Object { "$($_.ms) ms at $($_.at) s" }) -join '; ')
+      $table += "$($p.n), five slowest commands: " + (($p.r.commands | Sort-Object ms -Descending | Select-Object -First 5 | ForEach-Object { "$($_.name) $($_.ms) ms at $($_.at) s" }) -join '; ')
+    }
+    $table | Set-Content -Encoding utf8 "$Out\interactive.md"
+    $table | ForEach-Object { Write-Host "  $_" }
+
+    $misses = @(Verdict $add.A.report $add.A.cli 'A') + @(Verdict $add.B.report $add.B.cli 'B')
+    # The failure behind the pauses this check first found: what a surface made stays alive after it is left. Each visit to
+    # Settings made a page its own events and timer kept for good; every collection's pause grew with the visits, with no
+    # add at all (83 to 242 ms in a minute, the heap from 7 to 24 MB). One page for the run; the heap not several times over.
+    foreach ($d in @{ n = 'A'; dir = $a; base = $base.A; add = $add.A }, @{ n = 'B'; dir = $b; base = $base.B; add = $add.B }) {
+      $made = Qa $d.dir @('settings', 'made')
+      if ($made -notmatch 'made 1;') { $misses += "$($d.n) made more than one Settings page: $made" }
+      if ($d.add.report.gc.heapMb -gt [math]::Max(3 * $d.base.report.gc.heapMb, 12)) { $misses += "$($d.n) the heap grew from $($d.base.report.gc.heapMb) MB to $($d.add.report.gc.heapMb) MB: a surface stays alive after it is left" }
+    }
+    if ($null -eq $script:seenOnB) { $misses += "B did not have the folder within the window: the measure did not cover its taking it up" }
+    if ($misses) { Fail "$($misses.Count) misses: $($misses -join ' || ')" }
+  } finally {
+    Stop-App $b $pb
+    Stop-App $a $pa
+    Remove-Item -Recurse -Force $a, $b -ErrorAction SilentlyContinue
+  }
+  @()
+}
+
+$checks.addbigfolder = {
+  $a = New-State 'control'; $b = New-State 'control'
+  $movies = "$a\Movies"
+  New-Item -ItemType Directory -Force $movies, "$a\Plain" | Out-Null
+  $size = [long](914GB / 407)
+  foreach ($i in 1..407) { [QaCloud]::Sparse(("$movies\Film {0:000}.mkv" -f $i), $size) }
+  # Small enough to fetch at the cap.
+  'note text' | Set-Content -NoNewline "$movies\note.txt"
+  $sa = "$a\state\control.sock"
+  $pa = Start-App $a -QaControl
+  # B at 1 MB/s, the LAN too: however it takes the folder up, it never fills this disk with 914 GB.
+  $env:SEEDWELL_QA_LIMIT_LAN = '1'
+  try { $pb = Start-App $b -QaControl } finally { Remove-Item Env:SEEDWELL_QA_LIMIT_LAN }
+  try {
+    WaitForSync $a; WaitForSync $b
+    & $Cli --socket "$b\state\control.sock" sync settings --down 1M 2>&1 | Out-Null
+    Qa $a @('window') | Out-Null
+    Qa $b @('window') | Out-Null
+    $link = [regex]::Match((Qa $a @('pair', 'link')), 'link (\S+) ;').Groups[1].Value
+    if (-not $link) { Fail 'A made no pairing link' }
+    Qa $b @('pair', 'join', $link) 30000 | Out-Null
+    WaitFor { $s = Qa $a @('pair', 'status'); if ($s -match 'requests 1') { $s } } 30000 'B asking to pair on A' | Out-Null
+    Qa $a @('pair', 'confirm') 30000 | Out-Null
+    WaitFor { $s = Qa $b @('pair', 'status'); if ($s -match 'devices Paired') { $s } } 30000 'B to be paired' | Out-Null
+
+    Qa $a @('place', 'foldersync') | Out-Null
+    Qa $a @('add-folder', 'open') | Out-Null
+    Qa $a @('add-folder', 'folder', $movies) | Out-Null
+    Qa $a @('add-folder', 'ondemand', 'on') | Out-Null
+    $form = Qa $a @('add-folder', 'devices', 'on')
+    if ($form -notmatch 'all devices True enabled True') { Fail "On all my devices is not on: $form" }
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $started = Qa $a @('add-folder', 'start') 60000
+    Write-Host "  addbigfolder: Start answered after $($clock.ElapsedMilliseconds) ms"
+    if ($started -notmatch 'started') { Fail "the folder was not added: $started" }
+    if ($started -match 'share open') { Fail "the Share dialog opened by itself after an add on all my devices: $started" }
+    if (-not (Log $a | Where-Object { $_ -like '*add folder: added Movies*share after False*' })) { Fail "the core asked for Share after an add on all my devices: $((Log $a | Select-Object -Last 5) -join ' | ')" }
+    # The page goes on answering while the first scan runs, and B takes the folder up.
+    $listed = WaitFor {
+      Qa $a @('syncpage') | Out-Null
+      $f = ((& $Cli --socket $sa sync list --json 2>&1) -join '' | ConvertFrom-Json).folders | Where-Object { $_.name -eq 'Movies' }
+      if ($f -and $f.files -ge 408) { $f }
+    } 60000 'the films to be listed'
+    Write-Host "  addbigfolder: listed $($listed.files) files after $($clock.ElapsedMilliseconds) ms"
+    $sb = "$b\state\control.sock"
+    function HostOfB { Qa $b @('ondemand') }
+    function NoFilms([string]$line) { if ($line -match 'Film \d+\.mkv:f') { Fail "B fetched a film: $([regex]::Match($line, 'Film \d+\.mkv:f').Value)" } }
+    try { $placed = WaitFor { $s = HostOfB; if ($s -match 'roots 1 \[\S+ connected True placed 408 files') { $s } } 60000 'B to place the films' }
+    catch { Fail "$_; B's host: $((HostOfB) -replace ' files \[.*$', ' files'); B's folders: $((& $Cli --socket $sb sync list 2>&1) -join ' | '); B's log: $((Log $b | Select-Object -Last 6) -join ' | ')" }
+    Write-Host "  addbigfolder: B placed them after $($clock.ElapsedMilliseconds) ms: $($placed -replace '^.*qa ondemand: ', '' -replace ' files \[.*$', ' files')"
+    NoFilms $placed
+    $onB = ((& $Cli --socket $sb sync list --json 2>&1) -join '' | ConvertFrom-Json).folders | Where-Object { $_.name -eq 'Movies' }
+    if (-not $onB.on_demand) { Fail "B has the folder in full: $($onB | ConvertTo-Json -Compress)" }
+    if (($onB.issues | ConvertTo-Json -Compress) -match 'in full') { Fail "B's page says it joined in full: $($onB.issues | ConvertTo-Json -Compress)" }
+    # Both apps go on answering while B works on it.
+    foreach ($i in 1..5) { Qa $a @('syncpage') | Out-Null; Qa $b @('place', 'foldersync') | Out-Null; Qa $b @('sync-flyout', 'open') | Out-Null }
+    if ((Qa $a @('share', 'status')) -notmatch 'not open') { Fail 'the Share dialog is open after the add on all my devices' }
+
+    # A working root after a restart: nothing placed twice, a read fetches, the system frees it again, nothing else came.
+    Stop-App $b $pb
+    $env:SEEDWELL_QA_LIMIT_LAN = '1'
+    try { $pb = Start-App $b -QaControl } finally { Remove-Item Env:SEEDWELL_QA_LIMIT_LAN }
+    WaitForSync $b
+    try { WaitFor { (HostOfB) -match 'roots 1 \[\S+ connected True placed 408 files' } 30000 'the root again after a restart' | Out-Null }
+    catch { Fail "$_; B's host: $((HostOfB) -replace ' files \[.*$', ' files'); B's log: $((Log $b | Select-Object -Last 6) -join ' | ')" }
+    # B's connection to A comes back by itself (a read waits for it, within its time limit).
+    $read = WaitFor { $r = Qa $b @('ondemand', 'read', 'note.txt') 60000; if ($r -match 'read "note text"') { $r } } 60000 'the note to be fetched after the restart'
+    if ($read -notmatch 'note\.txt:f') { Fail "the note is not filled: $($read -replace ' files \[.*note', ' files [... note')" }
+    $place = (((& $Cli --socket $sb sync list --json 2>&1) -join '' | ConvertFrom-Json).folders | Where-Object { $_.name -eq 'Movies' }).path
+    WaitFor { Log $b | Where-Object { $_ -like '*on-demand: note.txt filled (*' } } 5000 'the core to adopt the note' | Out-Null
+    # (Refused as not in sync for a moment: the host marks it just after it says "filled". One that stays so fails here.)
+    try { WaitFor { $script:freed = CfDehydrate "$place\note.txt"; $script:freed -eq 'freed' } 10000 'the system to free the note' | Out-Null }
+    catch { Fail "the system could not free the note: $script:freed" }
+    WaitFor { (HostOfB) -match 'note\.txt:pU?\b' } 10000 'the note to be freed' | Out-Null
+    NoFilms (HostOfB)
+
+    # Without On all my devices: the Share dialog still opens.
+    Qa $a @('add-folder', 'open') | Out-Null
+    Qa $a @('add-folder', 'folder', "$a\Plain") | Out-Null
+    $form = Qa $a @('add-folder', 'devices', 'off')
+    if ($form -notmatch 'all devices False') { Fail "On all my devices is not off: $form" }
+    Qa $a @('add-folder', 'start') 30000 | Out-Null
+    WaitFor { (Qa $a @('share', 'status')) -notmatch 'not open' } 10000 'the Share dialog after an add without On all my devices' | Out-Null
+    if (-not (Log $a | Where-Object { $_ -like '*add folder: added Plain*share after True*' })) { Fail 'the core did not ask for Share after a plain add' }
+    Qa $a @('share', 'cancel') | Out-Null
+    foreach ($d in @{ n = 'A'; dir = $a }, @{ n = 'B'; dir = $b }) {
+      $stalls = @(Log $d.dir | Where-Object { $_ -like '*ui stall:*' -or $_ -like '*ui stutter:*' })
+      Write-Host "  addbigfolder: $($d.n) noted $($stalls.Count) stalls$(if ($stalls) { ': ' + ($stalls -join ' || ') })"
+      Log $d.dir | Where-Object { $_ -like '*launch: on the UI thread*' -or $_ -like '*on-demand folders:*' -or $_ -like '*launch: core ready*' -or $_ -like '*ui stall:*' -or $_ -like '*tray: icon*' } | ForEach-Object { Write-Host "    $($d.n) $_" }
+    }
+  } finally {
+    Stop-App $b $pb
+    Stop-App $a $pa
+    Remove-Item -Recurse -Force $a, $b -ErrorAction SilentlyContinue
+  }
+  @()
+}
+
+# The failure: a syncing folder's time left is cut or runs under the buttons in the tray's Folder Sync rows. A real sync
+# between two temp states at 1 MB/s: the row says the core's time left, whole, with the pointer on it too (the Edit and
+# Delete buttons shown), and in a picture.
+$checks.timeleft = {
+  $a = New-State 'full'; $b = New-State 'full'
+  $docs = "$a\Docs"
+  New-Item -ItemType Directory -Force $docs | Out-Null
+  $bytes = New-Object byte[] (2MB)
+  $random = New-Object Random 11
+  foreach ($i in 1..40) { $random.NextBytes($bytes); [IO.File]::WriteAllBytes("$docs\part$i.bin", $bytes) }
+  $sa = "$a\state\control.sock"; $sb = "$b\state\control.sock"
+  $pa = Start-App $a -QaControl
+  $pb = $null
+  $pictures = @()
+  try {
+    $env:SEEDWELL_QA_LIMIT_LAN = '1'
+    try { $pb = Start-App $b -QaControl } finally { Remove-Item Env:SEEDWELL_QA_LIMIT_LAN }
+    WaitForSync $a; WaitForSync $b
+    & $Cli --socket $sb sync settings --down 1M 2>&1 | Out-Null
+    $added = (& $Cli --socket $sa sync add $docs 2>&1) -join ' '
+    if ($added -notlike 'Sharing Docs*') { throw "sync add: $added" }
+    $link = ((& $Cli --socket $sa sync share Docs --json 2>&1) -join '' | ConvertFrom-Json).link
+    $joined = ($link | & $Cli --socket $sb sync join - --to "$b\state\Sync\Docs" 2>&1) -join ' '
+    if ($joined -notlike 'Joining Docs*') { throw "sync join: $joined" }
+    Qa $b @('window') | Out-Null
+    try { $line = WaitFor { $r = Qa $b @('sync-flyout', 'open'); if ($r -match '"[^"]*\d (sec|min|hour)[^"]* left"') { $r } } 60000 'a syncing row with its time left' }
+    catch { Fail "$_; last: $(Qa $b @('sync-flyout', 'status')); sync list: $((& $Cli --socket $sb sync list 2>&1) -join ' | ')" }
+    Write-Host "  timeleft: $($line -replace '^.*qa sync-flyout open: ', '' -replace '; place .*$', '')"
+    if ($line -match 'trimmed True') { Fail "the row's line is cut: $line" }
+    Qa $b @('sync-flyout', 'shot', 'sync-time-left') | Out-Null
+    Copy-Item "$b\state\qa\sync-time-left.png" "$Out\sync-time-left.png"
+    $pictures += "$Out\sync-time-left.png"
+    $hover = Qa $b @('sync-flyout', 'hover', 'on')
+    if ($hover -notmatch 'hover True') { Fail "the row is not hovered: $hover" }
+    if ($hover -notmatch 'buttons shown True') { Fail "the row's buttons do not show under the pointer: $hover" }
+    if ($hover -match 'trimmed True|over it True') { Fail "the row's line is cut, or under the Edit and Delete buttons: $hover" }
+    Qa $b @('sync-flyout', 'shot', 'sync-time-left-hover') | Out-Null
+    Copy-Item "$b\state\qa\sync-time-left-hover.png" "$Out\sync-time-left-hover.png"
+    $pictures += "$Out\sync-time-left-hover.png"
+    Write-Host "  timeleft: hover: $($hover -replace '^.*qa sync-flyout hover on: ', '' -replace '; place .*$', '')"
+  } finally {
+    if ($pb) { Stop-App $b $pb }
+    Stop-App $a $pa
+    Remove-Item -Recurse -Force $a, $b -ErrorAction SilentlyContinue
+  }
+  $pictures
+}
+
+# The failures: the UI thread held up again and again in stalls each under a second, the app frozen for the user while the
+# watchdog says nothing; a run failing as a stutter while it only draws its pictures, or the exclusion hiding the app's own
+# stutter. The detector's promises (ported from the Mac's tests), then the real watchdog: holds of 800 ms that are the
+# renderer's captures pass, the same holds that are not fail the run with the core's stutter line, and never as a stall.
+$checks.hangwatch = {
+  $dir = New-State
+  $p = Start-App $dir -QaControl
+  try {
+    $self = Qa $dir @('hangwatch', 'selftest')
+    if ($self -notmatch 'detector ok') { Fail "the detector: $self" }
+    Qa $dir @('hangwatch', 'hold', '800', '8', 'capture') 30000 | Out-Null
+    $any = @(Log $dir | Where-Object { $_ -like '*ui stutter:*' })
+    if ($any) { Fail "the renderer's captures were said as a stutter: $($any -join ' || ')" }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+
+  $dir = New-State
+  $p = Start-App $dir -QaControl
+  try {
+    Qa $dir @('hangwatch', 'hold', '800', '8') 30000 | Out-Null
+    $line = WaitFor { Log $dir | Where-Object { $_ -like '*ui stutter:*this run fails*' } | Select-Object -First 1 } 5000 'the stutter to fail the run'
+    if ($line -notmatch 'busy for [\d.]+ s of 3\.0 s in short stalls \(last action: qa hangwatch hold 800 8\)') { Fail "the stutter's line: $line" }
+    $stalls = @(Log $dir | Where-Object { $_ -like '*ui stall:*this run fails*' })
+    if ($stalls) { Fail "a hold failed as a stall: $($stalls -join ' || ')" }
+  } finally {
+    # This run is meant to have failed: Stop-App would say so.
+    if (-not $p.HasExited) { Launch $dir @('--quit') | Out-Null; if (-not $p.WaitForExit(30000)) { $p.Kill() } }
+    Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+  }
+  @()
+}
+
+# The failures: opening Share reads the folder's status on the UI thread (the Mac stuttered on it after a 914 GB add); Extend
+# reading every folder on the UI thread; an open dialog redrawing each minute for nothing, or closing an open drop-down. The
+# form is made to take 3 s (SEEDWELL_QA_SLOW_SHARE_FORM_MS, isolated runs only), past the watchdog's fail_ms: the dialog is
+# there at once, opening, with no Copy Link, then real. Extend adds to the period. A refresh that finds nothing changed draws
+# nothing; a change made elsewhere is drawn, but not while a drop-down is open.
+$checks.shareopening = {
+  $dir = New-State 'control'
+  New-Item -ItemType Directory -Force "$dir\Shared" | Out-Null
+  $sock = "$dir\state\control.sock"
+  $env:SEEDWELL_QA_SLOW_SHARE_FORM_MS = '3000'
+  try { $p = Start-App $dir -QaControl } finally { Remove-Item env:SEEDWELL_QA_SLOW_SHARE_FORM_MS -ErrorAction SilentlyContinue }
+  $pictures = @()
+  try {
+    WaitForSync $dir
+    & $Cli --socket $sock sync add "$dir\Shared" | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "the CLI could not add a folder (exit $LASTEXITCODE)" }
+    Qa $dir @('window') | Out-Null
+    $open = Qa $dir @('share', 'open', 'Shared', 'nowait')
+    if ($open -notmatch 'opening True') { Fail "the dialog is not opening: $open" }
+    Qa $dir @('shot', 'share-opening', 'dialog') | Out-Null
+    Copy-Item "$dir\state\qa\share-opening.png" "$Out\share-opening.png"
+    $pictures += "$Out\share-opening.png"
+    $real = WaitFor { $s = Qa $dir @('share', 'status'); if ($s -match 'opening False') { $s } } 10000 'the form to be read'
+    if ($real -notmatch 'copy Copy Link') { Fail "no Copy Link once open: $real" }
+
+    # Extend, as its menu does: 7 days more.
+    Qa $dir @('share', 'for', '7') | Out-Null
+    function DaysLeft([string]$line) { $m = [regex]::Match($line, 'sharing "[^"]*?(\d+) days'); if ($m.Success) { [int]$m.Groups[1].Value } else { -1 } }
+    $seven = WaitFor { $s = Qa $dir @('share', 'status'); if ((DaysLeft $s) -ge 6) { $s } } 10000 'a sharing period of 7 days'
+    Qa $dir @('share', 'extend', '7') | Out-Null
+    try { WaitFor { $s = Qa $dir @('share', 'status'); if ((DaysLeft $s) -ge (DaysLeft $seven) + 6) { $s } } 10000 'the period to be extended' | Out-Null }
+    catch { Fail "$_; before: $seven; now: $(Qa $dir @('share', 'status'))" }
+
+    # Nothing changed: nothing drawn.
+    function Draws([string]$line) { [int][regex]::Match($line, 'draws (\d+)').Groups[1].Value }
+    $before = Draws (Qa $dir @('share', 'status'))
+    Qa $dir @('share', 'refresh') | Out-Null
+    $after = Draws (Qa $dir @('share', 'status'))
+    # (The countdown's words may change on a minute's turn: one drawing at most, then none.)
+    if ($after -gt $before + 1) { Fail "a refresh drew $($after - $before) times" }
+    $before = $after
+    Qa $dir @('share', 'refresh') | Out-Null
+    $after = Draws (Qa $dir @('share', 'status'))
+    if ($after -ne $before) { Fail "a refresh that found nothing changed drew $($after - $before) times" }
+
+    # A change made elsewhere, with a drop-down open: it stays open, and the change is drawn once it closes.
+    $said = Qa $dir @('share', 'dropdown', 'open')
+    if ($said -notmatch 'menu open True') { Fail "the drop-down did not open: $said" }
+    & $Cli --socket $sock sync read-only Shared on 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "the CLI could not set Read only (exit $LASTEXITCODE)" }
+    Qa $dir @('share', 'refresh') | Out-Null
+    $held = Qa $dir @('share', 'status')
+    if ($held -notmatch 'menu open True') { Fail "a refresh closed the open drop-down: $held" }
+    if ((Draws $held) -ne $after) { Fail "a refresh drew under an open drop-down: $held" }
+    Qa $dir @('share', 'dropdown', 'close') | Out-Null
+    try { WaitFor { $s = Qa $dir @('share', 'status'); if ($s -match 'read only True') { $s } } 10000 'the change made elsewhere to be drawn' | Out-Null }
+    catch { Fail "$_; now: $(Qa $dir @('share', 'status'))" }
+
+    # A tooltip open over the dialog (the pointer's, or the keyboard focus's, at any moment): the shot is of the dialog. It
+    # took share.png and new-channel.png in some full runs: a tooltip is a popup with a size, and draws as nothing.
+    Qa $dir @('share', 'tooltip', 'open') | Out-Null
+    $said = Qa $dir @('shot', 'share-tooltip', 'dialog')
+    if (-not (Test-Path "$dir\state\qa\share-tooltip.png")) { Fail "no picture with a tooltip open: $said" }
+    if ((Get-Item "$dir\state\qa\share-tooltip.png").Length -lt 5000) { Fail "the picture is of the tooltip, not the dialog: $said" }
+    Qa $dir @('share', 'tooltip', 'close') | Out-Null
+
+    # A redraw keeps the keyboard's place: a change made elsewhere, drawn by a refresh, with a switch focused.
+    $said = Qa $dir @('share', 'focus', 'Single')
+    if ($said -notmatch 'focused' -or $said -notmatch 'focus "ToggleSwitch Single use"') { Fail "the switch did not take the focus: $said" }
+    & $Cli --socket $sock sync read-only Shared off 2>&1 | Out-Null
+    Qa $dir @('share', 'refresh') | Out-Null
+    $kept = Qa $dir @('share', 'status')
+    if ($kept -notmatch 'read only False') { Fail "the refresh did not draw the change: $kept" }
+    if ($kept -notmatch 'focus "ToggleSwitch Single use"') { Fail "a redraw lost the keyboard's place: $kept" }
+    Qa $dir @('share', 'cancel') | Out-Null
+
+    # A folder not synced yet opens the same way: at once, opening, then real.
+    New-Item -ItemType Directory -Force "$dir\To Share" | Out-Null
+    Launch $dir @('--share', "$dir\To Share") | Out-Null
+    $new = WaitFor { $s = Qa $dir @('share', 'status'); if ($s -notmatch 'not open') { $s } } 5000 'the Share dialog of a new folder'
+    if ($new -notmatch 'opening True') { Fail "a new folder's dialog is not opening: $new" }
+    $real = WaitFor { $s = Qa $dir @('share', 'status'); if ($s -match 'opening False') { $s } } 10000 'the new folder''s form to be read'
+    if ($real -notmatch 'copy Copy Link') { Fail "no Copy Link once open: $real" }
+    Qa $dir @('share', 'cancel') | Out-Null
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+  $pictures
+}
+
+# The failures: a click that starts another program holds the UI thread while the shell takes its time (Explorer busy, a
+# handler asking), and the start reading the disk on it. A start is made to take 3 s (SEEDWELL_QA_SLOW_SHELL_MS, isolated runs
+# only), past the watchdog's fail_ms: it passes only off the UI thread. The source is scanned so that a new Process.Start on
+# the UI thread cannot come back unseen. What the start read off the UI thread reaches the app: the groups folded before.
+$checks.shellstarts = {
+  $direct = @(Get-ChildItem $App -Filter *.cs | Where-Object { $_.Name -ne 'Shell.cs' } | Select-String -Pattern 'Process\.Start\(' -SimpleMatch:$false |
+    Where-Object { $_.Line -notmatch 'Task\.Run|reachStart' } | ForEach-Object { "$($_.Filename):$($_.LineNumber)" })
+  if ($direct) { Fail "a program started on the UI thread (use Shell.Start, or Task.Run): $($direct -join ', ')" }
+  $dir = New-State
+  'QA-Folded' | Set-Content -Encoding ascii "$dir\state\app-windows-folds.txt"
+  $env:SEEDWELL_QA_SLOW_SHELL_MS = '3000'
+  try { $p = Start-App $dir -QaControl } finally { Remove-Item env:SEEDWELL_QA_SLOW_SHELL_MS -ErrorAction SilentlyContinue }
+  try {
+    $reads = Qa $dir @('start-reads')
+    if ($reads -notmatch 'folds \[QA-Folded\]') { Fail "the folds read off the UI thread did not reach the app: $reads" }
+    Qa $dir @('shell-start') | Out-Null
+    WaitFor { Log $dir | Where-Object { $_ -like '*shell: started cmd.exe*' } } 10000 'the program to start' | Out-Null
+    # The installer's start too: off the UI thread, and it still says whether it ran (Install's failure hangs on it).
+    $ok = Qa $dir @('update-start', 'ok') 20000
+    if ($ok -notmatch 'started True') { Fail "the detached start: $ok" }
+    $bad = Qa $dir @('update-start', 'bad') 20000
+    if ($bad -notmatch 'started False') { Fail "a detached start of no program: $bad" }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+  @()
+}
+
+# The failure: a pasted link that can never be joined. The core no longer looks at the disk when it is given a link: it says
+# the places are pending, and Start stays off until the host has read them (Core.SyncAddPlaces). A host that does not read them
+# leaves the location empty for ever. With a real link, both ways in (opened with the link, and pasted): Start is on, and the
+# place is under this PC's default location.
+$checks.addlink = {
+  $a = New-State 'full'; $b = New-State 'control'
+  New-Item -ItemType Directory -Force "$a\Docs" | Out-Null
+  $sa = "$a\state\control.sock"
+  $pa = Start-App $a -QaControl
+  $pb = Start-App $b -QaControl
+  try {
+    WaitForSync $a; WaitForSync $b
+    $added = (& $Cli --socket $sa sync add "$a\Docs" 2>&1) -join ' '
+    if ($added -notlike 'Sharing Docs*') { throw "sync add: $added" }
+    $link = ((& $Cli --socket $sa sync share Docs --json 2>&1) -join '' | ConvertFrom-Json).link
+    if (-not $link) { Fail 'A made no link' }
+    Qa $b @('window') | Out-Null
+    function Placed([string]$how, [string]$line) {
+      if ($line -notmatch 'can start True') { Fail "$how a real link, Start is off: $line" }
+      $at = [regex]::Match($line, 'location "([^"]*)"').Groups[1].Value
+      if (-not $at.StartsWith("$b\state", [StringComparison]::OrdinalIgnoreCase)) { Fail "$how a real link, the place is not under the default location: '$at'; $line" }
+    }
+    Placed 'opened with' (Qa $b @('add-folder', 'open', $link))
+    Qa $b @('add-folder', 'cancel') | Out-Null
+    Qa $b @('add-folder', 'open') | Out-Null
+    Qa $b @('add-folder', 'mode', 'shared') | Out-Null
+    Placed 'pasted' (Qa $b @('add-folder', 'link', $link))
+    Qa $b @('add-folder', 'cancel') | Out-Null
+    # Typed: its places arrive while the user types, and never take the focus or move the caret.
+    Qa $b @('add-folder', 'open') | Out-Null
+    Qa $b @('add-folder', 'mode', 'shared') | Out-Null
+    $typed = Qa $b @('add-folder', 'typing', '5', $link)
+    Placed 'typed' $typed
+    if ($typed -notmatch 'focus "TextBox caret 5"') { Fail "the places took the focus from the link being typed: $typed" }
+    Qa $b @('add-folder', 'cancel') | Out-Null
+  } finally {
+    Stop-App $b $pb
+    Stop-App $a $pa
+    Remove-Item -Recurse -Force $a, $b -ErrorAction SilentlyContinue
+  }
+  @()
+}
+
+# The failure: a dialog drawing itself anew on each key takes the focus from the box being typed in, so a name can't be typed.
+# Edit's and New Channel's names, the caret left in the middle.
+$checks.dialogfocus = {
+  $dir = New-State 'control'
+  New-Item -ItemType Directory -Force "$dir\Shared" | Out-Null
+  $p = Start-App $dir -QaControl
+  try {
+    WaitForSync $dir
+    & $Cli --socket "$dir\state\control.sock" sync add "$dir\Shared" | Out-Null
+    Qa $dir @('window') | Out-Null
+    Qa $dir @('edit-folder', 'open', 'Shared') | Out-Null
+    $edit = Qa $dir @('edit-folder', 'typing', '2', 'Renamed')
+    if ($edit -notmatch 'focus "TextBox caret 2"') { Fail "typing in Edit's name lost the focus or the caret: $edit" }
+    Qa $dir @('edit-folder', 'cancel') | Out-Null
+    Qa $dir @('new-channel', 'open') | Out-Null
+    $new = Qa $dir @('new-channel', 'typing', '2', 'Family')
+    if ($new -notmatch 'focus "TextBox caret 2"') { Fail "typing in New Channel's name lost the focus or the caret: $new" }
+    Qa $dir @('new-channel', 'mode', 'join') | Out-Null
+    $link = Qa $dir @('new-channel', 'typing-link', '2', 'seedwell')
+    if ($link -notmatch 'focus "TextBox caret 2"') { Fail "typing in New Channel's link lost the focus or the caret: $link" }
+    Qa $dir @('new-channel', 'cancel') | Out-Null
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+  @()
+}
+
+# The failure: a surface that draws itself anew takes the keyboard from the control the user is on. The guard, so a new surface
+# cannot regress: every dialog and Settings tab, each of its text boxes, password boxes and links and the first of each other
+# kind of control focused, a redraw forced, the same one must still have it. Every surface is walked before it says what lost it.
+$checks.focuswalk = {
+  $dir = New-State 'full'
+  New-Item -ItemType Directory -Force "$dir\Shared" | Out-Null
+  $p = Start-App $dir -QaControl
+  $lost = [System.Collections.Generic.List[string]]::new()
+  function Walk([string]$surface) {
+    $said = (Qa $dir @('focuswalk', $surface) 180000) -replace '^.*qa focuswalk [^:]*: ', '' -replace '; place .*$', ''
+    Write-Host "  focuswalk ${surface}: $($said.Substring(0, [Math]::Min(1100, $said.Length)))"
+    if ($said -notmatch 'walk [1-9]') { $lost.Add("${surface}: nothing walked: $said") }
+    foreach ($m in [regex]::Matches($said, '(\w+: )?walk \d+ controls, lost [1-9]\d* \[[^\]]*\]')) { $lost.Add("${surface}: $($m.Value)") }
+  }
+  try {
+    WaitForSync $dir
+    & $Cli --socket "$dir\state\control.sock" sync add "$dir\Shared" | Out-Null
+    Qa $dir @('window') | Out-Null
+    Walk 'settings'
+    # A refresh with a drop-down open: it stays open (drawing makes the controls anew, which would close it).
+    Qa $dir @('settings', 'tab', 'General') | Out-Null
+    if ((Qa $dir @('settings', 'dropdown', 'open')) -notmatch 'dropdown open True') { $lost.Add('settings: the drop-down did not open') }
+    $still = Qa $dir @('settings', 'redraw')
+    if ($still -notmatch 'dropdown open True') { $lost.Add('settings: a refresh closed an open drop-down') }
+    Qa $dir @('settings', 'dropdown', 'close') | Out-Null
+    Qa $dir @('place', 'foldersync') | Out-Null
+    Qa $dir @('add-folder', 'open') | Out-Null
+    Walk 'add'
+    Qa $dir @('add-folder', 'mode', 'shared') | Out-Null
+    Walk 'add'
+    Qa $dir @('add-folder', 'cancel') | Out-Null
+    Qa $dir @('edit-folder', 'open', 'Shared') | Out-Null
+    Walk 'edit'
+    Qa $dir @('edit-folder', 'cancel') | Out-Null
+    Qa $dir @('share', 'open', 'Shared') | Out-Null
+    Walk 'share'
+    Qa $dir @('share', 'cancel') | Out-Null
+    Qa $dir @('new-channel', 'open') | Out-Null
+    Walk 'new-channel'
+    Qa $dir @('new-channel', 'mode', 'join') | Out-Null
+    Walk 'new-channel'
+    Qa $dir @('new-channel', 'cancel') | Out-Null
+    Qa $dir @('proxy-window', 'open') | Out-Null
+    Qa $dir @('proxy-window', 'guide', 'on') | Out-Null
+    Walk 'proxy'
+    Qa $dir @('proxy-window', 'close') | Out-Null
+    if ($lost.Count -gt 0) { Fail "the keyboard's place was lost: $($lost -join ' || ')" }
+  } finally { Stop-App $dir $p; Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+  @()
+}
+
 # A core that cannot start never leaves the app running without one: a temp state whose database cannot be opened (a
 # folder where state.redb belongs; garbage in the file is not enough, the core moves that aside) ends the run with the core's sentence and the ways out the core offers (recovery_actions; the user's app
 # shows them in its alert, an isolated run logs them), within seconds.
@@ -1999,6 +3187,19 @@ $checks.chooser = {
     # Back, so Start has something to start.
     Qa $dir @('chooser', 'toggle', $first) | Out-Null
 
+    # The guard's walk, in the two surfaces only a held torrent opens.
+    foreach ($surface in 'chooser', 'starting') {
+      $said = (Qa $dir @('focuswalk', $surface) 60000) -replace '^.*qa focuswalk [^:]*: ', '' -replace '; place .*$', ''
+      Write-Host "  chooser: focuswalk ${surface}: $said"
+      if ($said -notmatch 'walk [1-9]' -or $said -notmatch 'lost 0') { Fail "focuswalk ${surface}: $said" }
+    }
+    # A change from another surface redraws the chooser: the keyboard stays where it was.
+    $was = [regex]::Match((Qa $dir @('chooser', 'focus-first')), 'focus "[^"]*"').Value
+    if ($was -eq '' -or $was -eq 'focus "none"') { Fail "nothing in the chooser took the focus: $was" }
+    Qa $dir @('chooser', 'toggle', $first) | Out-Null
+    $now = [regex]::Match((Qa $dir @('chooser', 'focused')), 'focus "[^"]*"').Value
+    if ($now -ne $was) { Fail "a change from elsewhere moved the keyboard in the chooser: $was, then $now" }
+    Qa $dir @('chooser', 'toggle', $first) | Out-Null
     $started = Qa $dir @('chooser', 'start')
     WaitFor { -not ((List $dir) -join ' ' -match 'awaiting-choice') } 10000 'Start to start the torrent' | Out-Null
     WaitFor { (Qa $dir @('chooser', 'status')) -match 'no chooser open' } 5000 'the chooser to close' | Out-Null
@@ -2232,7 +3433,11 @@ $checks.ondemandfetch = {
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $read = Qa $b @('ondemand', 'read', 'small.txt') 30000
     if ($clock.Elapsed.TotalSeconds -gt 10) { throw "the read with A gone took $([int]$clock.Elapsed.TotalSeconds) s to fail" }
-    if ($read -notmatch 'read failed: The cloud sync provider failed to perform the operation due to network being unavailable\..*small\.txt:p') { throw "read small.txt with A gone: $read" }
+    if ($read -notmatch 'read failed: The cloud sync provider failed to perform the operation due to network being unavailable\.') { throw "read small.txt with A gone: $read" }
+    # Not left looking filled. The system clears the file's recall bit for under 1 ms as a failed fetch ends (seen from
+    # another process), so the line above may catch it clear: what counts is where it comes to rest.
+    try { WaitFor { (Qa $b @('ondemand')) -match 'small\.txt:p' } 5000 'small.txt to be a placeholder again' | Out-Null }
+    catch { throw "$_; after the failed read: $read; now: $(Qa $b @('ondemand'))" }
     $told = @(Log $b | Where-Object { $_ -match 'notice: SyncProblem: .small\.txt. isn.t here yet' })
     if ($told.Count -ne 1) { throw "the not-here-yet notice was posted $($told.Count) times: $($told -join ' || ')" }
     if (-not @(Log $b | Where-Object { $_ -like '*on-demand fetch of * failed (NotHereYet)*' })) { throw 'no failed fetch in the log' }

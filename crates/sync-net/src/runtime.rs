@@ -11,14 +11,14 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
-use trs_fswatch::aggregate::{Aggregator, Batch};
-use trs_fswatch::{RawEvent, WatchOptions};
-use trs_sync::clock::SystemClock;
-use trs_sync::folder::FolderCore;
-use trs_sync::global::Need;
-use trs_sync::pull::PullReport;
-use trs_sync::scan::{ScanError, ScanJob, ScanReport};
-use trs_sync_proto::ids::ShortId;
+use seedwell_fswatch::aggregate::{Aggregator, Batch};
+use seedwell_fswatch::{RawEvent, WatchOptions};
+use seedwell_sync::clock::SystemClock;
+use seedwell_sync::folder::FolderCore;
+use seedwell_sync::global::Need;
+use seedwell_sync::pull::PullReport;
+use seedwell_sync::scan::{ScanError, ScanJob, ScanReport};
+use seedwell_sync_proto::ids::ShortId;
 
 use crate::shared::{Ctx, FolderShared, PENDING_SAMPLE, lock};
 use crate::source::NetSource;
@@ -59,7 +59,7 @@ fn wire(rel: &Path) -> Option<String> {
     let mut parts = Vec::new();
     for c in rel.components() {
         match c {
-            std::path::Component::Normal(n) => parts.push(trs_sync::path::wire_name(n.to_str()?)),
+            std::path::Component::Normal(n) => parts.push(seedwell_sync::path::wire_name(n.to_str()?)),
             _ => return None,
         }
     }
@@ -182,7 +182,7 @@ async fn next_event(rx: &mut Option<mpsc::Receiver<RawEvent>>) -> Option<RawEven
 /// watcher and stops it when the runtime drops the receiving end. False when the watcher could not start
 /// (the hourly scan then keeps the folder right on its own).
 fn start_watcher(root: &Path, tx: mpsc::Sender<RawEvent>) -> bool {
-    let Ok(w) = trs_fswatch::watch(root, WatchOptions::default()) else { return false };
+    let Ok(w) = seedwell_fswatch::watch(root, WatchOptions::default()) else { return false };
     std::thread::Builder::new()
         .name("seedwell-sync-watch".into())
         .spawn(move || {
@@ -334,7 +334,7 @@ async fn pull(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, retry: &mut Option<(Instant
             for _ in 0..MAX_ROUNDS {
                 // (Tests: a round late under load, a finished download waiting for it.)
                 let late = *lock(&ctx2.place_wait);
-                if !late.is_zero() && trs_sync::lazy::lock(&f2.jobs).any_finished() {
+                if !late.is_zero() && seedwell_sync::lazy::lock(&f2.jobs).any_finished() {
                     std::thread::sleep(late);
                 }
                 // The core is held for one round at a time (each round's records are committed at its end): a peer's
@@ -386,7 +386,7 @@ async fn pull(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, retry: &mut Option<(Instant
             let mut live = lock(&f.live);
             live.fetched += report.fetched_bytes;
             for copy in &report.conflicts {
-                if let Some(c) = trs_sync::conflict::parse_conflict(copy) {
+                if let Some(c) = seedwell_sync::conflict::parse_conflict(copy) {
                     live.conflicts.insert(copy.clone(), c.original);
                 }
             }
@@ -418,17 +418,17 @@ async fn pull(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, retry: &mut Option<(Instant
     settle(f).await;
 }
 
-/// Queues the jobs the pull rounds want done with the folder's core let go ([`trs_sync::lazy::Job`]: streams of
+/// Queues the jobs the pull rounds want done with the folder's core let go ([`seedwell_sync::lazy::Job`]: streams of
 /// unhashed files, SPEC §7G.11, and the builds of hashed files, §7G.2) in the folder's two lanes, each running its jobs
 /// one at a time: a piece or a chunk can take minutes on a slow link, and nothing (the hosts' calls, a scan step, a
 /// peer's index) may wait for it. A later job for a path replaces a queued one. Returns at once.
-fn enqueue_jobs(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, jobs: Vec<trs_sync::lazy::Job>, rt: &tokio::runtime::Handle) {
+fn enqueue_jobs(ctx: &Arc<Ctx>, f: &Arc<FolderShared>, jobs: Vec<seedwell_sync::lazy::Job>, rt: &tokio::runtime::Handle) {
     for job in jobs {
-        let stream = matches!(job, trs_sync::lazy::Job::Stream(_));
+        let stream = matches!(job, seedwell_sync::lazy::Job::Stream(_));
         let start = {
             let mut s = lock(lane(f, stream));
             if let Some(replaced) = s.push(job) {
-                trs_sync::lazy::lock(&f.jobs).cancelled(replaced.path());
+                seedwell_sync::lazy::lock(&f.jobs).cancelled(replaced.path());
             }
             !std::mem::replace(&mut s.running, true)
         };
@@ -481,7 +481,7 @@ async fn run_lane(ctx: Arc<Ctx>, f: std::sync::Weak<FolderShared>, stream: bool)
             let source = NetSource::new(ctx2, id, rt);
             let stop = || *stop.borrow() || paused.paused.load(Ordering::Relaxed);
             let mut fetched = 0;
-            let end = trs_sync::lazy::run_job(&*fs, &source, &index, job, &stop, PULL_WINDOW, &mut fetched);
+            let end = seedwell_sync::lazy::run_job(&*fs, &source, &index, job, &stop, PULL_WINDOW, &mut fetched);
             if !pause.is_zero() {
                 tests.jobs_held.fetch_add(1, Ordering::SeqCst);
                 std::thread::sleep(pause);
@@ -494,7 +494,7 @@ async fn run_lane(ctx: Arc<Ctx>, f: std::sync::Weak<FolderShared>, stream: bool)
         })
         .await;
         let Some(sh) = f.upgrade() else { return };
-        use trs_sync::lazy::{ChunksEnd, JobEnd, StreamEnd};
+        use seedwell_sync::lazy::{ChunksEnd, JobEnd, StreamEnd};
         let failed = |why: String| if stream { JobEnd::Stream(StreamEnd::Failed(why)) } else { JobEnd::Chunks(ChunksEnd::Failed(why)) };
         let end = match ran {
             Ok((end, n)) => {
@@ -512,7 +512,7 @@ async fn run_lane(ctx: Arc<Ctx>, f: std::sync::Weak<FolderShared>, stream: bool)
         // queued, never taken for this one.
         lock(lane(&sh, stream)).current = None;
         // (Without the core: a round holding it never holds up a job's end.)
-        trs_sync::lazy::lock(&sh.jobs).job_ended(&path, end, trs_sync::clock::Clock::now_ns(&SystemClock));
+        seedwell_sync::lazy::lock(&sh.jobs).job_ended(&path, end, seedwell_sync::clock::Clock::now_ns(&SystemClock));
         // Done or failed: a pull places it, or says why. Cut off: the pull's own retry comes back to it.
         if settled {
             sh.remote_changed.notify_one();
@@ -527,7 +527,7 @@ async fn run_lane(ctx: Arc<Ctx>, f: std::sync::Weak<FolderShared>, stream: bool)
 fn pass_status(ctx: &Ctx, root: &Path, core: &FolderCore) {
     let me = ctx.me.to_string();
     let me = me.split('-').next().unwrap_or_default();
-    let Ok(projects) = std::fs::read_dir(root.join(trs_sync::PASS_THROUGH)) else { return };
+    let Ok(projects) = std::fs::read_dir(root.join(seedwell_sync::PASS_THROUGH)) else { return };
     for to in projects.flatten().filter(|e| e.path().is_dir()) {
         for pass in std::fs::read_dir(to.path()).into_iter().flatten().flatten().filter(|e| e.path().is_dir()) {
             let file = pass.path().join(format!(".status-{me}"));
@@ -537,7 +537,7 @@ fn pass_status(ctx: &Ctx, root: &Path, core: &FolderCore) {
                 continue;
             }
             // Below the pass's own folder (`after` it with the slash, so a sibling such as "… 2/" never counts).
-            let rel = format!("{}/{}/{}/", trs_sync::PASS_THROUGH, to.file_name().to_string_lossy(), pass.file_name().to_string_lossy());
+            let rel = format!("{}/{}/{}/", seedwell_sync::PASS_THROUGH, to.file_name().to_string_lossy(), pass.file_name().to_string_lossy());
             // Arrived when nothing below is still needed, a version no device can give left out (it never comes).
             let missing = still_needed(core.store(), &rel).unwrap_or(true);
             let want = if missing { "receiving" } else { "arrived" };
@@ -551,7 +551,7 @@ fn pass_status(ctx: &Ctx, root: &Path, core: &FolderCore) {
 
 /// Something below `rel` (a folder's path with its slash) is still needed and can come: every need there is read, a
 /// page at a time, so any number of versions no device can give never hide one that is on its way.
-fn still_needed(store: &dyn trs_sync::index::IndexStore, rel: &str) -> std::io::Result<bool> {
+fn still_needed(store: &dyn seedwell_sync::index::IndexStore, rel: &str) -> std::io::Result<bool> {
     let mut after = rel.to_string();
     loop {
         let page = store.needs(Some(&after), 1000)?;
@@ -616,6 +616,7 @@ async fn settle(f: &Arc<FolderShared>) {
     let mut live = lock(&f.live);
     live.ignore_file = ignore_file;
     live.need = need;
+    live.need_mark = f.fetched.total();
     live.unavailable = unavailable;
     live.pending = pending;
     live.local = local;
@@ -669,7 +670,7 @@ async fn housekeeping(f: &Arc<FolderShared>) {
     }
     let f2 = f.clone();
     let pruned = tokio::task::spawn_blocking(move || {
-        lock(&f2.core).prune_archive(trs_sync::clock::Clock::now_ns(&SystemClock), f2.retention)
+        lock(&f2.core).prune_archive(seedwell_sync::clock::Clock::now_ns(&SystemClock), f2.retention)
     })
     .await;
     if let Ok(Err(e)) = pruned {
@@ -721,19 +722,19 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use trs_sync::folder::{FolderConfig, FolderCore, RemoteIndex};
-    use trs_sync::fs::{Fs, MemFs, write_all};
-    use trs_sync::ignore::Ignore;
-    use trs_sync::index::MemStore;
-    use trs_sync_proto::device::DeviceKey;
-    use trs_sync_proto::keys::{Access, FolderSecret};
+    use seedwell_sync::folder::{FolderConfig, FolderCore, RemoteIndex};
+    use seedwell_sync::fs::{Fs, MemFs, write_all};
+    use seedwell_sync::ignore::Ignore;
+    use seedwell_sync::index::MemStore;
+    use seedwell_sync_proto::device::DeviceKey;
+    use seedwell_sync_proto::keys::{Access, FolderSecret};
 
     use super::{PENDING_SAMPLE, sample_pending, wire};
 
     #[test]
     fn a_pass_is_still_receiving_while_a_need_below_it_can_come_however_many_cannot() {
-        use trs_sync::index::{IndexStore, NeedRecord, Op};
-        use trs_sync_proto::model::{FileInfo, FileKind, SignedFile, Version};
+        use seedwell_sync::index::{IndexStore, NeedRecord, Op};
+        use seedwell_sync_proto::model::{FileInfo, FileKind, SignedFile, Version};
         let mut store = MemStore::new(1);
         let need = |p: &str| {
             let info = FileInfo {
@@ -744,13 +745,13 @@ mod tests {
                 exec: false,
                 deleted: false,
                 version: Version::new(),
-                modified_by: trs_sync_proto::ids::ShortId(1),
+                modified_by: seedwell_sync_proto::ids::ShortId(1),
                 file_id: [0; 16],
                 symlink_target: String::new(),
                 conflict_of: None,
                 chunks: Vec::new(),
             };
-            Op::SetNeed(p.to_string(), Some(NeedRecord { need: trs_sync::global::Need::Take, file: SignedFile { info, sig: [0; 64] }, holders: Vec::new() }))
+            Op::SetNeed(p.to_string(), Some(NeedRecord { need: seedwell_sync::global::Need::Take, file: SignedFile { info, sig: [0; 64] }, holders: Vec::new() }))
         };
         let rel = "P/web/x/";
         // 1500 that no device can give, then one that can come.
@@ -814,7 +815,7 @@ mod tests {
             Box::new(MemStore::new(u64::from(seed))),
             Arc::new(fs.clone()),
             Some(dk),
-            Arc::new(trs_sync::clock::SystemClock),
+            Arc::new(seedwell_sync::clock::SystemClock),
             new_id,
             Ignore::defaults(),
         )

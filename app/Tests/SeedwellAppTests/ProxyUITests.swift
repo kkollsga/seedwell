@@ -6,7 +6,7 @@ import Testing
 
 // The torrent proxy's shield, its right-click menu and the "SOCKS5 proxy" window (SPEC §7H), driven as their clicks and
 // fields drive them, against a mock core in an isolated run: its "NordVPN" servers are the loopback stand-ins its state
-// folder names (`qa/proxy-servers.txt`), never NordVPN's. The words and states are the core's (trs-ffi
+// folder names (`qa/proxy-servers.txt`), never NordVPN's. The words and states are the core's (seedwell-ffi
 // `torrent_proxy.rs`, tested there); these check what the host does with them.
 
 /// A mock core of an isolated run whose proxy servers are `servers` on 127.0.0.1 (none: the file is missing).

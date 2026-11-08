@@ -9,10 +9,9 @@
 //! again if the Mac is still on battery. Back on AC power only what the app still holds resumes: a download
 //! the user paused, resumed or paused again since is the user's.
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use trs_state::config::OnBattery;
+use seedwell_state::config::OnBattery;
 
 use crate::backend::Backend;
 use crate::settings::SettingsStore;
@@ -73,14 +72,15 @@ impl Rule {
 /// The rule with what it acts through; shared by the core and the listener that hears of settings changes.
 pub(crate) struct Battery {
     backend: Arc<dyn Backend>,
-    dir: PathBuf,
+    /// The core's settings (read again only when config.toml changed: it is read on every report).
+    settings: Arc<SettingsStore>,
     /// Held while a plan is carried out, so two reports never interleave.
     rule: Mutex<Rule>,
 }
 
 impl Battery {
-    pub fn new(backend: Arc<dyn Backend>, dir: PathBuf) -> Self {
-        Self { backend, dir, rule: Mutex::new(Rule::default()) }
+    pub fn new(backend: Arc<dyn Backend>, settings: Arc<SettingsStore>) -> Self {
+        Self { backend, settings, rule: Mutex::new(Rule::default()) }
     }
 
     /// The host's report of the power source.
@@ -96,7 +96,7 @@ impl Battery {
     fn apply(&self, on_battery: Option<bool>) {
         let mut rule = self.rule.lock().unwrap_or_else(|e| e.into_inner());
         let Some(on_battery) = on_battery.or(rule.last.map(|(b, _)| b)) else { return };
-        let mode = SettingsStore::new(&self.dir).config().general.on_battery;
+        let mode = self.settings.config().general.on_battery;
         let plan = rule.step(on_battery, mode, || running_downloads(&self.backend.snapshot()).map(|r| r.id.clone()).collect());
         if let Some(on) = plan.limit {
             self.backend.set_alt_speed_by_app(on);

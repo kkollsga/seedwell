@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use common::net::*;
 use common::*;
-use trs_portmap::driver::spawn;
-use trs_portmap::{Event, Method};
+use seedwell_portmap::driver::spawn;
+use seedwell_portmap::{Event, Method};
 
-fn upnp_cfg(ssdp: std::net::SocketAddrV4, lifetime: u32) -> trs_portmap::driver::DriverConfig {
+fn upnp_cfg(ssdp: std::net::SocketAddrV4, lifetime: u32) -> seedwell_portmap::driver::DriverConfig {
     let mut c = driver_cfg(5351, &[Method::Upnp], lifetime);
     c.core.ssdp_addr = ssdp;
     c

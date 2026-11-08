@@ -17,7 +17,7 @@ SOCK="$STATE/control.sock"
 CTL="$QA_ROOT/qa-control"
 REPORT="$CTL.bench"
 OUT="${QA_OUT:-$REPO/app/build/qa}"
-TRS="${TRS_DAEMON:-$REPO/target/release/seedwell}"   # a seedwell binary with the engine (the app bundle's CLI is client-only)
+SEEDWELL="${SEEDWELL_DAEMON:-$REPO/target/release/seedwell}"   # a seedwell binary with the engine (the app bundle's CLI is client-only)
 FAIL=0
 
 # Start a long-lived process in its own session so it outlives the calling shell.
@@ -65,12 +65,12 @@ qa_seeder() {
   mkdir -p "$SEEDER"
   printf 'version = 1\n[transfers]\nupload_limit = %s\n' "$3" > "$SEEDER/config.toml"
   qa_port_free "$1" || return 1
-  TRS_FORBID_REAL_HOME=1 HOME="$QA_ROOT/seeder-home" detach "$TRS" daemon --state-dir "$SEEDER" --download-dir "$2" --listen-port "$1" \
+  SEEDWELL_FORBID_REAL_HOME=1 HOME="$QA_ROOT/seeder-home" detach "$SEEDWELL" daemon --state-dir "$SEEDER" --download-dir "$2" --listen-port "$1" \
     --bind 127.0.0.1 --no-dht --no-trackers --permission full --socket "$SEEDER/control.sock" >"$SEEDER.log" 2>&1 &
   qa_until 10 test -S "$SEEDER/control.sock"
 }
 # qa_seed SAVE-PATH TORRENT...: the seeder of qa_seeder seeds them, their data in SAVE-PATH.
-qa_seed() { local d="$1" t; shift; for t in "$@"; do "$TRS" --socket "$SEEDER/control.sock" add "$t" --save-path "$d" >/dev/null || echo "seeder add failed: $t"; done; }
+qa_seed() { local d="$1" t; shift; for t in "$@"; do "$SEEDWELL" --socket "$SEEDER/control.sock" add "$t" --save-path "$d" >/dev/null || echo "seeder add failed: $t"; done; }
 
 # Config for the app under test: every folder under the isolated home, no router, no DHT; a watch folder only with
 # QA_WATCH (its files stay where they are).

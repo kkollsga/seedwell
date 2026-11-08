@@ -14,8 +14,8 @@
 //! relocate_recover   after a crash: which of the above states was reached
 //! ```
 //!
-//! # Journal (`TRSR`, v1)
-//! `TRSR | version | structure digest (u64) | file count (u32)`, then records. The first is the
+//! # Journal (`SWRJ`, v1)
+//! `SWRJ | version | structure digest (u64) | file count (u32)`, then records. The first is the
 //! **Plan** (`tag 1 | len u32 | payload | fnv32`): method, every `(file, src, dst)` and the
 //! directories the move is about to create (topmost missing ancestors). It is fsynced, then
 //! `Started` is fsynced, and only then does the first filesystem change happen: a journal without
@@ -23,7 +23,8 @@
 //! `Started`, `Publishing(file)` (copy only, fsynced *before* the rename that publishes the file),
 //! `Done(file)`, `Prepared` (fsynced), `Switched` (fsynced), `SourcesGone`. A torn trailing record is
 //! ignored. The journal identifies the torrent by [`Layout::structure_digest`], so it stays valid
-//! across the path change.
+//! across the path change. A journal begun before the 2026-11-07 rename of the internal names has the
+//! magic [`PRE_RENAME_MAGIC`] and is recovered the same.
 
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
@@ -45,7 +46,10 @@ use crate::layout::{Layout, MAX_FILES};
 use crate::oneshot::Pending;
 use crate::verify::{CancelToken, RateLimiter};
 
-const MAGIC: &[u8; 4] = b"TRSR";
+const MAGIC: &[u8; 4] = b"SWRJ";
+/// The magic before the rename of the internal names (2026-11-07): a move cut off before the update is
+/// still recovered or rolled back.
+const PRE_RENAME_MAGIC: &[u8; 4] = b"TRSR";
 const VERSION: u8 = 1;
 const HEADER_LEN: usize = 17;
 
@@ -225,7 +229,7 @@ fn header(count: usize, digest: u64) -> [u8; HEADER_LEN] {
 }
 
 fn put_path(out: &mut Vec<u8>, p: &Path) {
-    let b = trs_platform::fs::path_bytes(p);
+    let b = seedwell_platform::fs::path_bytes(p);
     out.extend_from_slice(&(b.len() as u32).to_le_bytes());
     out.extend_from_slice(b);
 }
@@ -273,7 +277,7 @@ impl<'a> Rd<'a> {
         if n > MAX_PATH_BYTES {
             return None;
         }
-        trs_platform::fs::path_from_bytes(self.take(n)?)
+        seedwell_platform::fs::path_from_bytes(self.take(n)?)
     }
 }
 
@@ -321,7 +325,8 @@ fn read_journal(path: &Path, count: usize, digest: u64) -> Result<Option<Parsed>
     if bytes.len() < HEADER_LEN {
         return Ok(None);
     }
-    if bytes[..HEADER_LEN] != header(count, digest) {
+    let h = header(count, digest);
+    if bytes[4..HEADER_LEN] != h[4..] || (bytes[..4] != *MAGIC && bytes[..4] != *PRE_RENAME_MAGIC) {
         return Err(StorageError::CorruptJournal);
     }
     let mut p = Parsed {
@@ -434,7 +439,7 @@ impl Jw {
 }
 
 fn sync_dir(p: &Path) {
-    let _ = trs_platform::fs::sync_dir(p);
+    let _ = seedwell_platform::fs::sync_dir(p);
 }
 
 fn sync_parent(p: &Path) {
@@ -458,12 +463,6 @@ fn remove_if_exists(p: &Path) -> io::Result<bool> {
         Err(e) if is_not_found(&e) => Ok(false),
         Err(e) => Err(e),
     }
-}
-
-fn part_path(dst: &Path) -> PathBuf {
-    let mut s = dst.as_os_str().to_os_string();
-    s.push(".trs-part");
-    PathBuf::from(s)
 }
 
 /// Removes empty directories below `dir`, and `dir` itself if it ends up empty. Finder's litter
@@ -693,7 +692,7 @@ fn writer(
                 ctx.step()?;
                 let mut o = OpenOptions::new();
                 o.write(true).create(true).truncate(true);
-                let f = trs_platform::fs::set_create_mode(&mut o, mode & 0o7777 | 0o600)
+                let f = seedwell_platform::fs::set_create_mode(&mut o, mode & 0o7777 | 0o600)
                     .open(&part)
                     .map_err(StorageError::io)?;
                 if nocache {
@@ -705,7 +704,7 @@ fn writer(
                 ctx.step()?;
                 if let Some(c) = &cur
                     && !(sparse && is_zero(&buf[..n])) {
-                        trs_platform::fs::write_all_at(&c.f, &buf[..n], off).map_err(StorageError::io)?;
+                        seedwell_platform::fs::write_all_at(&c.f, &buf[..n], off).map_err(StorageError::io)?;
                     }
                 let _ = free.send(buf);
             }
@@ -858,7 +857,7 @@ fn copy_all(
                     } => (*file, path, *len, *entry),
                 };
                 let src = File::open(path).map_err(|e| {
-                    if trs_platform::fs::is_in_use(&e) { StorageError::Locked { file, path: path.to_path_buf() } } else { StorageError::from_io(file, e) }
+                    if seedwell_platform::fs::is_in_use(&e) { StorageError::Locked { file, path: path.to_path_buf() } } else { StorageError::from_io(file, e) }
                 })?;
                 if opts.nocache {
                     fsutil::set_nocache(&src);
@@ -867,8 +866,8 @@ fn copy_all(
                     let meta = src.metadata().map_err(|e| StorageError::from_io(file, e))?;
                     send!(Item::Open(Msg::Open {
                         src: path.clone(),
-                        part: part_path(&entries[ei].dst),
-                        mode: trs_platform::fs::unix_mode(&meta).unwrap_or(0o644),
+                        part: fsutil::part_path(&entries[ei].dst),
+                        mode: seedwell_platform::fs::unix_mode(&meta).unwrap_or(0o644),
                         mtime: meta.modified().ok(),
                         len,
                     }));
@@ -900,7 +899,7 @@ fn copy_all(
                     if buf.len() < n {
                         buf.resize(n, 0);
                     }
-                    trs_platform::fs::read_exact_at(&src, &mut buf[..n], off)
+                    seedwell_platform::fs::read_exact_at(&src, &mut buf[..n], off)
                         .map_err(|e| StorageError::from_io(file, e))?;
                     if let Some(l) = &limiter {
                         l.acquire(n, &opts.cancel);
@@ -989,12 +988,12 @@ struct Prepared {
 /// Can a folder be changed (entries created in it or removed from it)? Also false for a locked
 /// folder and a read-only volume where the system says so.
 fn dir_writable(dir: &Path) -> bool {
-    trs_platform::fs::dir_writable(dir)
+    seedwell_platform::fs::dir_writable(dir)
 }
 
 /// The lock flags that stop a file from being renamed or removed (Finder "Locked" is `uchg`).
 fn locked_flags(m: &fs::Metadata) -> bool {
-    trs_platform::fs::is_locked(m)
+    seedwell_platform::fs::is_locked(m)
 }
 
 /// The cheap check before a move touches anything: no source file is locked, the folders the
@@ -1007,7 +1006,7 @@ pub fn preflight_move<'a>(pairs: impl IntoIterator<Item = (u32, &'a Path, &'a Pa
     let mut dir_ok = |d: &Path| -> bool { !checked.insert(d.to_path_buf()) || dir_writable(d) };
     for (file, src, dst) in pairs {
         if let Ok(m) = fs::symlink_metadata(src) {
-            if locked_flags(&m) || (m.is_file() && trs_platform::fs::held_by_another_program(src)) {
+            if locked_flags(&m) || (m.is_file() && seedwell_platform::fs::held_by_another_program(src)) {
                 return Err(StorageError::Locked { file, path: src.to_path_buf() });
             }
             if let Some(p) = src.parent()
@@ -1329,7 +1328,7 @@ fn run_prepare(
             RelocateMethod::Copied => {
                 for e in &parsed.entries {
                     if !e.create_empty {
-                        remove_if_exists(&part_path(&e.dst))
+                        fsutil::remove_part(&e.dst)
                             .map_err(|er| StorageError::from_io(e.file, er))?;
                     }
                 }
@@ -1358,7 +1357,7 @@ fn run_prepare(
                             *s |= S_PUBLISHING;
                         }
                         ctx.step()?;
-                        fsutil::rename_excl(&part_path(&e.dst), &e.dst)
+                        fsutil::rename_excl(&fsutil::part_path(&e.dst), &e.dst)
                             .map_err(|er| map_exists(e.file, er))?;
                     }
                     jw.rec(T_DONE, e.file, false)?;
@@ -1417,7 +1416,7 @@ fn map_exists(file: u32, e: io::Error) -> StorageError {
 /// [`map_exists`] for a step that takes the source at `src` away: another program holding it
 /// (Windows) is [`StorageError::Locked`], like a lock flag, not an I/O error.
 fn map_move(file: u32, src: &Path, e: io::Error) -> StorageError {
-    if trs_platform::fs::is_in_use(&e) {
+    if seedwell_platform::fs::is_in_use(&e) {
         StorageError::Locked { file, path: src.to_path_buf() }
     } else {
         map_exists(file, e)
@@ -1446,7 +1445,7 @@ fn rollback_parsed(t: &TorrentShared, p: &Parsed, journal_path: &Path) -> Result
             }
             match method {
                 RelocateMethod::Copied => {
-                    let existed = remove_if_exists(&part_path(&e.dst)).map_err(io)?;
+                    let existed = fsutil::remove_part(&e.dst).map_err(io)?;
                     let st = p.state.get(e.file as usize).copied().unwrap_or(0);
                     // The part is gone only if the publishing rename happened: then dst is ours.
                     if !existed && st & (S_PUBLISHING | S_DONE) != 0 {

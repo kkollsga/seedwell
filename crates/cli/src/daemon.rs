@@ -44,10 +44,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use trs_control::sync::{SyncSlot, start_sync_with};
-use trs_control::{EngineBackend, Permission, PermissionSource, StateAccess, serve_backend};
-use trs_engine::{Host, HostOptions};
-use trs_sync_net::secrets::FileSecrets;
+use seedwell_control::sync::{SyncSlot, start_sync_with};
+use seedwell_control::{EngineBackend, Permission, PermissionSource, StateAccess, serve_backend};
+use seedwell_engine::{Host, HostOptions};
+use seedwell_sync_net::secrets::FileSecrets;
 
 use crate::args::{Opts, Usage};
 use crate::commands::{CliError, Global};
@@ -88,7 +88,7 @@ pub async fn run(mut o: Opts, g: &Global) -> Result<(), CliError> {
     let no_sync = o.flag(&["--no-sync"]);
     let chat_agents = match o.value(&["--chat-agents"])? {
         None => None,
-        Some(a) => Some(trs_sync_net::chat::AgentAccess::parse(&a).ok_or_else(|| bad(format!("--chat-agents is off, read or post, not `{a}`")))?),
+        Some(a) => Some(seedwell_sync_net::chat::AgentAccess::parse(&a).ok_or_else(|| bad(format!("--chat-agents is off, read or post, not `{a}`")))?),
     };
     let permission = o.value(&["--permission"])?.unwrap_or_else(|| "control".into());
     let extra = o.finish()?;
@@ -133,10 +133,13 @@ pub async fn run(mut o: Opts, g: &Global) -> Result<(), CliError> {
         eprintln!("seedwell daemon: {w}");
     }
     let engine = host.handle();
-    let store: Arc<dyn trs_control::state::StoreRef> = host.store().clone();
+    let store: Arc<dyn seedwell_control::state::StoreRef> = host.store().clone();
     let state = StateAccess::new(&state_dir, Some(store))
-        .with_tz_offset(|| trs_engine::util::local_utc_offset(trs_engine::util::unix_secs() as i64));
-    let options = trs_control::ServerOptions::default().with_config(&state.config());
+        .with_tz_offset(|| seedwell_engine::util::local_utc_offset(seedwell_engine::util::unix_secs() as i64));
+    let options = seedwell_control::ServerOptions {
+        activity_file: Some(state_dir.join(seedwell_control::ACTIVITY_FILE)),
+        ..seedwell_control::ServerOptions::default().with_config(&state.config())
+    };
     let slot = SyncSlot::new();
     let sync = if no_sync { None } else { start_folder_sync(&state_dir, &engine, bind, chat_agents, &slot).await };
     slot.set(sync.clone());
@@ -157,7 +160,7 @@ pub async fn run(mut o: Opts, g: &Global) -> Result<(), CliError> {
         let _ = std::io::stdout().flush();
     }
 
-    trs_platform::signal::Shutdown::new().map_err(|e| fail(e.to_string()))?.recv().await;
+    seedwell_platform::signal::Shutdown::new().map_err(|e| fail(e.to_string()))?.recv().await;
     eprintln!("seedwell daemon: shutting down");
     server.shutdown().await;
     // The slot's service: a port change may have started another one.
@@ -174,15 +177,15 @@ pub async fn run(mut o: Opts, g: &Global) -> Result<(), CliError> {
 /// it: a sync problem never stops torrents (SPEC 7G).
 async fn start_folder_sync(
     state_dir: &std::path::Path,
-    engine: &trs_engine::EngineHandle,
+    engine: &seedwell_engine::EngineHandle,
     bind: std::net::Ipv4Addr,
-    chat_agents: Option<trs_sync_net::chat::AgentAccess>,
+    chat_agents: Option<seedwell_sync_net::chat::AgentAccess>,
     slot: &SyncSlot,
-) -> Option<trs_sync_net::SyncHandle> {
-    let secrets: Arc<dyn trs_sync_net::secrets::SecretStore> = Arc::new(FileSecrets::new(state_dir.join("sync").join("secrets")));
+) -> Option<seedwell_sync_net::SyncHandle> {
+    let secrets: Arc<dyn seedwell_sync_net::secrets::SecretStore> = Arc::new(FileSecrets::new(state_dir.join("sync").join("secrets")));
     let (state_dir, engine) = (state_dir.to_path_buf(), engine.clone());
     // The same start again when the port changes (`SyncSlot::move_port`).
-    let starter: trs_control::sync::Starter = Arc::new(move || {
+    let starter: seedwell_control::sync::Starter = Arc::new(move || {
         let (state_dir, engine, secrets) = (state_dir.clone(), engine.clone(), secrets.clone());
         Box::pin(async move {
             let client = format!("Seedwell {}", env!("CARGO_PKG_VERSION"));
@@ -222,12 +225,12 @@ struct Flags {
 }
 
 /// The flags, put over a loaded `config.toml`.
-fn apply_flags(cfg: &mut trs_state::config::Config, download_dir: &str, incomplete_dir: &str, f: &Flags) {
-    use trs_state::config::AfterAdd;
+fn apply_flags(cfg: &mut seedwell_state::config::Config, download_dir: &str, incomplete_dir: &str, f: &Flags) {
+    use seedwell_state::config::AfterAdd;
     cfg.folders.download_dir = download_dir.to_owned();
     cfg.folders.incomplete_dir = incomplete_dir.to_owned();
     if !f.ask {
-        cfg.transfers.ask_before_adding = trs_state::config::AskBeforeAdding::Never;
+        cfg.transfers.ask_before_adding = seedwell_state::config::AskBeforeAdding::Never;
     }
     cfg.transfers.start_delay_secs = f.grace;
     cfg.folders.watch.clear();
@@ -252,13 +255,13 @@ fn apply_flags_to_config(
     state_dir: &std::path::Path,
     download_dir: &std::path::Path,
     f: &Flags,
-) -> Result<(trs_state::config::Config, trs_engine::ConfigAdjust, bool), CliError> {
-    use trs_state::{DocStore, LoadSource};
+) -> Result<(seedwell_state::config::Config, seedwell_engine::ConfigAdjust, bool), CliError> {
+    use seedwell_state::{DocStore, LoadSource};
     let abs = |p: &std::path::Path| -> Result<String, CliError> {
         std::path::absolute(p).map(|p| p.display().to_string()).map_err(|e| fail(format!("{}: {e}", p.display())))
     };
     let (dl, incomplete) = (abs(download_dir)?, abs(&download_dir.join(".incomplete"))?);
-    let docs = DocStore::<trs_state::config::Config>::new(state_dir);
+    let docs = DocStore::<seedwell_state::config::Config>::new(state_dir);
     let loaded = docs.load();
     let mut cfg = loaded.value;
     apply_flags(&mut cfg, &dl, &incomplete, f);
@@ -269,7 +272,7 @@ fn apply_flags_to_config(
         docs.save(&cfg).map_err(|e| fail(format!("config.toml in {}: {e}", state_dir.display())))?;
     }
     let f = f.clone();
-    let adjust: trs_engine::ConfigAdjust = std::sync::Arc::new(move |c| apply_flags(c, &dl, &incomplete, &f));
+    let adjust: seedwell_engine::ConfigAdjust = std::sync::Arc::new(move |c| apply_flags(c, &dl, &incomplete, &f));
     Ok((cfg, adjust, clean))
 }
 
@@ -281,7 +284,7 @@ mod tests {
         Flags { listen_port: 0, no_dht: true, portmap: false, ask: false, grace: 0, max_active: None, allow_lan_trackers }
     }
 
-    fn apply(dir: &std::path::Path, f: &Flags) -> trs_state::config::Config {
+    fn apply(dir: &std::path::Path, f: &Flags) -> seedwell_state::config::Config {
         apply_flags_to_config(dir, &dir.join("dl"), f).unwrap().0
     }
 
@@ -308,7 +311,7 @@ mod tests {
     /// and the host gets the same change for every reload. A clean file is written as before.
     #[test]
     fn a_file_with_bad_values_is_left_as_it_is_and_the_flags_apply_in_memory() {
-        use trs_state::config::{AfterAdd, Config};
+        use seedwell_state::config::{AfterAdd, Config};
         for text in ["[folders]\ntorrent_after_add = \"keep\"\n[network]\nupnp = true\n", "[network\nupnp = true\n"] {
             let dir = tempfile::tempdir().unwrap();
             std::fs::write(dir.path().join("config.toml"), text).unwrap();

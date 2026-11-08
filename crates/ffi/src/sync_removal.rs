@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use trs_platform::fs::{OtherVolume, move_to_trash, trash_check};
+use seedwell_platform::fs::{OtherVolume, move_to_trash, trash_check};
 
 use crate::backend::Backend;
 use crate::held::trash_dir;
@@ -52,7 +52,7 @@ fn remove(sync: &dyn SyncBackend, id: &str, trash: Option<Option<&Path>>) -> Res
     let trashed = move_to_trash(path, dir, OtherVolume::Refuse).is_ok();
     // Refused: an on-demand folder's files are left at its place, as an ordinary folder.
     let at = sync.finish_removal(&files, &place, trashed)?;
-    Ok((!trashed).then(|| sync_trash_failed(name, trs_platform::dirs::shown(Path::new(&at)))))
+    Ok((!trashed).then(|| sync_trash_failed(name, seedwell_platform::dirs::shown(Path::new(&at)))))
 }
 
 /// Something is there (a link counts: the link itself goes, never what it points at).
@@ -65,7 +65,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use trs_platform::{computer, trash};
+    use seedwell_platform::{computer, trash};
 
     use super::*;
 
@@ -120,7 +120,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_folder_that_cannot_go_to_the_trash_stays_synced_and_the_error_says_what_to_do() {
-        use trs_platform::file_manager;
+        use seedwell_platform::file_manager;
         let (b, _dir, folder, id) = synced();
         let elsewhere = Path::new("/dev/seedwell-test-trash");
         let e = remove(&*b.sync(), &id, Some(Some(elsewhere))).unwrap_err();
@@ -143,7 +143,7 @@ mod tests {
         std::fs::write(dir.path().join("state/Trash"), b"").unwrap();
         let alert = sync_remove(&*b, &id, true).unwrap().expect("an alert");
         assert_eq!(alert.title, concat!("Couldn't move “Photos” to the ", trash!()));
-        let shown = trs_platform::dirs::shown(&folder);
+        let shown = seedwell_platform::dirs::shown(&folder);
         assert_eq!(alert.text, format!(concat!("It is no longer synced on this ", computer!(), ". Its files are still in {}."), shown));
         assert!(!is_synced(&*b, &id) && folder.join("a.jpg").is_file(), "stopped; the files stay where they were");
     }
@@ -156,7 +156,7 @@ mod tests {
         std::fs::write(dir.path().join("state/Trash"), b"").unwrap();
         let alert = sync_remove(&*b, &id, true).unwrap().unwrap();
         assert_eq!(alert.title, "Couldn't move “Photos” to the Trash");
-        assert_eq!(alert.text, format!("It is no longer synced on this Mac. Its files are still in {}.", trs_platform::dirs::shown(&folder)));
+        assert_eq!(alert.text, format!("It is no longer synced on this Mac. Its files are still in {}.", seedwell_platform::dirs::shown(&folder)));
         let (b, _dir, _folder, id) = synced();
         let e = remove(&*b.sync(), &id, Some(Some(Path::new("/dev/seedwell-test-trash")))).unwrap_err();
         assert_eq!(

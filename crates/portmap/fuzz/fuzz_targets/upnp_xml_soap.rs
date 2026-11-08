@@ -3,7 +3,7 @@
 //! reply parser. Must never panic and must respect the size caps.
 
 use libfuzzer_sys::fuzz_target;
-use trs_portmap::{upnp, xml};
+use seedwell_portmap::{upnp, xml};
 
 fuzz_target!(|data: &[u8]| {
     let text = String::from_utf8_lossy(data);

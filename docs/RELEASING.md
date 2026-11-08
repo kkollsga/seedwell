@@ -237,7 +237,7 @@ configured; Sparkle, used only by a build that carries `SUPublicEDKey` and `SUFe
 - **Every device: the shared builds folder.** The user's devices (the Mac mini, the MacBook, the Windows PC) each
   watch `<Seedwell Sync folder>/builds/` (`seedwell update watch`, once per device, by its agent), which Folder Sync
   shares. A device installs a build from it only when the folder's `build.json` is signed with the **build key** and
-  names that zip's SHA-256 (SPEC 12A; `trs-buildsig`); a Mac also requires the team's Developer ID and the app's
+  names that zip's SHA-256 (SPEC 12A; `seedwell-buildsig`); a Mac also requires the team's Developer ID and the app's
   bundle id. The cycle:
   1. Mac: `tools/sysguard/heavy.sh tools/dev-build.sh --to "<Seedwell Sync>/builds"`: the zip, then `build.json`
      signed with the key in this Mac's Keychain. Every Mac watching the folder installs it.

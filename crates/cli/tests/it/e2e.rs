@@ -491,7 +491,7 @@ fn smart_add_and_move_through_the_cli() {
     // ---- move the finished torrent
     let dest = root.path().join("moved");
     std::fs::create_dir_all(&dest).unwrap();
-    let system = trs_platform::dirs::sensitive_dirs().into_iter().next().unwrap();
+    let system = seedwell_platform::dirs::sensitive_dirs().into_iter().next().unwrap();
     assert_eq!(leech.cli(&["move", &pack.id, system.to_str().unwrap()]).code, 1, "system folders are refused");
     assert_eq!(leech.cli(&["move", &pack.id]).code, 2, "usage");
     let m = leech.json(&["move", &pack.id, dest.to_str().unwrap()]);

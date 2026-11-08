@@ -10,8 +10,8 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use trs_control::display as d;
-use trs_platform::computer;
+use seedwell_control::display as d;
+use seedwell_platform::computer;
 
 use crate::host::{has, HostWindow};
 use crate::sync::SyncSnapshot;
@@ -328,7 +328,7 @@ mod tests {
         let c = m.confirm.unwrap();
         assert_eq!(c.folder_id, "ID-B");
         assert_eq!(c.question, format!("Stop syncing “B” on this {}? Other devices keep their copy.", computer!()));
-        assert_eq!((c.trash_label.as_str(), c.trash), (concat!("Also move the files to the ", trs_platform::trash!()), true));
+        assert_eq!((c.trash_label.as_str(), c.trash), (concat!("Also move the files to the ", seedwell_platform::trash!()), true));
         assert_eq!((c.cancel_title.as_str(), c.cancel_help.as_str()), ("Cancel", "Keep syncing this folder"));
         assert_eq!((c.remove_title.as_str(), c.remove_help), ("Remove", format!("Stop syncing this folder on this {}", computer!())));
         // B is removed elsewhere: its question goes with it.

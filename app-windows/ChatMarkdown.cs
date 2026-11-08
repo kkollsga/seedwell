@@ -3,7 +3,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Media;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
@@ -15,7 +15,7 @@ namespace Seedwell;
 internal sealed record MarkdownInk(Action<ChatLink> Open, Action<uint>? Image = null, bool OnAccent = false);
 
 /// <summary>
-/// A message's Markdown on Windows (the Mac's ChatMarkdown): the core's blocks and runs (<c>chat_blocks</c>, trs-ffi
+/// A message's Markdown on Windows (the Mac's ChatMarkdown): the core's blocks and runs (<c>chat_blocks</c>, seedwell-ffi
 /// chat_markdown.rs) drawn as text elements in the type scale (<see cref="Theme"/>). Nothing is parsed here; a link is
 /// only what the core marks as one, and an image reference only a run with its <c>image</c> index.
 /// </summary>
@@ -93,7 +93,7 @@ static class ChatMarkdown
             HorizontalScrollMode = ScrollMode.Auto,
             Content = new TextBlock { Text = c.Text, FontFamily = Theme.MonoFont, FontSize = Theme.Mono, IsTextSelectionEnabled = true, TextWrapping = TextWrapping.NoWrap },
         });
-        var help = TrsFfiMethods.ChatCodeCopyHelp();
+        var help = SeedwellFfiMethods.ChatCodeCopyHelp();
         var glyph = new FontIcon { Glyph = "", FontSize = 13 };
         var copy = new Button
         {

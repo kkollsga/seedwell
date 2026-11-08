@@ -1,8 +1,8 @@
-# trs-sync
+# seedwell-sync
 
 The folder-sync core of Seedwell ([SPEC §7G](../../SPEC.md), the sync model in §7G.2): what is on disk, how files are
 cut into chunks, what is ignored, and how names compare. It is sans-I/O in the network sense: no sockets and no
-async. The driver (`trs-sync-net`) runs it on blocking threads and moves the messages. The filesystem is injected
+async. The driver (`seedwell-sync-net`) runs it on blocking threads and moves the messages. The filesystem is injected
 (`fs::Fs`), so the same code runs on disk and in the simulator.
 
 ## Modules
@@ -62,7 +62,7 @@ compares every read after random op sequences.
   ((hash, path, offset) → ()), and `meta` (schema version, index id and sequence, need and local totals). Paths
   below a directory are read as the key range `[dir/, dir0)`, so `local_paths` never scans; `need_totals` and
   `local_totals` are counters kept in the same transaction as the records they count.
-* **Records** use the wire encoding of `trs-sync-proto` (`msg::encode_entry`), so the checked decoder that reads
+* **Records** use the wire encoding of `seedwell-sync-proto` (`msg::encode_entry`), so the checked decoder that reads
   peers also reads the disk. A record that does not decode is an `InvalidData` error naming its table and key, and a
   record the decoder would refuse (a path over `MAX_PATH`) is refused on write.
 * **Atomic:** every `apply` is one write transaction. After a crash each batch is there whole or not at all, and the
@@ -74,7 +74,7 @@ compares every read after random op sequences.
   disk; if a crash comes between a file landing and its record, the scanner adopts the finished file as the version
   it was pulled for. `local_since` (what peers are sent from) flushes first, so a sequence a peer has seen is never
   reused.
-* **Schema:** version 1, with `trs-state`'s migration pattern: an older file is copied to `<file>.v<N>.<n>.bak` and
+* **Schema:** version 1, with `seedwell-state`'s migration pattern: an older file is copied to `<file>.v<N>.<n>.bak` and
   migrated in one transaction, a newer one is refused untouched.
 
 Scale (Apple Silicon, release, `redb_scale`: 200k local records of 4 chunks, plus 2 peers × 200k entries, batches
@@ -85,7 +85,7 @@ of 1000 through `Batch`): inserting takes 1.0 s for the local records and 1.7 s 
 and `compact`). Open 3 ms, with `verify` 150 ms. RSS 31 MiB with the 16 MiB page cache.
 
 ```sh
-tools/sysguard/heavy.sh cargo test --release -p trs-sync --test it redb_scale -- --ignored --nocapture
+tools/sysguard/heavy.sh cargo test --release -p seedwell-sync --test it redb_scale -- --ignored --nocapture
 ```
 
 ## FastCDC contract
@@ -113,17 +113,17 @@ Throughput (Apple Silicon, release, 256 MiB in memory, `chunk_bench`): chunk + S
 thread and 2.9 GB/s on two (two files at once); gear alone 2.5 GB/s, SHA-256 alone 2.8 GB/s.
 
 ```sh
-tools/sysguard/heavy.sh cargo test --release -p trs-sync chunk_bench -- --ignored --nocapture
+tools/sysguard/heavy.sh cargo test --release -p seedwell-sync chunk_bench -- --ignored --nocapture
 ```
 
 ## Dependencies
 
 | Crate | Why |
 |---|---|
-| `trs-sync-proto` | The shared model: `FileInfo`, `ChunkRef`, `MAX_CHUNK`, `validate_path`, `STATE_DIR`, and the entry codec the index stores reuse. |
-| `redb` | The index file (`store_redb`). Already Seedwell's database (`trs-state`, same major version): pure Rust, ACID transactions, crash-safe commits, ordered keys with range reads, no C library or server. |
-| `sha2` | SHA-256 per chunk. Already in the workspace (`trs-storage`); it uses the ARMv8 SHA instructions, chosen at run time. |
-| `libc` | `fcntl(F_BARRIERFSYNC)` in `fs::flush`, the one call `std` lacks: a write barrier per pulled file instead of a full flush. Already in the workspace (`trs-storage`, `trs-fswatch`). |
+| `seedwell-sync-proto` | The shared model: `FileInfo`, `ChunkRef`, `MAX_CHUNK`, `validate_path`, `STATE_DIR`, and the entry codec the index stores reuse. |
+| `redb` | The index file (`store_redb`). Already Seedwell's database (`seedwell-state`, same major version): pure Rust, ACID transactions, crash-safe commits, ordered keys with range reads, no C library or server. |
+| `sha2` | SHA-256 per chunk. Already in the workspace (`seedwell-storage`); it uses the ARMv8 SHA instructions, chosen at run time. |
+| `libc` | `fcntl(F_BARRIERFSYNC)` in `fs::flush`, the one call `std` lacks: a write barrier per pulled file instead of a full flush. Already in the workspace (`seedwell-storage`, `seedwell-fswatch`). |
 | `unicode-normalization` | NFC for wire names and keys. The tables are not in `std`, and the Linux daemon cannot use CFString. No default features beyond `std`; pulls only `tinyvec`. |
 
 Dev: `proptest` (properties: chunk stability, streaming, the two-byte step), `tempfile` (temp folders for the

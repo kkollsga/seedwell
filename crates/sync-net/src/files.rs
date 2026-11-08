@@ -2,7 +2,7 @@
 //! sender serves the original in place; nothing is copied and nothing downloads by itself.
 //!
 //! * **Sending.** The file is read once, off the service's locks ([`prepare`]): its SHA-256 and its piece table (the
-//!   SHA-256 of each [`PIECE`] of it, [`trs_sync_proto::attach`]). The message is posted when that is done, naming the
+//!   SHA-256 of each [`PIECE`] of it, [`seedwell_sync_proto::attach`]). The message is posted when that is done, naming the
 //!   file, its size and the table's hash; until then the sender's conversation shows it as being prepared. The share
 //!   (the file's path, size, modification time and hashes) is kept in the room's container, sealed.
 //! * **Serving.** A piece table is served from the sealed copy kept here. A piece is read from the file where it is,
@@ -17,7 +17,7 @@
 //!   Memory stays flat: at most [`WINDOW`] pieces are in flight. The record of verified pieces is saved every
 //!   [`SAVE_EVERY`] (after the partial file is flushed), so a download resumes after a restart from what it had. When
 //!   nobody that has the file is connected the download pauses, and resumes when one connects. When done, the file
-//!   gets the system's mark for downloaded files ([`trs_platform::fs::mark_downloaded`]) and its name.
+//!   gets the system's mark for downloaded files ([`seedwell_platform::fs::mark_downloaded`]) and its name.
 //! * **Kept** in the room's container (`<channel id>.files/`, `dm-<device>.files/`): `state` (the shares and
 //!   downloads, sealed JSON) and one sealed piece table per file (`<table hash>`). Deleted with the room, with the
 //!   partial files of unfinished downloads; finished downloads are the user's files and stay.
@@ -31,9 +31,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use trs_sync_proto::attach::{PIECE, piece_count, piece_span, safe_name, table_len};
-use trs_sync_proto::members::hex;
-use trs_sync_proto::msg::{BlobCode, BlobData, BlobWant};
+use seedwell_sync_proto::attach::{PIECE, piece_count, piece_span, safe_name, table_len};
+use seedwell_sync_proto::members::hex;
+use seedwell_sync_proto::msg::{BlobCode, BlobData, BlobWant};
 
 use crate::at_rest::Sealer;
 use crate::blobs::{hash_from_hex, sha256};
@@ -87,7 +87,7 @@ fn stamp(path: &Path) -> io::Result<(u64, (i64, u32))> {
     if m.is_dir() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "it is a folder"));
     }
-    Ok((m.len(), trs_platform::fs::unix_time(m.modified()?)))
+    Ok((m.len(), seedwell_platform::fs::unix_time(m.modified()?)))
 }
 
 /// Reads a file once to name it: its hash and piece table. `done` counts the bytes read (for "Preparing… 40 %");
@@ -658,7 +658,7 @@ pub fn opens_as_code(path: &Path) -> bool {
     }
     match std::fs::metadata(path) {
         Ok(m) if m.is_dir() => true,
-        Ok(m) => trs_platform::fs::unix_mode(&m).is_some_and(|mode| mode & 0o111 != 0),
+        Ok(m) => seedwell_platform::fs::unix_mode(&m).is_some_and(|mode| mode & 0o111 != 0),
         Err(_) => false,
     }
 }
@@ -715,7 +715,7 @@ pub(crate) fn serve(ctx: &Ctx, room: &dyn Room, w: &BlobWant) -> BlobData {
         return no(BlobCode::Refused);
     }
     let mut data = vec![0u8; w.len as usize];
-    let read = File::open(&share.path).and_then(|f| trs_platform::fs::read_exact_at(&f, &mut data, w.offset));
+    let read = File::open(&share.path).and_then(|f| seedwell_platform::fs::read_exact_at(&f, &mut data, w.offset));
     if read.is_err() {
         end(&n.r.hash, "the file can no longer be read");
         return no(over(&share));
@@ -752,7 +752,7 @@ pub(crate) fn download(ctx: &Arc<Ctx>, room: &Arc<dyn Room>, n: &Named, to: Down
             return Err("the conversation is gone".into());
         }
         if st.shares.get(&h).is_some_and(|s| s.own) {
-            return Err(concat!("this file was sent from this ", trs_platform::computer!()).into());
+            return Err(concat!("this file was sent from this ", seedwell_platform::computer!()).into());
         }
         match st.downloads.get_mut(&h) {
             // Being cancelled or finished: what it ends as shows on its card.
@@ -775,23 +775,23 @@ pub(crate) fn download(ctx: &Arc<Ctx>, room: &Arc<dyn Room>, n: &Named, to: Down
     let name = safe_name(&n.r.name);
     let (to, replace) = match to {
         DownloadTo::Folder(dir) => {
-            std::fs::create_dir_all(&dir).map_err(|e| format!("the folder {} cannot be made: {e}", trs_platform::dirs::shown(&dir)))?;
+            std::fs::create_dir_all(&dir).map_err(|e| format!("the folder {} cannot be made: {e}", seedwell_platform::dirs::shown(&dir)))?;
             (unique_path(&dir, &name), false)
         }
         DownloadTo::File(p) => {
-            let dir = p.parent().filter(|d| d.is_dir()).ok_or_else(|| format!("there is no folder {}", p.parent().map(trs_platform::dirs::shown).unwrap_or_default()))?;
+            let dir = p.parent().filter(|d| d.is_dir()).ok_or_else(|| format!("there is no folder {}", p.parent().map(seedwell_platform::dirs::shown).unwrap_or_default()))?;
             let file = p.file_name().map(|f| safe_name(&f.to_string_lossy())).ok_or("not a file name")?;
             (dir.join(file), true)
         }
     };
     let part = part_of(&to);
     let dir = to.parent().unwrap_or(Path::new("."));
-    if let Ok(free) = trs_platform::fs::available_space(dir)
+    if let Ok(free) = seedwell_platform::fs::available_space(dir)
         && free < n.r.size
     {
         return Err(format!("there is not enough space: it needs {}, {} is free", size_text(n.r.size), size_text(free)));
     }
-    let f = std::fs::OpenOptions::new().write(true).create_new(true).open(&part).map_err(|e| format!("{} cannot be written: {e}", trs_platform::dirs::shown(&part)))?;
+    let f = std::fs::OpenOptions::new().write(true).create_new(true).open(&part).map_err(|e| format!("{} cannot be written: {e}", seedwell_platform::dirs::shown(&part)))?;
     drop(f);
     let now = Instant::now();
     let rec = DlRecord { hash: hex(&h), table: hex(&n.r.pieces), name, size: n.r.size, to, replace, part, have: String::new(), state: DlState::Active, problem: None };
@@ -807,7 +807,7 @@ pub(crate) fn download(ctx: &Arc<Ctx>, room: &Arc<dyn Room>, n: &Named, to: Down
 
 /// A size for people (the app's words).
 fn size_text(n: u64) -> String {
-    trs_media::size_text(n)
+    seedwell_media::size_text(n)
 }
 
 /// Starts the room's downloads that should run and do not (a member connected, the service started, one was asked).
@@ -864,12 +864,12 @@ async fn pull(ctx: &Arc<Ctx>, room: &Arc<dyn Room>, h: [u8; 32], stop: &AtomicBo
     let Some(part) = lock(&files.state).downloads.get(&h).map(|d| d.rec.part.clone()) else { return End::Stopped };
     let file = match std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&part) {
         Ok(f) => f,
-        Err(e) => return End::Failed(format!("{} cannot be written: {e}", trs_platform::dirs::shown(&part))),
+        Err(e) => return End::Failed(format!("{} cannot be written: {e}", seedwell_platform::dirs::shown(&part))),
     };
     if file.metadata().map(|m| m.len()).unwrap_or(0) != n.r.size
         && let Err(e) = file.set_len(n.r.size)
     {
-        return End::Failed(format!("{} cannot be written: {e}", trs_platform::dirs::shown(&part)));
+        return End::Failed(format!("{} cannot be written: {e}", seedwell_platform::dirs::shown(&part)));
     }
     if n.r.size == 0 && sha256(b"") == n.r.pieces {
         return match files.put_table(&n.r.pieces, b"") {
@@ -977,7 +977,7 @@ async fn pieces(p: &PeerHandle, room: &dyn Room, n: &Named, table: &[u8], file: 
                 }
                 continue;
             }
-            if let Err(e) = trs_platform::fs::write_all_at(file, &d.data, offset) {
+            if let Err(e) = seedwell_platform::fs::write_all_at(file, &d.data, offset) {
                 forget_rest(asks);
                 return PeerEnd::Failed(format!("the download could not be written: {e}"));
             }
@@ -1056,14 +1056,14 @@ fn place(rec: &DlRecord) -> io::Result<PathBuf> {
     if let Ok(f) = File::open(&rec.part) {
         let _ = f.sync_all();
     }
-    let _ = trs_platform::fs::mark_downloaded(&rec.part);
+    let _ = seedwell_platform::fs::mark_downloaded(&rec.part);
     if rec.replace {
         std::fs::rename(&rec.part, &rec.to)?;
         return Ok(rec.to.clone());
     }
     let mut to = rec.to.clone();
     for _ in 0..8 {
-        match trs_platform::fs::rename_no_replace(&rec.part, &to) {
+        match seedwell_platform::fs::rename_no_replace(&rec.part, &to) {
             Ok(()) => return Ok(to),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 let dir = to.parent().unwrap_or(Path::new(".")).to_path_buf();
@@ -1218,7 +1218,7 @@ mod tests {
             let p = dir.path().join("plain");
             std::fs::write(&p, b"x").unwrap();
             assert!(!opens_as_code(&p));
-            trs_platform::fs::set_exec(&p, true).unwrap();
+            seedwell_platform::fs::set_exec(&p, true).unwrap();
             assert!(opens_as_code(&p), "marked executable");
         }
     }

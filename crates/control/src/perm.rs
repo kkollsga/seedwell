@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub use trs_state::config::Permission;
-use trs_state::{Config, DocStore};
+pub use seedwell_state::config::Permission;
+use seedwell_state::{Config, DocStore};
 
 /// A cheap-to-clone source of the current [`Permission`].
 #[derive(Clone)]

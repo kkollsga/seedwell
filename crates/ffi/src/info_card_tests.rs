@@ -169,7 +169,7 @@ fn files_say_what_was_skipped_and_offer_the_chooser_for_several_files() {
 
 #[test]
 fn the_location_is_shown_with_a_tilde_and_shows_the_files_in_the_file_manager() {
-    let Some(home) = trs_platform::dirs::home() else { return };
+    let Some(home) = seedwell_platform::dirs::home() else { return };
     let i = TorrentInfo { save_path: home.join("Movies/Sprite Fright").display().to_string(), ..info() };
     let m = card(&row("a", TransferState::Downloading), Some(&i));
     let loc = find(section(&m, "General"), "Location");

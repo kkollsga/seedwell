@@ -1,4 +1,4 @@
-//! trs-portmap: NAT-PMP (RFC 6886), PCP (RFC 6887) and UPnP-IGD port mapping.
+//! seedwell-portmap: NAT-PMP (RFC 6886), PCP (RFC 6887) and UPnP-IGD port mapping.
 //!
 //! * [`PortMapper`] is a sans-I/O state machine: `handle(input, now) -> Vec<Output>`.
 //!   Time is injected as [`Millis`], so renewals, back-off and gateway reboots are

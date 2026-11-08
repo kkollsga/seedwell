@@ -3,12 +3,12 @@
 //! (docs/CROSS-PLATFORM.md §1: Rust decides, the host draws).
 //!
 //! An agent that lacks access asks with `seedwell agents request`; the control server keeps the request
-//! (`trs_control::access`). The host shows [`Core::agent_requests`] and, on Approve or Deny (a button, the menu, a
+//! (`seedwell_control::access`). The host shows [`Core::agent_requests`] and, on Approve or Deny (a button, the menu, a
 //! notification's action), calls `Core::agent_request_decide` (async), which makes the change and says what happened.
 //! Nothing an agent runs reaches that call.
 
 use crate::Core;
-use trs_control::access::Entry;
+use seedwell_control::access::Entry;
 
 /// How often a host shows the requests again while it shows them (they expire, others come).
 const REFRESH_MS: u32 = 2_000;
@@ -123,12 +123,12 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trs_control::access::{State, TTL_MS, Want};
+    use seedwell_control::access::{State, TTL_MS, Want};
 
     fn entry(id: &str, agents: &[&str], why: Option<&str>, at_ms: u64) -> Entry {
         Entry {
             id: id.into(),
-            want: Want::Level(trs_control::Permission::Full),
+            want: Want::Level(seedwell_control::Permission::Full),
             agents: agents.iter().map(|a| a.to_string()).collect(),
             why: why.map(str::to_owned),
             at_ms,

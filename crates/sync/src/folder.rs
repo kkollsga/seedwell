@@ -7,12 +7,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::Arc;
 
-use trs_sync_proto::device::DeviceKey;
-use trs_sync_proto::ids::{DeviceId, FolderId, ShortId};
-use trs_sync_proto::keys::Access;
-use trs_sync_proto::model::{FileInfo, FileKind, IndexEntry, STATE_DIR, SignedFile, validate_path};
-use trs_sync_proto::msg::HeldFile;
-use trs_sync_proto::sign::{BadWriter, Writer, WriterTable, sign_file};
+use seedwell_sync_proto::device::DeviceKey;
+use seedwell_sync_proto::ids::{DeviceId, FolderId, ShortId};
+use seedwell_sync_proto::keys::Access;
+use seedwell_sync_proto::model::{FileInfo, FileKind, IndexEntry, STATE_DIR, SignedFile, validate_path};
+use seedwell_sync_proto::msg::HeldFile;
+use seedwell_sync_proto::sign::{BadWriter, Writer, WriterTable, sign_file};
 
 use crate::archive::{self, Archived, Retention};
 use crate::clock::Clock;
@@ -824,7 +824,7 @@ impl FolderCore {
                     continue;
                 }
                 let mut info = rec.file.info.clone();
-                info.version = trs_sync_proto::model::Version::new().bump(self.me, now_s);
+                info.version = seedwell_sync_proto::model::Version::new().bump(self.me, now_s);
                 info.modified_by = self.me;
                 batch.put_local(crate::index::LocalRecord { file: signer.sign(info), sequence: 0, invalid: false, ..rec });
             }
@@ -837,7 +837,7 @@ impl FolderCore {
 
     /// A peer's index batch. Every entry is checked before any is stored. An entry whose path this version does
     /// not accept is skipped (a later version may send names this one refuses; the rest of the batch and the
-    /// session go on, as the protocol promises: `trs_sync_proto::msg`). An entry not signed by a writer refuses
+    /// session go on, as the protocol promises: `seedwell_sync_proto::msg`). An entry not signed by a writer refuses
     /// the whole batch: the peer is misbehaving.
     pub fn apply_remote(&mut self, peer: ShortId, idx: RemoteIndex) -> Result<usize, RemoteError> {
         let path_ok = |p: &str| validate_path(p).is_ok() && crate::path::check_wire_path(p).is_ok();
@@ -1583,10 +1583,10 @@ impl FolderCore {
                     && !e.dataless
                     && !i.deleted
                     && match i.version.compare(&f.version) {
-                        trs_sync_proto::model::Causality::Equal => {
+                        seedwell_sync_proto::model::Causality::Equal => {
                             ondemand::same_form(i, &f.content, None) || (i.is_unhashed() && ours_unhashed == Some(i.content_digest()))
                         }
-                        trs_sync_proto::model::Causality::Greater => true,
+                        seedwell_sync_proto::model::Causality::Greater => true,
                         _ => false,
                     }
             })

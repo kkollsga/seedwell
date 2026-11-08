@@ -5,7 +5,7 @@ use crate::common;
 use std::sync::Arc;
 
 use common::*;
-use trs_storage::{
+use seedwell_storage::{
     BLOCK_SIZE, DiskConfig, DiskIo, Mode, PieceOutcome, StorageError, TorrentConfig, WriteAck,
 };
 

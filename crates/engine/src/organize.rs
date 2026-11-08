@@ -9,8 +9,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use trs_classify::{Category, Classification, FileEntry, Input, JunkKind};
-use trs_metainfo::Metainfo;
+use seedwell_classify::{Category, Classification, FileEntry, Input, JunkKind};
+use seedwell_metainfo::Metainfo;
 
 use crate::api::{AddOptions, AddPreview, ChoicePreview, EngineError, PreviewFile, Priority, ProfileBucket, SeedGoal};
 use crate::config::{AfterAdd, EngineConfig};
@@ -85,7 +85,7 @@ pub(crate) fn junk_name(k: JunkKind) -> &'static str {
 /// `~` and `~/x` expanded with `$HOME`; other strings are used as they are.
 pub(crate) fn expand_tilde(s: &str) -> PathBuf {
     if (s == "~" || s.starts_with("~/"))
-        && let Some(home) = trs_platform::dirs::home() {
+        && let Some(home) = seedwell_platform::dirs::home() {
             let mut p = home;
             if let Some(rest) = s.strip_prefix("~/") {
                 p.push(rest);
@@ -111,11 +111,11 @@ pub(crate) fn rule_name(policy: Option<&PolicyData>, id: Option<&str>) -> String
     }
 }
 
-/// The persisted display title of `mi` in `category` (see `trs_classify::torrent_title`).
+/// The persisted display title of `mi` in `category` (see `seedwell_classify::torrent_title`).
 pub(crate) fn title_of(mi: &Metainfo, real: &[usize], category: Option<Category>) -> String {
     let entries: Vec<FileEntry<'_>> =
         real.iter().filter_map(|&i| mi.file(i)).map(|f| FileEntry { path: f.path, size: f.length }).collect();
-    trs_classify::torrent_title(&mi.name, &entries, category)
+    seedwell_classify::torrent_title(&mi.name, &entries, category)
 }
 
 /// Decide everything about `mi`: profile, category, rule, priorities, junk, destinations.
@@ -147,7 +147,7 @@ pub(crate) fn plan(mi: &Metainfo, opts: &AddOptions, ctx: &PlanCtx<'_>) -> Plan 
             .collect();
         let mut input = Input::new(&mi.name, &entries);
         input.tracker_source_hint = mi.source.as_deref();
-        let c = trs_classify::classify(&input);
+        let c = seedwell_classify::classify(&input);
         for j in &c.junk_files {
             if let Some(&i) = real.get(j.index) {
                 junk[i] = Some(j.kind);
@@ -437,7 +437,7 @@ pub(crate) fn prepare(
     let tracker_host = announce
         .first()
         .and_then(|t| t.first())
-        .and_then(|u| trs_tracker::TrackerUrl::parse(u).ok())
+        .and_then(|u| seedwell_tracker::TrackerUrl::parse(u).ok())
         .map(|u| u.host().to_owned())
         .unwrap_or_default();
     let wanted = wanted_bytes(&mi, &plan.file_prios);
@@ -520,7 +520,7 @@ pub(crate) fn place_direct(cfg: &EngineConfig, rec: &crate::persist::DirectRecor
 pub(crate) fn copy_keeping_metadata(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::copy(from, to)?;
     if let (Ok(src), Ok(dst)) = (std::fs::File::open(from), std::fs::OpenOptions::new().write(true).open(to)) {
-        let _ = trs_storage::copy_metadata(&src, &dst);
+        let _ = seedwell_storage::copy_metadata(&src, &dst);
         // Metadata copies reset the times on some systems: the file keeps its own.
         if let Ok(m) = src.metadata().and_then(|m| m.modified()) {
             let _ = dst.set_modified(m);
@@ -534,7 +534,7 @@ pub(crate) fn move_unique(file: &Path, dir: &Path) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
     let want = dir.join(&name).to_string_lossy().into_owned();
-    let target = PathBuf::from(trs_classify::unique_path(&want, |c| exists(Path::new(c))));
+    let target = PathBuf::from(seedwell_classify::unique_path(&want, |c| exists(Path::new(c))));
     match std::fs::rename(file, &target) {
         Ok(()) => Ok(target),
         Err(_) => {
@@ -548,10 +548,10 @@ pub(crate) fn move_unique(file: &Path, dir: &Path) -> std::io::Result<PathBuf> {
 
 /// Apply the "after adding" choice to the `.torrent` at `path`. Returns where the file lies afterwards
 /// when it is still the user's to deal with: `path` itself for "leave", the archive copy for "archive";
-/// `None` when it was deleted or put in the Trash (`trash_dir`, else the system's: `trs_platform::fs::move_to_trash`;
+/// `None` when it was deleted or put in the Trash (`trash_dir`, else the system's: `seedwell_platform::fs::move_to_trash`;
 /// a file on another volume than a Trash folder is copied there).
 pub(crate) fn finish_file(path: &Path, action: &AfterAdd, trash_dir: Option<&Path>) -> std::io::Result<Option<PathBuf>> {
-    use trs_platform::fs::{OtherVolume, move_to_trash};
+    use seedwell_platform::fs::{OtherVolume, move_to_trash};
     match action {
         AfterAdd::Leave => Ok(Some(path.to_path_buf())),
         AfterAdd::Delete => std::fs::remove_file(path).map(|()| None),
@@ -568,13 +568,13 @@ pub(crate) fn verified_torrent_file(path: &Path, id: &[u8; 20]) -> Option<PathBu
     if !meta.file_type().is_file() || !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("torrent")) {
         return None;
     }
-    let limit = trs_state::store::MAX_TORRENT_FILE as u64;
+    let limit = seedwell_state::store::MAX_TORRENT_FILE as u64;
     let mut buf = Vec::new();
     std::fs::File::open(path).ok()?.take(limit + 1).read_to_end(&mut buf).ok()?;
     if buf.len() as u64 > limit {
         return None;
     }
-    let mi = trs_metainfo::Metainfo::from_bytes(&buf).ok()?;
+    let mi = seedwell_metainfo::Metainfo::from_bytes(&buf).ok()?;
     (mi.info_hash.swarm_id()? == *id).then(|| path.to_path_buf())
 }
 
@@ -586,7 +586,7 @@ pub(crate) fn prune_empty_dirs(file: &Path, stop: &Path) {
             break;
         }
         // Only empty directories go (Finder's `.DS_Store` does not count).
-        if !trs_storage::remove_dir_if_empty(&dir) {
+        if !seedwell_storage::remove_dir_if_empty(&dir) {
             break;
         }
         d = dir.parent().map(Path::to_path_buf);
@@ -610,8 +610,8 @@ mod tests {
     }
 
     /// The placement of a torrent of the tracker `t.example` in `category`.
-    fn placed(profile: Option<trs_state::trackers::Profile>, rules: trs_state::RuleSet, opts: AddOptions) -> Plan {
-        let mut profiles = trs_state::TrackerProfiles::default();
+    fn placed(profile: Option<seedwell_state::trackers::Profile>, rules: seedwell_state::RuleSet, opts: AddOptions) -> Plan {
+        let mut profiles = seedwell_state::TrackerProfiles::default();
         if let Some(p) = profile {
             profiles.add(p).unwrap();
         }
@@ -626,11 +626,11 @@ mod tests {
         plan(&tiny_torrent(), &opts, &PlanCtx { cfg: &cfg, policy: Some(&pol), choice: false, folder_ask: false })
     }
 
-    fn tracker(fin: Option<&str>, inc: Option<&str>, movie: Option<&str>) -> trs_state::trackers::Profile {
-        let mut p = trs_state::trackers::Profile {
+    fn tracker(fin: Option<&str>, inc: Option<&str>, movie: Option<&str>) -> seedwell_state::trackers::Profile {
+        let mut p = seedwell_state::trackers::Profile {
             id: "t".into(),
             name: "T".into(),
-            urls: vec![trs_state::trackers::UrlPattern::parse("t.example").unwrap()],
+            urls: vec![seedwell_state::trackers::UrlPattern::parse("t.example").unwrap()],
             ..Default::default()
         };
         p.location.finished_dir = fin.map(Into::into);
@@ -645,7 +645,7 @@ mod tests {
 
     #[test]
     fn a_tracker_location_beats_the_app_category_and_default_and_a_tracker_category_beats_it() {
-        use trs_state::RuleSet;
+        use seedwell_state::RuleSet;
         // No tracker folders: the app's category folder.
         let p = placed(Some(tracker(None, None, None)), RuleSet::default(), movie());
         assert_eq!((p.finished_base.as_path(), p.stage_root.as_deref()), (Path::new(abs!("/app/movies")), Some(Path::new(abs!("/app/movie-inc")))));
@@ -663,8 +663,8 @@ mod tests {
 
     #[test]
     fn the_default_rule_folder_loses_to_the_tracker_but_a_rules_own_folder_wins() {
-        use trs_state::rules::{DefaultRule, Rule};
-        let mut rs = trs_state::RuleSet::default();
+        use seedwell_state::rules::{DefaultRule, Rule};
+        let mut rs = seedwell_state::RuleSet::default();
         rs.set_default(DefaultRule { finished_dir: Some(abs!("/rule/default").into()), ..DefaultRule::default() }).unwrap();
         rs.add_rule(Rule { id: "own".into(), name: "own".into(), enabled: false, finished_dir: Some(abs!("/rule/own").into()), ..Rule::default() }, None).unwrap();
         rs.add_rule(Rule { id: "plain".into(), name: "plain".into(), enabled: false, ..Rule::default() }, None).unwrap();
@@ -705,7 +705,7 @@ mod tests {
     #[test]
     fn tilde_expands_only_at_the_start() {
         assert_eq!(expand_tilde("/a/~/b"), PathBuf::from("/a/~/b"));
-        if let Some(home) = trs_platform::dirs::home() {
+        if let Some(home) = seedwell_platform::dirs::home() {
             assert_eq!(expand_tilde("~/x"), home.join("x"));
         }
     }

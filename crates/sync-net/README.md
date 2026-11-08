@@ -1,8 +1,8 @@
-# trs-sync-net
+# seedwell-sync-net
 
 The folder-sync driver (SPEC §7G): devices talk to each other, folders run, and the app, the CLI and agents
-get one API, `SyncHandle`. The rules for *what* to sync live in `trs-sync`; the wire format, keys and roles in
-`trs-sync-proto`. This crate moves bytes and runs the loops. `#![forbid(unsafe_code)]`.
+get one API, `SyncHandle`. The rules for *what* to sync live in `seedwell-sync`; the wire format, keys and roles in
+`seedwell-sync-proto`. This crate moves bytes and runs the loops. `#![forbid(unsafe_code)]`.
 
 It is a compartment of its own: its own port, its own state (`sync.toml`, `sync/<folder>.redb`), its own
 tasks. The torrent engine only lends it DHT lookups on public topics and a port mapping (through the
@@ -43,7 +43,7 @@ dialer                                   acceptor
 
 ## A folder
 
-`runtime.rs`: the watcher (`trs-fswatch`) starts first, then a full stat scan (unchanged files are not
+`runtime.rs`: the watcher (`seedwell-fswatch`) starts first, then a full stat scan (unchanged files are not
 read), then a pull. After that: watcher batches → scans; a peer's index change → pull rounds until nothing
 more can be done; paths that changed under the puller are scanned and pulled again; a jittered hourly
 full scan; retries with backoff (10 s doubling to 5 min) while data is missing or steps fail. Every local
@@ -93,7 +93,7 @@ offset  size  field
 50       4    Unix hour (UTC), u32 BE
 54       8    nonce (random per packet)
 62       1    tag count n (≤ 150)
-63      8n    tags: lan_tag(hour, nonce) per folder (trs-sync-proto keys.rs)
+63      8n    tags: lan_tag(hour, nonce) per folder (seedwell-sync-proto keys.rs)
 63+8n   64    Ed25519 signature by the device key over everything before it
 ```
 
@@ -120,7 +120,7 @@ A session runs over any byte stream (`session::BoxIo`), always with the magic an
 relay sees only ciphertext.
 
 - **TCP and uTP:** the service binds TCP and its UDP twin on the same port number; the UDP socket speaks uTP
-  (`trs-utp`, LEDBAT) and hands everything else (hole-punch probes) to `punch.rs`. A LAN address is dialed
+  (`seedwell-utp`, LEDBAT) and hands everything else (hole-punch probes) to `punch.rs`. A LAN address is dialed
   over TCP only; any other over TCP and uTP at once, and the first finished handshake wins.
 - **Reaching a member that direct dials do not reach** (`relay::reach`, from the dial loop, 2 s after the
   direct attempts, backing off 3 s doubling to 5 min per device):
@@ -151,22 +151,22 @@ looks every 15 s itself. A change closes the sessions whose local address is gon
 the LAN and in the DHT at once, clears the dial backoffs, dials every member not connected and writes a new
 rendezvous record. `rendezvous.rs`: this device's sealed record in the user's rendezvous (written at the start, on a
 change, every 30 minutes) and lookups of wanted devices from the dial loop (SPEC §7G.3; the record format is
-`trs_sync_proto::rendezvous`, the HTTP side `trs-rendezvous`).
+`seedwell_sync_proto::rendezvous`, the HTTP side `seedwell-rendezvous`).
 
 ## Dependencies
 
 | Crate | Why |
 |---|---|
-| `trs-sync`, `trs-sync-proto`, `trs-fswatch` | the core, the wire format, the watcher |
-| `trs-utp` | uTP on the sync port's UDP twin (Internet sessions, hole punching); Seedwell's own, already used by the engine |
-| `trs-rendezvous` | The rendezvous client (the user's address book Worker, SPEC §7G.3) over the app's one HTTP stack; Seedwell's own. Its `testkit` (loopback fakes) in the tests only |
+| `seedwell-sync`, `seedwell-sync-proto`, `seedwell-fswatch` | the core, the wire format, the watcher |
+| `seedwell-utp` | uTP on the sync port's UDP twin (Internet sessions, hole punching); Seedwell's own, already used by the engine |
+| `seedwell-rendezvous` | The rendezvous client (the user's address book Worker, SPEC §7G.3) over the app's one HTTP stack; Seedwell's own. Its `testkit` (loopback fakes) in the tests only |
 | `tokio` | the driver (minimal features, as elsewhere) |
 | `rustls`, `tokio-rustls` (ring) | TLS 1.3 with raw public keys; already in Seedwell for HTTPS trackers |
 | `ring` | random ids, SHA-256 when serving; already linked through rustls |
 | `flate2` (Rust backend) | deflate for metadata messages; already used by the tracker crate |
-| `serde`, `toml` | `sync.toml`; already used by `trs-state` |
-| `serde_json` | the JSON a channel's wake-up command reads; already used by `trs-control` and `trs-engine` |
-| `socket2` (`all`) | SO_REUSEPORT on the LAN discovery socket before it binds (std and tokio cannot set it, and `unsafe` is forbidden), and the sync port's sockets read back in its tests (dual-stack, through `trs-platform`); already built with `all` through tokio's `net` |
+| `serde`, `toml` | `sync.toml`; already used by `seedwell-state` |
+| `serde_json` | the JSON a channel's wake-up command reads; already used by `seedwell-control` and `seedwell-engine` |
+| `socket2` (`all`) | SO_REUSEPORT on the LAN discovery socket before it binds (std and tokio cannot set it, and `unsafe` is forbidden), and the sync port's sockets read back in its tests (dual-stack, through `seedwell-platform`); already built with `all` through tokio's `net` |
 
 ## Tests
 

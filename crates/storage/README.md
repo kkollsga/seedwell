@@ -1,4 +1,4 @@
-# trs-storage
+# seedwell-storage
 
 The disk layer of Seedwell: piece/file mapping, a dedicated I/O + hashing thread pool, a shared
 fd cache, a bounded write cache, resume validation, recheck/scrub and crash-safe finalize.
@@ -23,7 +23,7 @@ It depends on **no other workspace crate**: the engine converts metainfo into [`
 | `rename_excl`, `same_volume`, `dev_of_nearest_existing`, `available_space` | `renamex_np(RENAME_EXCL)` and the volume helpers (device id of the nearest existing ancestor; free bytes). |
 | `TorrentHandle::{set_mode, set_location, set_paths, ensure_root, attach_hashes, detach_hashes, abort_piece, sync}` | Lifecycle controls. |
 | `raise_nofile_limit`, `perf_core_count`, `preallocate`, `release_free_memory` (gives the allocator's freed blocks back to the OS after a burst of work: `malloc_zone_pressure_relief` on macOS, `malloc_trim` on glibc), `hash::{sha1, sha256, Sha1Stream, Sha256Stream, sha1_hw_accelerated}` | Startup helpers and primitives. |
-| `MappedAlloc`, `MAP_MIN` | `#[global_allocator]` of the apps (`trs-ffi`, the `seedwell` daemon): blocks of 128 KiB and more are an anonymous `mmap`, unmapped when freed, so a start-up burst of hash scratch, piece buffers and grown tables does not stay resident next to the small long-lived records. macOS only; elsewhere it is the system allocator. No new dependency (`libc` was already here); see the engine README, Memory. |
+| `MappedAlloc`, `MAP_MIN` | `#[global_allocator]` of the apps (`seedwell-ffi`, the `seedwell` daemon): blocks of 128 KiB and more are an anonymous `mmap`, unmapped when freed, so a start-up burst of hash scratch, piece buffers and grown tables does not stay resident next to the small long-lived records. macOS only; elsewhere it is the system allocator. No new dependency (`libc` was already here); see the engine README, Memory. |
 | `Pending<T>` | Request future: `.await` it, or `.wait()` from a plain thread. Backed by a hand-written oneshot. |
 | `StorageError` | Typed: `MissingData { file }`, `Truncated { file }`, `MissingRoot`, `ReadOnly`, `Busy`, `Cancelled`, `DestinationExists { file }`, … |
 
@@ -54,9 +54,9 @@ with **no side effects**; retry later.
 * **Staging**: `TorrentConfig::with_default_staging()` writes below `<root>/.incomplete`. Files with
   a custom absolute target are staged as `.incomplete/.custom/<index>-<name>`.
   `finalize` never overwrites an existing destination (`DestinationExists`).
-* **Finalize journal**: header `TRSJ|v1|file count|layout digest` + 5-byte records. Rename moves need
+* **Finalize journal**: header `SWFJ|v1|file count|layout digest` + 5-byte records. Rename moves need
   no records (rename is atomic; resume inspects the filesystem). Cross-volume copies record
-  `Started` (fsync) before writing `<dst>.trs-part`, which is fsynced and atomically renamed, so a
+  `Started` (fsync) before writing `<dst>.seedwell-part`, which is fsynced and atomically renamed, so a
   destination only ever appears complete. Tested by crashing at **every** step, on both paths, and
   resuming in a fresh `DiskIo`.
 
@@ -104,7 +104,7 @@ New errors: `VerifyFailed { piece }`, `InsufficientSpace { needed, available }`,
 **Method.** All files same device as their destination's nearest existing ancestor: `Renamed` (directories created first, then
 `rename_excl` per file; an empty file whose source never existed is created). Otherwise `Copied` for the whole torrent: free space
 per destination volume is checked first (`sum of sizes + reserve_bytes`, else `InsufficientSpace`, nothing written), then every
-file is streamed to `<dst>.trs-part` with three stages that overlap (read, SHA-1 of every piece as it passes, write), pieces
+file is streamed to `<dst>.seedwell-part` with three stages that overlap (read, SHA-1 of every piece as it passes, write), pieces
 spanning files and BEP 47 padding handled by one running hasher, then every part is fsynced (mtime and mode copied, xattrs/ACLs are
 not), and only after the whole stream verified are the parts published with `rename_excl` (a half-verified file never appears at a
 final name). A bad piece fails with `VerifyFailed { piece }`, everything this call created is removed, the source is untouched.
@@ -126,7 +126,7 @@ while a copy runs; nothing is kept per torrent when idle. Per torrent, relocatio
 
 ### Journal and recovery matrix
 
-File `TRSR`, v1: header (structure digest, file count; paths are not part of it, so the journal survives the switch), a
+File `SWRJ`, v1: header (structure digest, file count; paths are not part of it, so the journal survives the switch), a
 checksummed **Plan** record (method; per file: index, src, dst, "create empty"; the topmost directories the move will create),
 then 5-byte records `Started` (fsync), `Publishing(file)` (copy; fsync *before* the publishing rename), `Done(file)`, `Prepared`
 (fsync), `Switched` (fsync), `SourcesGone`. Torn tails are ignored; a foreign/garbled journal is `CorruptJournal`.
@@ -135,7 +135,7 @@ then 5-byte records `Started` (fsync), `Publishing(file)` (copy; fsync *before* 
 | Crash point | On disk | `relocate_recover` | Engine's record | Engine does |
 |---|---|---|---|---|
 | before the plan is durable / during `Started` | nothing changed (a stray journal is removed by `recover`) | `Nothing` | old | retry the move if still wanted |
-| after `Started`, dirs created / some files renamed / mid-copy (parts) / mid-publish | partial: created dirs, `.trs-part`, some published copies or some renamed files | `Incomplete` | old | `relocate_rollback` (deletes parts and our copies; renames files back; prunes dirs it created; removes journal), then retry |
+| after `Started`, dirs created / some files renamed / mid-copy (parts) / mid-publish | partial: created dirs, `.seedwell-part`, some published copies or some renamed files | `Incomplete` | old | `relocate_rollback` (deletes parts and our copies; renames files back; prunes dirs it created; removes journal), then retry |
 | copy verified and published, `Prepared` not yet written | all copies in place, journal says `Incomplete` | `Incomplete` | old | `relocate_rollback` (safe) |
 | after `Prepared`, engine not yet switched/persisted | rename: files at `dst`; copy: both copies | `Prepared` | old (`src`) | `relocate_rollback`, or redo the switch + persist + `mark_switched` + `commit` |
 | after `Prepared`, engine persisted but `Switched` not yet recorded | as above | `Prepared` | new (`dst`) | `relocate_commit` (valid from `Prepared`) |
@@ -180,7 +180,7 @@ No async runtime and no `futures` crate: the oneshot future is 60 lines in `src/
 
 ## Benchmarks
 
-`cargo bench -p trs-storage --bench storage_bench` (env `TRS_BENCH_MB`, `TRS_BENCH_DIRS`). It writes
+`cargo bench -p seedwell-storage --bench storage_bench` (env `SEEDWELL_BENCH_MB`, `SEEDWELL_BENCH_DIRS`). It writes
 under `bench/downloads/storage-bench/` and `$TMPDIR`, and deletes everything afterwards.
 Numbers from an Apple M4 (4 perf cores), macOS, release+LTO:
 
@@ -201,7 +201,7 @@ Targets: ≥ 1 Gbit/s (0.125 GB/s) per core budget is exceeded by orders of magn
 
 ## Tests
 
-`cargo test -p trs-storage`: layout property tests (random file sizes incl. empty and padding files,
+`cargo test -p seedwell-storage`: layout property tests (random file sizes incl. empty and padding files,
 piece sizes; tiling, round trips, boundaries), write→read round trip, hash-failure path,
 write-cache budget pressure, write-through verification, concurrent writers, recheck over a generated
 multi-file torrent (corruption, missing, truncated, progress, cancel, scrub throttle), resume
@@ -216,7 +216,7 @@ recovery in a fresh `DiskIo` (+ a fresh relocation), switch-then-crash during co
 complete destination, `switch_layout` (geometry check, Cold round trip), `quiesce_writes`, a partial download relocated
 and then finished at the new place, and a **real cross-device copy onto a temporary APFS disk image**
 (`hdiutil create/attach`, always force-detached by a drop guard; the test skips itself when hdiutil is unavailable).
-`cargo test --release -p trs-storage --test relocate -- --ignored --nocapture` prints throughput (`RELOC_MB` sets the size).
+`cargo test --release -p seedwell-storage --test relocate -- --ignored --nocapture` prints throughput (`RELOC_MB` sets the size).
 
 ### Relocation throughput (Apple M4, internal SSD, release; single runs, noisy on a shared machine)
 

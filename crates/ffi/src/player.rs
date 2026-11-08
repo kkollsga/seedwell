@@ -1,5 +1,5 @@
 //! Play while downloading (SPEC §7F.3), what follows a Play command: which players this computer has
-//! (`trs_platform::players`, remembered a few seconds), which one plays a file (the "Play videos with" setting, or
+//! (`seedwell_platform::players`, remembered a few seconds), which one plays a file (the "Play videos with" setting, or
 //! "Automatic"), and what the host does then: start the player ([`PlayLaunch`]) or show the calm note that says why
 //! nothing starts. Also the setting's choices. The Play menus themselves are `row_commands::play_commands`.
 //!
@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use trs_platform::players::{self as platform, KnownPlayer, Player, Target};
-use trs_platform::COMPUTER;
+use seedwell_platform::players::{self as platform, KnownPlayer, Player, Target};
+use seedwell_platform::COMPUTER;
 
 use crate::play::is_mp4_family;
 use crate::row_commands::{playable_videos, PlayOffer, PlayerOption};

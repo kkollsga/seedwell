@@ -12,14 +12,14 @@ pub fn peer_allowed(peer_uid: u32, server_uid: u32) -> bool {
     peer_uid == server_uid
 }
 
-/// `control.sock` in Seedwell's state folder (`trs_platform::dirs::state_dir`: Application Support
+/// `control.sock` in Seedwell's state folder (`seedwell_platform::dirs::state_dir`: Application Support
 /// on macOS, the XDG state folder elsewhere, `%LOCALAPPDATA%` on Windows, where it names a pipe).
 /// `SEEDWELL_SOCKET` overrides it.
 pub fn default_socket_path() -> PathBuf {
     if let Some(p) = std::env::var_os("SEEDWELL_SOCKET").filter(|p| !p.is_empty()) {
         return PathBuf::from(p);
     }
-    trs_platform::dirs::state_dir().unwrap_or_else(|| std::env::temp_dir().join("seedwell")).join("control.sock")
+    seedwell_platform::dirs::state_dir().unwrap_or_else(|| std::env::temp_dir().join("seedwell")).join("control.sock")
 }
 
 #[cfg(test)]

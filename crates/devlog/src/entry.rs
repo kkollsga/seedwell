@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use trs_state::url::{MASK, mask_secrets_for_log, mask_text, mask_urls_in_text};
+use seedwell_state::url::{MASK, mask_secrets_for_log, mask_text, mask_urls_in_text};
 
 /// What kind of line this is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -174,7 +174,7 @@ pub fn iso_time(ms: u64) -> String {
 
 impl Entry {
     /// The masked JSON line (no trailing newline). Every string that can hold a secret goes
-    /// through the masking functions of `trs_state::url` here.
+    /// through the masking functions of `seedwell_state::url` here.
     pub fn to_line(&self) -> String {
         let tracker = if self.tracker.contains("://") { mask_secrets_for_log(&self.tracker) } else { mask_text(&self.tracker) };
         let host = host_of(&tracker);

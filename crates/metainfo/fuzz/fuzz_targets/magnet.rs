@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use trs_metainfo::Magnet;
+use seedwell_metainfo::Magnet;
 
 fuzz_target!(|data: &str| {
     if let Ok(m) = Magnet::parse(data) {

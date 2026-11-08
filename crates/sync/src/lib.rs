@@ -1,4 +1,4 @@
-//! trs-sync: the folder-sync core (SPEC §7G).
+//! seedwell-sync: the folder-sync core (SPEC §7G).
 //!
 //! * [`fs`]: the injected filesystem ([`fs::StdFs`] on disk, [`fs::MemFs`] in simulations).
 //! * [`path`]: wire names (NFC) and comparison keys (case folding on case-insensitive folders).
@@ -13,7 +13,7 @@
 //! * [`ondemand`]: on-demand folders' items for a host (File Provider, Cloud Files), and their change feed.
 //! * [`clock`]: injected time.
 //!
-//! No sockets and no async: the driver (`trs-sync-net`) runs this on blocking threads and moves
+//! No sockets and no async: the driver (`seedwell-sync-net`) runs this on blocking threads and moves
 //! messages. See the README for the design.
 // `unsafe` only in `fs::flush`, the one OS call `std` lacks (a write barrier).
 #![deny(unsafe_code)]

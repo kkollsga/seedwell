@@ -1,4 +1,4 @@
-//! Torrent traffic through a SOCKS5 proxy (SPEC §7H), against the loopback fake proxy of `trs-socks`: peers and
+//! Torrent traffic through a SOCKS5 proxy (SPEC §7H), against the loopback fake proxy of `seedwell-socks`: peers and
 //! trackers go through it, nothing goes around it, the kill switch holds torrents while it is down, health is
 //! measured.
 use crate::common;
@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use common::*;
-use trs_engine::*;
-use trs_socks::testkit::FakeProxy;
+use seedwell_engine::*;
+use seedwell_socks::testkit::FakeProxy;
 
 fn via(fake: &FakeProxy) -> ProxyConfig {
     ProxyConfig { servers: vec![fake.addr().ip().to_string()], port: fake.addr().port(), auth: Some(proxy::Credentials::new("user", "pass").unwrap()), ..Default::default() }

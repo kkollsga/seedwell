@@ -7,9 +7,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
-use trs_tracker::backoff::{nominal_delay, slow_nominal_delay};
-use trs_tracker::response::{AnnounceError, FailureClass};
-use trs_tracker::{AnnounceParams, Event, InfoHash20, Millis, Timing};
+use seedwell_tracker::backoff::{nominal_delay, slow_nominal_delay};
+use seedwell_tracker::response::{AnnounceError, FailureClass};
+use seedwell_tracker::{AnnounceParams, Event, InfoHash20, Millis, Timing};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Sess {
@@ -323,7 +323,7 @@ impl Oracle {
                             Self::record_failure(
                                 ks,
                                 deadline,
-                                &AnnounceError::Transport(trs_tracker::TransportError::Timeout),
+                                &AnnounceError::Transport(seedwell_tracker::TransportError::Timeout),
                             );
                             ks.last_fail_seen = Some(seen_at(deadline, wake_at, now));
                         }
@@ -351,7 +351,7 @@ impl Oracle {
                 ks.fails += 1;
                 let mut wait = slow_nominal_delay(ks.fails);
                 if let AnnounceError::Rejected {
-                    retry_in: Some(trs_tracker::response::RetryIn::Minutes(m)),
+                    retry_in: Some(seedwell_tracker::response::RetryIn::Minutes(m)),
                     ..
                 } = e
                 {
@@ -750,7 +750,7 @@ impl Oracle {
                     Self::record_failure(
                         ks,
                         deadline,
-                        &AnnounceError::Transport(trs_tracker::TransportError::Timeout),
+                        &AnnounceError::Transport(seedwell_tracker::TransportError::Timeout),
                     );
                     ks.last_fail_seen = Some(seen_at(deadline, self.wake_at, now));
                 }

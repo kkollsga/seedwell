@@ -13,8 +13,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use trs_control::display;
-use trs_platform::computer;
+use seedwell_control::display;
+use seedwell_platform::computer;
 
 use crate::calls::{Polled, UI_WAIT};
 use crate::files::FileCheck;
@@ -315,7 +315,7 @@ pub(crate) fn shown_in(path: &str, home: Option<&str>) -> String {
 }
 
 pub(crate) fn home() -> Option<String> {
-    trs_platform::dirs::home().map(|h| h.display().to_string())
+    seedwell_platform::dirs::home().map(|h| h.display().to_string())
 }
 
 impl State {

@@ -1,4 +1,4 @@
-# trs-fswatch
+# seedwell-fswatch
 
 Watches one sync folder recursively and tells the sync scanner which paths to look at (SPEC §7G.2, "Watching").
 Two parts:
@@ -11,7 +11,7 @@ Two parts:
   `Batch`es (`Paths`, `Dir`, `All`) for the scanner.
 
 ```rust
-use trs_fswatch::{watch, WatchOptions, RawEvent, aggregate::{Aggregator, Batch}};
+use seedwell_fswatch::{watch, WatchOptions, RawEvent, aggregate::{Aggregator, Batch}};
 
 let w = watch(&root, WatchOptions { since: saved_token, ..Default::default() })?;   // before the initial scan
 let mut agg = Aggregator::new();
@@ -122,7 +122,7 @@ each with a `// SAFETY:` comment. The aggregator, polling, the channel and every
 | Crate | Why |
 |---|---|
 | `libc` | inotify, `poll`, `pipe2`, `read` on Linux, and `dev_t` for `FSEventsCopyUUIDForDevice`. Already in the workspace. |
-| `windows-sys` *(Windows)* | `ReadDirectoryChangesW`, `CreateFileW`, overlapped I/O and events. Already in the workspace (trs-platform). |
+| `windows-sys` *(Windows)* | `ReadDirectoryChangesW`, `CreateFileW`, overlapped I/O and events. Already in the workspace (seedwell-platform). |
 | `proptest` *(dev)* | Properties of the aggregator over random event streams. |
 | `tempfile` *(dev)* | Temporary folders for the integration tests; never the home folder. |
 

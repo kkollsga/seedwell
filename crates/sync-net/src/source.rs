@@ -9,9 +9,9 @@ use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
-use trs_sync::pull::{ChunkRequest, ChunkSource, FetchError, StreamAsk, StreamFail, StreamGot};
-use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::msg::{Request, ResponseCode, StreamRequest};
+use seedwell_sync::pull::{ChunkRequest, ChunkSource, FetchError, StreamAsk, StreamFail, StreamGot};
+use seedwell_sync_proto::ids::FolderId;
+use seedwell_sync_proto::msg::{Request, ResponseCode, StreamRequest};
 
 use crate::shared::{Ctx, PeerHandle};
 
@@ -31,7 +31,7 @@ pub(crate) fn stream_timeout(len: u32) -> Duration {
 
 /// The connected device to stream an unhashed version from: its maker, the one device that can (it signs the hashed
 /// form); never another that announces the unhashed form as held, however close.
-pub(crate) fn stream_peer(peers: Vec<Arc<PeerHandle>>, maker: trs_sync_proto::ids::ShortId) -> Option<Arc<PeerHandle>> {
+pub(crate) fn stream_peer(peers: Vec<Arc<PeerHandle>>, maker: seedwell_sync_proto::ids::ShortId) -> Option<Arc<PeerHandle>> {
     peers.into_iter().find(|p| p.device.short() == maker)
 }
 
@@ -191,7 +191,7 @@ type Got = Result<Vec<u8>, (Option<Arc<PeerHandle>>, FetchError)>;
 /// A collected request: its index, whether it may be asked of another holder, and its data or why not.
 type Answer = (usize, bool, Got);
 
-type Pending = (Arc<PeerHandle>, tokio::sync::oneshot::Receiver<trs_sync_proto::msg::Response>);
+type Pending = (Arc<PeerHandle>, tokio::sync::oneshot::Receiver<seedwell_sync_proto::msg::Response>);
 
 /// Waits for the answer to request `i` (of `len` bytes) on a task of its own, at most [`REQUEST_TIMEOUT`] from now.
 fn spawn_collect(running: &mut JoinSet<Answer>, i: usize, retry: bool, (peer, rx): Pending, req: &ChunkRequest, folder: FolderId) {
@@ -247,7 +247,7 @@ impl NetSource {
 async fn collect(
     peer: &PeerHandle,
     len: u32,
-    rx: tokio::sync::oneshot::Receiver<trs_sync_proto::msg::Response>,
+    rx: tokio::sync::oneshot::Receiver<seedwell_sync_proto::msg::Response>,
     deadline: Instant,
 ) -> Result<Vec<u8>, FetchError> {
     let got = tokio::time::timeout_at(deadline, rx).await;
@@ -269,8 +269,8 @@ mod tests {
 
     fn peer(seed: u8, ip: &str) -> Arc<PeerHandle> {
         let addr: std::net::SocketAddr = format!("{ip}:1").parse().unwrap();
-        let pk = *trs_sync_proto::device::DeviceKey::from_seed(&[seed; 32]).public_key();
-        let agreed = trs_sync_proto::msg::Agreed { protocol: trs_sync_proto::msg::PROTOCOL, features: 0 };
+        let pk = *seedwell_sync_proto::device::DeviceKey::from_seed(&[seed; 32]).public_key();
+        let agreed = seedwell_sync_proto::msg::Agreed { protocol: seedwell_sync_proto::msg::PROTOCOL, features: 0 };
         PeerHandle::new(pk, format!("device {seed}"), "Seedwell".into(), agreed, addr, addr, [0; 32], true, crate::session::Via::Tcp).0
     }
 
@@ -314,5 +314,5 @@ mod tests {
         assert!(stream_timeout(1) >= REQUEST_TIMEOUT);
     }
 
-    const STREAM_PIECE_BYTES: u32 = trs_sync_proto::msg::STREAM_PIECE;
+    const STREAM_PIECE_BYTES: u32 = seedwell_sync_proto::msg::STREAM_PIECE;
 }

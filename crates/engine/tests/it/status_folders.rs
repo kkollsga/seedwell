@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use common::*;
-use trs_engine::config::DetectionConfig;
-use trs_engine::*;
+use seedwell_engine::config::DetectionConfig;
+use seedwell_engine::*;
 
 struct Lab {
     dl: PathBuf,
@@ -347,7 +347,7 @@ async fn a_locked_file_is_reported_once_and_the_move_follows_the_unlock() {
     let lock = Locked::new(l.dl.join("Active/lockedbundle/sub/two.bin"));
     n.h.pause(&[t.id]); // belongs in Stopped/ at the next check
     let (failed, started) = failures(&mut ev, t.id, 2500).await; // about ten checks
-    assert_eq!(failed, [format!("\u{201c}two.bin\u{201d} {}, so the torrent stays where it is", trs_platform::fs::LOCKED_WORDS)]);
+    assert_eq!(failed, [format!("\u{201c}two.bin\u{201d} {}, so the torrent stays where it is", seedwell_platform::fs::LOCKED_WORDS)]);
     assert_eq!(started, 0, "the preflight runs before the move is announced");
     assert!(!failed[0].contains("file #"));
     let r = row_h(&n.h, &t.id).await.unwrap();
@@ -380,7 +380,7 @@ async fn a_move_the_user_asked_for_reports_a_locked_file_every_time() {
         n.h.move_to(&[t.id], dest.path()).await.unwrap();
         let (failed, _) = failures(&mut ev, t.id, 800).await;
         assert_eq!(failed.len(), 1, "{failed:?}");
-        assert!(failed[0].starts_with(&format!("\u{201c}one.bin\u{201d} {}", trs_platform::fs::LOCKED_WORDS)), "{failed:?}");
+        assert!(failed[0].starts_with(&format!("\u{201c}one.bin\u{201d} {}", seedwell_platform::fs::LOCKED_WORDS)), "{failed:?}");
     }
     t.verify(&l.dl, &[]);
     assert!(top(dest.path()).is_empty());

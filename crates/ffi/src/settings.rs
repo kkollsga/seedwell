@@ -1,5 +1,5 @@
 //! Settings, rules and tracker profiles over FFI: typed records per Settings tab, backed by the
-//! TOML documents of `trs-state` (SPEC §8.4, §7, §7E).
+//! TOML documents of `seedwell-state` (SPEC §8.4, §7, §7E).
 //!
 //! Every save is "load the document, overwrite the fields this record knows, validate, write".
 //! Unknown keys survive, and a field this module does not know about is never reset. The engine
@@ -7,13 +7,13 @@
 
 use std::path::{Path, PathBuf};
 
-use trs_state::config::{
+use seedwell_state::config::{
     AfterAdd, AskBeforeAdding, Config, DaySet, Encryption, OnBattery, Permission, Preallocation, TimeOfDay, WatchFolder, WatchMode,
 };
-use trs_state::duration::Secs;
-use trs_state::rules::{self, DefaultRule, Match, OnGoal, Rule, RuleSet};
-use trs_state::trackers::{Profile, TrackerProfiles, UrlPattern};
-use trs_state::{DocError, DocStore, FieldError};
+use seedwell_state::duration::Secs;
+use seedwell_state::rules::{self, DefaultRule, Match, OnGoal, Rule, RuleSet};
+use seedwell_state::trackers::{Profile, TrackerProfiles, UrlPattern};
+use seedwell_state::{DocError, DocStore, FieldError};
 
 use crate::types::{Category, CoreError, Priority};
 
@@ -228,8 +228,8 @@ pub struct AppSettings {
 
 // ---------------------------------------------------------------- conversions: enums
 
-fn category_to(c: trs_classify::Category) -> Category {
-    use trs_classify::Category as C;
+fn category_to(c: seedwell_classify::Category) -> Category {
+    use seedwell_classify::Category as C;
     match c {
         C::Movie => Category::Movie,
         C::Tv => Category::Tv,
@@ -242,8 +242,8 @@ fn category_to(c: trs_classify::Category) -> Category {
     }
 }
 
-pub(crate) fn category_from(c: Category) -> trs_classify::Category {
-    use trs_classify::Category as C;
+pub(crate) fn category_from(c: Category) -> seedwell_classify::Category {
+    use seedwell_classify::Category as C;
     match c {
         Category::Movie => C::Movie,
         Category::Tv => C::Tv,
@@ -256,7 +256,7 @@ pub(crate) fn category_from(c: Category) -> trs_classify::Category {
     }
 }
 
-pub(crate) fn category_to_ffi(c: trs_classify::Category) -> Category {
+pub(crate) fn category_to_ffi(c: seedwell_classify::Category) -> Category {
     category_to(c)
 }
 
@@ -312,16 +312,33 @@ fn days_from(d: ScheduleDays) -> DaySet {
 
 // ---------------------------------------------------------------- Config <-> AppSettings
 
-const CATEGORIES: [trs_classify::Category; 8] = [
-    trs_classify::Category::Movie,
-    trs_classify::Category::Tv,
-    trs_classify::Category::Music,
-    trs_classify::Category::Audiobook,
-    trs_classify::Category::Book,
-    trs_classify::Category::Software,
-    trs_classify::Category::Other,
-    trs_classify::Category::Game,
+const CATEGORIES: [seedwell_classify::Category; 8] = [
+    seedwell_classify::Category::Movie,
+    seedwell_classify::Category::Tv,
+    seedwell_classify::Category::Music,
+    seedwell_classify::Category::Audiobook,
+    seedwell_classify::Category::Book,
+    seedwell_classify::Category::Software,
+    seedwell_classify::Category::Other,
+    seedwell_classify::Category::Game,
 ];
+
+/// A watch folder of `config.toml` as Settings holds it.
+pub(crate) fn watch_to(w: &WatchFolder) -> WatchFolderSetting {
+    WatchFolderSetting {
+        path: w.path.clone(),
+        enabled: w.enabled,
+        mode: match w.mode {
+            WatchMode::Auto => WatchModeSetting::Auto,
+            WatchMode::Ask => WatchModeSetting::Ask,
+        },
+        after_add: after_to(w.after_add),
+        archive_dir: w.archive_dir.clone(),
+        category: w.category.map(category_to),
+        rule: w.rule.clone(),
+        since: w.since,
+    }
+}
 
 pub(crate) fn from_config(c: &Config) -> AppSettings {
     AppSettings {
@@ -380,24 +397,7 @@ pub(crate) fn from_config(c: &Config) -> AppSettings {
             by_status: c.folders.by_status,
             torrent_after_add: after_to(c.folders.torrent_after_add),
             archive_dir: c.folders.archive_dir.clone(),
-            watch: c
-                .folders
-                .watch
-                .iter()
-                .map(|w| WatchFolderSetting {
-                    path: w.path.clone(),
-                    enabled: w.enabled,
-                    mode: match w.mode {
-                        WatchMode::Auto => WatchModeSetting::Auto,
-                        WatchMode::Ask => WatchModeSetting::Ask,
-                    },
-                    after_add: after_to(w.after_add),
-                    archive_dir: w.archive_dir.clone(),
-                    category: w.category.map(category_to),
-                    rule: w.rule.clone(),
-                    since: w.since,
-                })
-                .collect(),
+            watch: c.folders.watch.iter().map(watch_to).collect(),
             skip_junk: c.detection.skip_junk,
             ask_when_unsure: c.detection.ask_when_unsure,
             confidence_threshold: c.detection.confidence_threshold,
@@ -476,8 +476,8 @@ pub(crate) fn apply_to_config(s: &AppSettings, c: &mut Config) {
     c.transfers.max_active_downloads = t.max_active_downloads;
     c.transfers.max_connections_per_host = t.max_connections_per_host;
     c.transfers.large_torrent_gb = t.large_torrent_gb;
-    c.transfers.start_delay_secs = t.start_delay_secs.min(trs_state::config::MAX_START_DELAY_SECS);
-    c.transfers.private_min_seed_secs = t.private_min_seed_secs.min(trs_state::duration::MAX_SECS);
+    c.transfers.start_delay_secs = t.start_delay_secs.min(seedwell_state::config::MAX_START_DELAY_SECS);
+    c.transfers.private_min_seed_secs = t.private_min_seed_secs.min(seedwell_state::duration::MAX_SECS);
     c.transfers.idle_min_upload_bytes = t.idle_min_upload_bytes.min(rules::MAX_IDLE_BYTES);
     c.transfers.idle_window_hours = t.idle_window_hours.clamp(1, rules::MAX_IDLE_HOURS);
     c.transfers.ask_before_adding = match t.ask_before_adding {
@@ -870,18 +870,92 @@ fn doc_err(e: &DocError) -> CoreError {
 
 /// The three documents of one state directory.
 pub struct SettingsStore {
-    cfg: DocStore<Config>,
-    rules: DocStore<RuleSet>,
-    profiles: DocStore<TrackerProfiles>,
+    cfg: CachedDoc<Config>,
+    rules: CachedDoc<RuleSet>,
+    profiles: CachedDoc<TrackerProfiles>,
+}
+
+/// What tells a file's versions apart without reading it: its size, modification time and (on Unix) inode and
+/// change time, which a save (a new file renamed into place) and any write change. Windows has neither inode nor
+/// change time: a file copied over the settings with its size and modification time kept (`robocopy /COPY:DAT`,
+/// `cp -p` from another copy of the same size) is not seen until the next save or other edit. On Unix the change time
+/// still moves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Stamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(unix)]
+    ctime: (i64, i64),
+}
+
+fn stamp(path: &Path) -> Option<Stamp> {
+    let m = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    Some(Stamp {
+        len: m.len(),
+        modified: m.modified().ok(),
+        #[cfg(unix)]
+        ino: m.ino(),
+        #[cfg(unix)]
+        ctime: (m.ctime(), m.ctime_nsec()),
+    })
+}
+
+/// How old a settings file must be before its contents are kept ([`CachedDoc`]).
+const SETTLED: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A document as last read, kept while its file stays the same ([`Stamp`]). The hosts read the settings on their UI
+/// thread (each Settings tab drawn, the update center's refresh, a settings event): without this, every one of those
+/// reads and parsed the file. A file that could not be used as it is (missing, salvaged, broken) is never kept: it is
+/// read again each time, as before, so its notes and fallbacks stay current.
+struct CachedDoc<T: seedwell_state::Document> {
+    store: DocStore<T>,
+    last: std::sync::Mutex<Option<(Stamp, seedwell_state::Loaded<T>)>>,
+    /// How often the file was read and parsed (tests).
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl<T: seedwell_state::Document> CachedDoc<T> {
+    fn new(dir: &Path) -> Self {
+        CachedDoc { store: DocStore::<T>::new(dir), last: std::sync::Mutex::new(None), reads: Default::default() }
+    }
+
+    fn load(&self) -> seedwell_state::Loaded<T> {
+        let before = stamp(self.store.path());
+        if let (Some(now), Some((was, loaded))) = (&before, self.last.lock().unwrap_or_else(|p| p.into_inner()).as_ref())
+            && now == was
+        {
+            return loaded.clone();
+        }
+        // Read without holding the lock (another reader never waits for this one's disk).
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let loaded = self.store.load();
+        // Kept only when the file is the one read (unchanged across the read: a write meanwhile is read next time), and
+        // written at least `SETTLED` ago: a file system whose clock ticks coarsely (or has no inode, Windows) could give an
+        // edit of the same length right after the last write the same stamp.
+        if let Some(was) = before
+            && was.modified.and_then(|m| m.elapsed().ok()).is_some_and(|age| age >= SETTLED)
+            && loaded.source == seedwell_state::LoadSource::File
+            && stamp(self.store.path()).as_ref() == Some(&was)
+        {
+            *self.last.lock().unwrap_or_else(|p| p.into_inner()) = Some((was, loaded.clone()));
+        }
+        loaded
+    }
+
+    fn save(&self, value: &T) -> Result<(), DocError> {
+        let mut last = self.last.lock().unwrap_or_else(|p| p.into_inner());
+        *last = None;
+        self.store.save(value)
+    }
 }
 
 impl SettingsStore {
     pub fn new(dir: &Path) -> Self {
-        Self {
-            cfg: DocStore::<Config>::new(dir),
-            rules: DocStore::<RuleSet>::new(dir),
-            profiles: DocStore::<TrackerProfiles>::new(dir),
-        }
+        Self { cfg: CachedDoc::new(dir), rules: CachedDoc::new(dir), profiles: CachedDoc::new(dir) }
     }
 
     pub fn config(&self) -> Config {
@@ -924,7 +998,7 @@ impl SettingsStore {
 
     /// The torrent proxy's settings (`network.proxy`, SPEC §7H): on or off, the kind, a custom proxy's host and port.
     /// Never the key, which is in the secret store.
-    pub fn save_proxy(&self, p: &trs_state::config::TorrentProxy) -> Result<(), CoreError> {
+    pub fn save_proxy(&self, p: &seedwell_state::config::TorrentProxy) -> Result<(), CoreError> {
         let mut c = self.config();
         if c.network.proxy == *p {
             return Ok(());
@@ -1065,7 +1139,7 @@ impl SettingsStore {
 /// Expands `~` against `$HOME` (which `--home-root` redirects).
 pub fn expand_home(p: &str) -> PathBuf {
     if (p == "~" || p.starts_with("~/"))
-        && let Some(home) = trs_platform::dirs::home() {
+        && let Some(home) = seedwell_platform::dirs::home() {
             let mut b = home;
             if let Some(rest) = p.strip_prefix("~/") {
                 b.push(rest);
@@ -1114,12 +1188,12 @@ pub struct VolumeWarning {
 }
 
 pub(crate) fn volume_warnings(c: &Config) -> Vec<VolumeWarning> {
-    trs_state::volume::cross_volume_pairs(c)
+    seedwell_state::volume::cross_volume_pairs(c)
         .into_iter()
         .map(|p| VolumeWarning {
             category: match p.scope {
-                trs_state::volume::LocationScope::AppDefault => None,
-                trs_state::volume::LocationScope::Category(c) => Some(category_to(c)),
+                seedwell_state::volume::LocationScope::AppDefault => None,
+                seedwell_state::volume::LocationScope::Category(c) => Some(category_to(c)),
             },
             incomplete: p.incomplete,
             finished: p.finished,
@@ -1131,12 +1205,12 @@ pub(crate) fn volume_warnings(c: &Config) -> Vec<VolumeWarning> {
 /// warning's `category` is `None` for the tracker-wide pair.
 pub(crate) fn tracker_volume_warnings(c: &Config, rec: &ProfileRecord) -> Vec<VolumeWarning> {
     let (own, cats) = record_locations(rec);
-    trs_state::volume::tracker_cross_volume_pairs(c, &own, &cats)
+    seedwell_state::volume::tracker_cross_volume_pairs(c, &own, &cats)
         .into_iter()
         .map(|p| VolumeWarning {
             category: match p.scope {
-                trs_state::volume::LocationScope::AppDefault => None,
-                trs_state::volume::LocationScope::Category(c) => Some(category_to(c)),
+                seedwell_state::volume::LocationScope::AppDefault => None,
+                seedwell_state::volume::LocationScope::Category(c) => Some(category_to(c)),
             },
             incomplete: p.incomplete,
             finished: p.finished,
@@ -1145,20 +1219,56 @@ pub(crate) fn tracker_volume_warnings(c: &Config, rec: &ProfileRecord) -> Vec<Vo
 }
 
 /// The folders a [`ProfileRecord`] sets, blanks read as "same as Settings".
-fn record_locations(p: &ProfileRecord) -> (trs_state::config::LocationOverride, trs_state::config::CategoryLocations) {
+fn record_locations(p: &ProfileRecord) -> (seedwell_state::config::LocationOverride, seedwell_state::config::CategoryLocations) {
     let blank = |d: &Option<String>| d.clone().filter(|d| !d.trim().is_empty());
-    let mut categories = trs_state::config::CategoryLocations::default();
+    let mut categories = seedwell_state::config::CategoryLocations::default();
     for o in &p.categories {
         let slot = categories.get_mut(category_from(o.category));
         slot.incomplete_dir = blank(&o.incomplete_dir);
         slot.finished_dir = blank(&o.finished_dir);
     }
-    (trs_state::config::LocationOverride { incomplete_dir: blank(&p.incomplete_dir), finished_dir: blank(&p.finished_dir) }, categories)
+    (seedwell_state::config::LocationOverride { incomplete_dir: blank(&p.incomplete_dir), finished_dir: blank(&p.finished_dir) }, categories)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The failures: the hosts' settings reads (each Settings tab drawn, the update center's refresh, every settings
+    /// event) read and parsed config.toml on the UI thread every time; or, the other way, a kept copy hiding an edit
+    /// made outside (`seedwell settings set`, a hand edit), even one of the same length right after the last read.
+    #[test]
+    fn settings_are_read_once_while_the_file_is_unchanged_and_again_after_any_edit() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(dir.path());
+        assert_eq!(store.config().transfers.max_active_downloads, 3, "the defaults, written");
+        // Written a while ago (a file written just now is read each time: see `SETTLED`).
+        let path = dir.path().join("config.toml");
+        let aged = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(aged).unwrap();
+        let _ = store.config();
+        let reads = store.cfg.reads.load(Relaxed);
+        for _ in 0..20 {
+            let _ = (store.config(), store.load_settings(), store.load_notes());
+        }
+        assert_eq!(store.cfg.reads.load(Relaxed), reads, "the file did not change: it was not read again");
+
+        // A hand edit of the same length, at once.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("max_active_downloads = 3"), "{text}");
+        std::fs::write(&path, text.replace("max_active_downloads = 3", "max_active_downloads = 7")).unwrap();
+        assert_eq!(store.config().transfers.max_active_downloads, 7, "an edit outside is read");
+
+        // A save through the store, then a broken file: never a kept copy of either.
+        let mut s = store.load_settings();
+        s.transfers.max_active_downloads = 5;
+        store.save_settings(&s).unwrap();
+        assert_eq!(store.config().transfers.max_active_downloads, 5);
+        std::fs::write(&path, "this is [not toml").unwrap();
+        let notes = store.load_notes();
+        assert!(!notes.is_empty(), "a broken file is noted, not hidden by the last good copy");
+    }
 
     #[test]
     fn a_folder_picker_starts_at_the_folder_or_its_nearest_parent_that_exists() {

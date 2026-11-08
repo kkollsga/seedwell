@@ -1,4 +1,4 @@
-//! The adapter from `trs_engine::EngineHandle` to the protocol. Mapping only: every rule
+//! The adapter from `seedwell_engine::EngineHandle` to the protocol. Mapping only: every rule
 //! (permissions, ids, filters, redaction, confirmation) lives above [`crate::Backend`].
 //! New engine fields are added to the `*_dto` functions below.
 
@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
-use trs_engine::{
+use seedwell_engine::{
     AddOptions, AddSource as EngAddSource, AtGoal, PendingChange, PendingStatus, ChoiceGroupKind, ChoicePreview, ChoiceReason, ChoiceSelection, DownloadOptions,
     EngineError, EngineEvent, EngineHandle, FilePriority, StreamContainer, LibraryState, MoveKind, Priority, RowKind, SeedGoal, Tier, TorrentDetail,
     TorrentRow, TorrentState,
@@ -274,7 +274,7 @@ fn reason_dto(r: &ChoiceReason) -> ChoiceReasonDto {
     let (kind, text) = match r {
         ChoiceReason::SeveralItems { items } => ("several_items", format!("{items} items to choose from")),
         ChoiceReason::InLibrary { items } => ("in_library", format!("{items} items are already in the library")),
-        ChoiceReason::PlatformVariants => ("platform_variants", concat!("builds for several systems; this ", trs_platform::computer!(), "'s build is preselected").to_owned()),
+        ChoiceReason::PlatformVariants => ("platform_variants", concat!("builds for several systems; this ", seedwell_platform::computer!(), "'s build is preselected").to_owned()),
         ChoiceReason::VeryLarge { bytes, limit } => ("very_large", format!("{} is over the {} limit", b(*bytes), b(*limit))),
         ChoiceReason::NotEnoughSpace { needed, free } => ("not_enough_space", format!("needs {}, only {} free", b(*needed), b(*free))),
         ChoiceReason::Unsure { confidence } => ("unsure", format!("the category is only {:.0}% certain", f64::from(*confidence) * 100.0)),
@@ -348,7 +348,7 @@ fn choice_dto(c: &ChoicePreview) -> ChoiceDto {
     }
 }
 
-fn move_item_dto(i: &trs_engine::MoveItem) -> MoveItemDto {
+fn move_item_dto(i: &seedwell_engine::MoveItem) -> MoveItemDto {
     MoveItemDto {
         id: id_hex(&i.id),
         name: i.name.clone(),
@@ -396,8 +396,8 @@ fn file_prio(p: FilePriorityParam) -> FilePriority {
     }
 }
 
-fn category(c: &Option<String>) -> Option<trs_classify::Category> {
-    c.as_deref().and_then(trs_classify::Category::parse)
+fn category(c: &Option<String>) -> Option<seedwell_classify::Category> {
+    c.as_deref().and_then(seedwell_classify::Category::parse)
 }
 
 /// Map an engine event to a protocol event. Events that carry nothing an agent needs, or that
@@ -468,9 +468,9 @@ pub fn event_dto(e: &EngineEvent) -> Option<EventDto> {
     })
 }
 
-/// The engine's [`trs_engine::api::Reachability`] in protocol form, with its state and wording
+/// The engine's [`seedwell_engine::api::Reachability`] in protocol form, with its state and wording
 /// (also what the app's Network settings show).
-pub fn reachability_dto(r: &trs_engine::api::Reachability) -> ReachabilityDto {
+pub fn reachability_dto(r: &seedwell_engine::api::Reachability) -> ReachabilityDto {
     let pm = r.portmap.clone().unwrap_or_default();
     crate::ops::reachability(ReachabilityDto {
         port: r.port,
@@ -490,7 +490,7 @@ pub fn reachability_dto(r: &trs_engine::api::Reachability) -> ReachabilityDto {
 /// The same for folder sync's port (the engine maps it beside its own). Sync does not count incoming
 /// connections, so the router's answer is all there is: "Opened on the router", "Checking", "Closed" or
 /// "Not known".
-pub fn sync_reachability_dto(r: &trs_engine::api::Reachability, sync_port: u16) -> ReachabilityDto {
+pub fn sync_reachability_dto(r: &seedwell_engine::api::Reachability, sync_port: u16) -> ReachabilityDto {
     let pm = r.portmap.clone().unwrap_or_default();
     let mut d = crate::ops::reachability(ReachabilityDto {
         port: sync_port,
@@ -503,7 +503,7 @@ pub fn sync_reachability_dto(r: &trs_engine::api::Reachability, sync_port: u16) 
     });
     if d.state == "mapped" {
         // Not the torrent wording: no device is waited for.
-        d.summary = d.summary.replace("; no peer from the Internet has connected in yet", concat!(": your devices can reach this ", trs_platform::computer!()));
+        d.summary = d.summary.replace("; no peer from the Internet has connected in yet", concat!(": your devices can reach this ", seedwell_platform::computer!()));
     }
     d
 }
@@ -897,12 +897,16 @@ impl Backend for EngineBackend {
         Ok(self.engine.stop_stream(token))
     }
 
+    async fn tracker_log_clear(&self, _logs: &std::path::Path) {
+        self.engine.devlog().clear();
+    }
+
     async fn trash_dir(&self) -> Option<PathBuf> {
         self.engine.config().await.ok().and_then(|c| c.trash_dir)
     }
 
     #[cfg(feature = "sync")]
-    fn sync(&self) -> Option<trs_sync_net::SyncHandle> {
+    fn sync(&self) -> Option<seedwell_sync_net::SyncHandle> {
         self.sync.get()
     }
 
@@ -954,7 +958,7 @@ pub struct AppServerConfig {
     pub tz_offset: Option<Arc<dyn Fn() -> i32 + Send + Sync>>,
 }
 
-/// Start the control server for an in-process engine. Called once by `trs-ffi` after the engine
+/// Start the control server for an in-process engine. Called once by `seedwell-ffi` after the engine
 /// starts. `rt` is the engine's runtime; the server and its tasks live on it. Keep the returned
 /// handle for the life of the app (dropping it closes the socket); `handle.activity()` is the
 /// activity log for Settings -> Agents.
@@ -994,8 +998,8 @@ fn start_for_app_inner(rt: &tokio::runtime::Handle, backend: EngineBackend, cfg:
     rt.block_on(async move { serve_backend(Arc::new(backend), state, path, cfg.permission, options).await })
 }
 
-impl StoreRef for trs_engine::StateStore {
-    fn store(&self) -> &trs_state::Store {
+impl StoreRef for seedwell_engine::StateStore {
+    fn store(&self) -> &seedwell_state::Store {
         self.state()
     }
 }
@@ -1003,7 +1007,7 @@ impl StoreRef for trs_engine::StateStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trs_engine::api::{PortMapStatus, Reachability};
+    use seedwell_engine::api::{PortMapStatus, Reachability};
 
     #[test]
     fn the_sync_port_is_judged_by_the_routers_answer_for_it_alone() {
@@ -1011,7 +1015,7 @@ mod tests {
         let r = Reachability { port: 55252, mapping_enabled: true, portmap: Some(pm), incoming: 10_000, last_incoming_at: None };
         let d = sync_reachability_dto(&r, 55799);
         assert_eq!(d.state, "mapped", "incoming torrent peers say nothing about the sync port");
-        assert_eq!(d.summary, concat!("Opened on the router with UPnP: your devices can reach this ", trs_platform::computer!()));
+        assert_eq!(d.summary, concat!("Opened on the router with UPnP: your devices can reach this ", seedwell_platform::computer!()));
         let asking = Reachability { portmap: Some(PortMapStatus { method: Some("upnp"), ..Default::default() }), ..r.clone() };
         assert_eq!(sync_reachability_dto(&asking, 55799).summary, "Asking the router to open port 55799");
         let off = Reachability { mapping_enabled: false, ..r };

@@ -9,7 +9,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use common::*;
-use trs_engine::*;
+use seedwell_engine::*;
 
 async fn seeded(t: &TestTorrent, cfg: impl FnOnce(&mut EngineConfig)) -> Node {
     let seeder = node(cfg).await;

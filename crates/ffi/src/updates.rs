@@ -3,20 +3,20 @@
 //! installer command, what is remembered between launches (`updates.json` in the state folder) and every text of
 //! Settings › General › Updates. The host runs a timer at `next_due_ms`, calls `check` off its main thread, starts
 //! the command `install` returns (detached, output to `log_path`) and draws `model`. What differs per system (the
-//! installer, the zip, this system's entry in `latest.json`) is `trs_platform::update`'s.
+//! installer, the zip, this system's entry in `latest.json`) is `seedwell_platform::update`'s.
 //!
 //! Development builds (SPEC 12A): with "Allow development builds" on, a build handed over (`seedwell update
 //! install`, the host's Install Build…) or one that appears in a watched folder (read on file-change notifications,
-//! `trs-fswatch`, never on a timer) is installed; the core starts that installer itself. A watched folder may be
+//! `seedwell-fswatch`, never on a timer) is installed; the core starts that installer itself. A watched folder may be
 //! shared with others (Folder Sync), so a build there is installed only when its `build.json` is signed with a build
-//! key this copy trusts (`trs-buildsig`) and the zip is the one signed. Every install keeps the app it replaces (when that one started fine) and goes back to it when the
+//! key this copy trusts (`seedwell-buildsig`) and the zip is the one signed. Every install keeps the app it replaces (when that one started fine) and goes back to it when the
 //! new one does not start (`started`, `launch_guard`, `recovery_actions`); the installer does that part.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use trs_platform::update as os;
+use seedwell_platform::update as os;
 
 use crate::{Core, CoreError};
 use crate::menu::APP_NAME;
@@ -237,7 +237,7 @@ fn is_zero(n: &u32) -> bool {
 /// and, when its process is known, that process still runs.
 fn under_way(saved: &Saved, now_ms: u64) -> bool {
     saved.pending_since_ms.is_some_and(|since| now_ms >= since && now_ms - since < INSTALL_RUNS_MS)
-        && saved.pending_pid.is_none_or(trs_platform::running::alive)
+        && saved.pending_pid.is_none_or(seedwell_platform::running::alive)
 }
 
 fn read_saved(file: &Path) -> (Option<Saved>, bool) {
@@ -258,23 +258,23 @@ fn write_saved(file: &Path, s: &Saved) {
 
 /// This system's build in a watched folder's `build.json`, once the manifest verified: the version, the zip's name
 /// and checksum as signed, and this system is one it runs on. `Err`: why it is not this system's build.
-pub(crate) fn folder_entry(b: &trs_buildsig::Build, zip_for: impl Fn(&str) -> String) -> Result<Latest, String> {
+pub(crate) fn folder_entry(b: &seedwell_buildsig::Build, zip_for: impl Fn(&str) -> String) -> Result<Latest, String> {
     if version_order(&b.version).is_none() || b.zip != zip_for(&b.version) {
-        return Err(format!("its {} names {} for this system, not a build of {APP_NAME} for it", trs_buildsig::FILE, b.zip));
+        return Err(format!("its {} names {} for this system, not a build of {APP_NAME} for it", seedwell_buildsig::FILE, b.zip));
     }
     let minimum_system = match &b.minimum_system {
         None => None,
-        Some(m) => Some(parse_system_version(m).ok_or_else(|| format!("its {} names no readable minimum system", trs_buildsig::FILE))?),
+        Some(m) => Some(parse_system_version(m).ok_or_else(|| format!("its {} names no readable minimum system", seedwell_buildsig::FILE))?),
     };
     Ok(Latest { version: b.version.clone(), sha256: b.sha256.clone(), notes_url: None, minimum_system })
 }
 
-/// The build keys a watched folder's `build.json` must be signed with: the ones compiled in (`trs-buildsig`); an
+/// The build keys a watched folder's `build.json` must be signed with: the ones compiled in (`seedwell-buildsig`); an
 /// isolated (test) run also trusts the key in `SEEDWELL_TEST_BUILD_KEY` (its own test key: the user's app never
 /// reads it), and unit tests their fixed test key.
-fn build_keys(isolated: bool) -> Vec<trs_buildsig::PublicKey> {
-    let mut keys = trs_buildsig::trusted_keys();
-    if isolated && let Some(k) = std::env::var("SEEDWELL_TEST_BUILD_KEY").ok().and_then(|k| trs_buildsig::parse_key(&k)) {
+fn build_keys(isolated: bool) -> Vec<seedwell_buildsig::PublicKey> {
+    let mut keys = seedwell_buildsig::trusted_keys();
+    if isolated && let Some(k) = std::env::var("SEEDWELL_TEST_BUILD_KEY").ok().and_then(|k| seedwell_buildsig::parse_key(&k)) {
         keys.push(k);
     }
     #[cfg(test)]
@@ -307,17 +307,19 @@ struct St {
     peer_claims: Vec<(u32, u32, u32, u32)>,
     /// The app is quitting (`quitting`): a check a device started installs nothing any more.
     quitting: bool,
+    /// When `restart` started the installer's restart (a second one within [`INSTALL_RUNS_MS`] is refused).
+    restart_ms: Option<u64>,
 }
 
 /// The watched folder's watcher: its consumer thread reads the folder on each notification and ends when the guard
 /// is dropped (the channel closes).
 struct FolderWatch {
     folder: PathBuf,
-    _guard: Option<trs_fswatch::WatchGuard>,
+    _guard: Option<seedwell_fswatch::WatchGuard>,
 }
 
 /// An installer to start so that it outlives the app, without a window, its output appended to `log`
-/// (`trs_platform::update::Command` says how on each system).
+/// (`seedwell_platform::update::Command` says how on each system).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct InstallCommand {
     pub argv: Vec<String>,
@@ -400,7 +402,7 @@ pub struct Updates {
     /// The watched folder's watcher, while one is watched.
     watch: Mutex<Option<FolderWatch>>,
     /// The keys a watched folder's build must be signed with (`build_keys`).
-    build_keys: Vec<trs_buildsig::PublicKey>,
+    build_keys: Vec<seedwell_buildsig::PublicKey>,
     me: Weak<Updates>,
 }
 
@@ -571,12 +573,12 @@ impl Updates {
             .build()
             .map_err(|_| "network error".to_owned())?;
         let r = rt
-            .block_on(trs_http::get_small(&url, &self.current, MAX_LATEST_BYTES, FETCH_TIMEOUT))
+            .block_on(seedwell_http::get_small(&url, &self.current, MAX_LATEST_BYTES, FETCH_TIMEOUT))
             .map_err(|e| match e {
-                trs_http::Error::Timeout => "timed out".to_owned(),
-                trs_http::Error::InvalidUrl(_) => "bad address".to_owned(),
-                trs_http::Error::BadResponse(_) => "unreadable release information".to_owned(),
-                trs_http::Error::Network(m) if m.contains("dns") || m.contains("resolve") => "server not found".to_owned(),
+                seedwell_http::Error::Timeout => "timed out".to_owned(),
+                seedwell_http::Error::InvalidUrl(_) => "bad address".to_owned(),
+                seedwell_http::Error::BadResponse(_) => "unreadable release information".to_owned(),
+                seedwell_http::Error::Network(m) if m.contains("dns") || m.contains("resolve") => "server not found".to_owned(),
                 _ => "network error".to_owned(),
             })?;
         match r.status {
@@ -677,10 +679,10 @@ impl Updates {
     /// system that is newer than the running one and did not fail before, and the zip there is the one signed. `Err`:
     /// why nothing there can be installed (said in the status line).
     fn read_folder(&self, folder: &Path) -> Result<Option<FolderBuild>, String> {
-        use trs_buildsig::FILE;
+        use seedwell_buildsig::FILE;
         let doc = folder.join(FILE);
         let data = match std::fs::metadata(&doc) {
-            Ok(m) if m.len() as usize > trs_buildsig::MAX_BYTES => return Err(format!("its {FILE} is too large")),
+            Ok(m) if m.len() as usize > seedwell_buildsig::MAX_BYTES => return Err(format!("its {FILE} is too large")),
             Ok(_) => std::fs::read(&doc).map_err(|e| format!("its {FILE} cannot be read ({e})"))?,
             Err(_) if !folder.is_dir() => return Err(format!("{} is missing", folder.display())),
             Err(_) => return Err(format!("no build there yet (no {FILE})")),
@@ -688,7 +690,7 @@ impl Updates {
         if self.build_keys.is_empty() {
             return Err(format!("this copy of {APP_NAME} trusts no build key, so it installs no build from a folder"));
         }
-        let (m, _) = trs_buildsig::verify(&data, &self.build_keys).map_err(|e| format!("{e}: nothing is installed from it"))?;
+        let (m, _) = seedwell_buildsig::verify(&data, &self.build_keys).map_err(|e| format!("{e}: nothing is installed from it"))?;
         let Some(b) = m.builds.get(os::BUILD_SYSTEM) else { return Err("no build for this system there yet".into()) };
         let l = folder_entry(b, os::release_zip)?;
         let zip = folder.join(&b.zip);
@@ -755,7 +757,7 @@ impl Updates {
         *w = None; // stops the old watcher, which ends its thread
         let Some(folder) = want else { return };
         // The watcher first, then the first read, so a build put there in between is not missed.
-        let (events, guard) = match trs_fswatch::watch(&folder, trs_fswatch::WatchOptions::default()) {
+        let (events, guard) = match seedwell_fswatch::watch(&folder, seedwell_fswatch::WatchOptions::default()) {
             Ok(watcher) => {
                 let (e, g) = watcher.split();
                 (Some(e), Some(g))
@@ -866,7 +868,7 @@ fn retry_after(failures: u32) -> u64 {
 
 /// "just now", "5 minutes ago", "yesterday", "3 days ago": inside a sentence.
 fn ago(at_ms: u64, now_ms: u64) -> String {
-    let t = trs_control::display::ago(at_ms / 1000, now_ms / 1000, false);
+    let t = seedwell_control::display::ago(at_ms / 1000, now_ms / 1000, false);
     if t == "Yesterday" { "yesterday".into() } else { t }
 }
 
@@ -877,11 +879,11 @@ fn unix_ms() -> u64 {
 /// The control server's view of the updater (`update.*`).
 struct Hook(Weak<Updates>);
 
-impl trs_control::Builds for Hook {
-    fn status(&self) -> trs_control::types::UpdateStatusDto {
+impl seedwell_control::Builds for Hook {
+    fn status(&self) -> seedwell_control::types::UpdateStatusDto {
         let Some(u) = self.0.upgrade() else { return Default::default() };
         let m = u.model_now(unix_ms());
-        trs_control::types::UpdateStatusDto {
+        seedwell_control::types::UpdateStatusDto {
             version: u.current.clone(),
             development: is_development(&u.current),
             dev_builds: u.prefs().dev_builds,
@@ -910,6 +912,11 @@ impl trs_control::Builds for Hook {
     fn update_now(&self) -> Result<String, String> {
         let u = self.0.upgrade().ok_or("Seedwell is quitting")?;
         u.update_now(unix_ms())
+    }
+
+    fn restart(&self) -> Result<seedwell_control::types::RestartDto, String> {
+        let u = self.0.upgrade().ok_or("Seedwell is quitting")?;
+        u.restart(unix_ms())
     }
 
     fn peer_runs(&self, client: &str) {
@@ -1017,7 +1024,7 @@ impl Updates {
             Some(f) => format!(
                 "Watching {}: each newer build signed into its {} with the build key is installed as it appears (tools/dev-build.sh --to, tools/build-sign.sh add)",
                 f.display(),
-                trs_buildsig::FILE
+                seedwell_buildsig::FILE
             ),
             None => "Stopped watching".into(),
         })
@@ -1135,6 +1142,65 @@ impl Updates {
         let Some(started) = self.start_release(&mut st, now_ms) else { return Ok(text) };
         let version = started?;
         Ok(format!("Installing {}: {APP_NAME} quits, is replaced and reopens (log: {})", shown(&version), log_in(&self.core.dir).display()))
+    }
+
+    /// `restart` (an agent at permission full, `seedwell restart`): the app quits and opens again with the same state,
+    /// by the way every install quits and reopens it: the app's own installer, started here apart from the app (as
+    /// for a handed-over build), in its restart mode, which replaces nothing, waits a second (the answer goes out
+    /// first), quits this process the proper way (SIGTERM on the Mac, `--quit` on Windows: trackers are told
+    /// `stopped`) and opens the app again with the relaunch arguments. The hosts add nothing: each already quits
+    /// properly for an installer. Like Install, it does not wait for downloads or a move; the answer says what it
+    /// interrupts. Refused while an install runs (that one already quits and reopens the app), while the app quits,
+    /// within [`INSTALL_RUNS_MS`] of another restart, and in a copy without its installer.
+    fn restart(&self, now_ms: u64) -> Result<seedwell_control::types::RestartDto, String> {
+        if self.installer.is_empty() || !Path::new(&self.installer).is_file() {
+            return Err(format!(
+                "this copy of {APP_NAME} has no installer to quit and reopen it with (a build run from its build folder); ask the user to quit and open it"
+            ));
+        }
+        let interrupts = self.interrupts();
+        let mut st = self.lock();
+        if st.quitting {
+            return Err(format!("{APP_NAME} is quitting already"));
+        }
+        if let Status::Installing { version, .. } = &st.status {
+            return Err(format!("installing {} already: {APP_NAME} quits and reopens with it", shown(version)));
+        }
+        if let Some(at) = st.restart_ms
+            && now_ms.saturating_sub(at) < INSTALL_RUNS_MS
+        {
+            return Err(format!("a restart is already under way (asked {})", ago(at, now_ms)));
+        }
+        let (state_dir, relaunch) = self.place();
+        let i = os::Install { install_dir: &self.install_dir, state_dir: &state_dir, relaunch: &relaunch };
+        let c = os::restart_command(&self.installer, std::process::id(), &i);
+        let log = log_in(&self.core.dir);
+        os::spawn(&c, &log).map_err(|e| format!("the restart did not start: {e}"))?;
+        st.restart_ms = Some(now_ms);
+        let interrupts = if interrupts.is_empty() { String::new() } else { format!("; this interrupts {}", interrupts.join(" and ")) };
+        Ok(seedwell_control::types::RestartDto {
+            note: format!("Restarting {APP_NAME}: it quits and opens again with the same settings, torrents, folders and chats{interrupts}"),
+            log: log.display().to_string(),
+            ..Default::default()
+        })
+    }
+
+    /// What quitting now interrupts, in words for `restart`'s answer (the work an automatic install waits for,
+    /// [`Updates::busy`]): downloads, which go on when the app is open again, and a move of files, which the quit
+    /// cancels.
+    fn interrupts(&self) -> Vec<String> {
+        let s = self.core.snapshot();
+        let n = s.downloading.iter().chain(&s.hidden_downloading).filter(|r| !row_is_held((*r).clone())).count();
+        let mut out = Vec::new();
+        match n {
+            0 => {}
+            1 => out.push(format!("1 download (it goes on when {APP_NAME} is open again)")),
+            n => out.push(format!("{n} downloads (they go on when {APP_NAME} is open again)")),
+        }
+        if let Some(p) = s.moving_percent {
+            out.push(format!("a move of files at {p} % (cancelled: the files stay where they were; move them again after)"));
+        }
+        out
     }
 
     /// Starts the installer of the release on offer itself, detached, into the app's own folder (`update.now`, a check
@@ -1292,6 +1358,7 @@ impl Updates {
                 peer_check_ms: None,
                 peer_claims: Vec::new(),
                 quitting: false,
+                restart_ms: None,
             }),
             watch: Mutex::new(None),
             build_keys,

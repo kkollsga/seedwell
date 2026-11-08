@@ -1,7 +1,7 @@
 //! A deterministic stand-in for the fuzz target (`fuzz/`): mutate valid request lines and random
 //! bytes and check the decoder is total, bounded and self-consistent. Runs on stable in CI.
 
-use trs_control::proto::*;
+use seedwell_control::proto::*;
 
 struct Rng(u64);
 impl Rng {
@@ -95,6 +95,6 @@ fn base64_decoder_is_total() {
     let mut rng = Rng(42);
     for _ in 0..5000 {
         let s: String = (0..rng.below(200)).map(|_| char::from(b" =+/-_AZaz09\n!"[rng.below(14)])).collect();
-        let _ = trs_control::b64::decode(&s, 100);
+        let _ = seedwell_control::b64::decode(&s, 100);
     }
 }

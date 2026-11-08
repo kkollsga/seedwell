@@ -1,5 +1,5 @@
 [package]
-name = "trs-fswatch"
+name = "seedwell-fswatch"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

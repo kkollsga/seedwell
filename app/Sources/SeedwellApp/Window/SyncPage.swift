@@ -3,7 +3,7 @@ import SwiftUI
 /// Folder Sync in the main window (SPEC 7G.5): the folders on the left; the selected one's page on the right with its
 /// header (name, path, status), the devices it syncs with, its conflict copies and the paths it cannot sync. Type and
 /// spacing, no boxes, as the rest of the window. What it shows, every word and what each item does are the core's
-/// `SyncPageModel` (trs-ffi `sync_page.rs`); this draws it and runs its commands.
+/// `SyncPageModel` (seedwell-ffi `sync_page.rs`); this draws it and runs its commands.
 struct SyncPage: View {
     @Bindable var model: LibraryModel
     let actions: SyncActions

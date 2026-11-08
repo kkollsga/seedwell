@@ -3,7 +3,7 @@ using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
@@ -429,7 +429,7 @@ sealed class ProxyWindow
             return;
         }
         ulong? ago = usernameCopied is DateTime at ? (ulong)(DateTime.UtcNow - at).TotalMilliseconds : null;
-        switch (TrsFfiMethods.ProxyPasteFill(username.Text, password.Password, text, ago))
+        switch (SeedwellFfiMethods.ProxyPasteFill(username.Text, password.Password, text, ago))
         {
             case ProxyPaste.Username u:
                 copiedUser = u.Text;
@@ -576,6 +576,11 @@ sealed class ProxyWindow
             return;
         }
         shownSteps = w.GuideSteps;
+        FocusKeeper.Redraw(guide, guide.XamlRoot, () => DrawGuide(w));
+    }
+
+    void DrawGuide(ProxyWindowModel w)
+    {
         guide.Children.Clear();
         int n = 1;
         foreach (var step in w.GuideSteps)
@@ -663,6 +668,9 @@ sealed class ProxyWindow
     internal void QaOpenCountries() => ui.ShowCountries(country);
 
     /// <summary>The window as drawn; a password only as whether it holds one.</summary>
+    /// <summary>QA: each control walked (<see cref="FocusKeeper.QaWalk"/>), each redraw the core's guide changing.</summary>
+    internal Task<string> QaWalk() => FocusKeeper.QaWalk(content, content.XamlRoot, () => { shownSteps = []; Follow(); });
+
     internal string QaDescribe()
     {
         static string V(FrameworkElement e, string name) => e.Visibility == Visibility.Visible ? name : "";

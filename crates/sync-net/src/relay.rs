@@ -40,9 +40,9 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::net::TcpStream;
 use tokio::sync::{Semaphore, mpsc, watch};
-use trs_sync_proto::ids::DeviceId;
-use trs_sync_proto::keys::Access;
-use trs_sync_proto::msg::{Message, RelayClose, RelayData, RelayOpen};
+use seedwell_sync_proto::ids::DeviceId;
+use seedwell_sync_proto::keys::Access;
+use seedwell_sync_proto::msg::{Message, RelayClose, RelayData, RelayOpen};
 
 use crate::service::SyncHandle;
 use crate::session::{self, Via};

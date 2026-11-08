@@ -42,7 +42,7 @@ const MTIME_GRAIN: Duration = Duration::from_millis(40);
 /// backlog when it is older than the baseline by more than this.
 const BASELINE_SLACK: Duration = Duration::from_millis(15);
 /// Files larger than this are not torrents we would add.
-const MAX_FILE: u64 = trs_state::store::MAX_TORRENT_FILE as u64;
+const MAX_FILE: u64 = seedwell_state::store::MAX_TORRENT_FILE as u64;
 /// Most files remembered as "already looked at" per folder.
 const MAX_SEEN: usize = 20_000;
 /// Most candidates settling at once per folder.
@@ -83,7 +83,7 @@ fn stamp_of(m: &std::fs::Metadata) -> Stamp {
 
 /// When a file arrived in its folder: the latest of birth, modification and status change time.
 fn arrived_at(path: &Path, m: &std::fs::Metadata) -> SystemTime {
-    [m.modified().ok(), m.created().ok(), trs_platform::fs::change_time(path, m)]
+    [m.modified().ok(), m.created().ok(), seedwell_platform::fs::change_time(path, m)]
         .into_iter()
         .flatten()
         .max()
@@ -307,7 +307,7 @@ async fn process(h: &EngineHandle, folder: &WatchConfig, r: Ready, st: &mut Fold
         let bytes = prepared.bytes.clone();
         let dup = h.exists(prepared.id).await;
         let preview = tokio::task::spawn_blocking(move || {
-            trs_metainfo::Metainfo::from_bytes(&bytes).ok().map(|mi| (prepared, mi))
+            seedwell_metainfo::Metainfo::from_bytes(&bytes).ok().map(|mi| (prepared, mi))
         })
         .await
         .ok()
@@ -407,7 +407,7 @@ mod tests {
         scan(d.path(), &mut st, t0);
         let before = std::fs::metadata(d.path()).unwrap().modified().unwrap();
         std::fs::write(d.path().join("late.torrent"), b"d4:infod4:name1:aee").unwrap();
-        trs_platform::fs::set_modified(d.path(), before).unwrap();
+        seedwell_platform::fs::set_modified(d.path(), before).unwrap();
         assert_eq!(std::fs::metadata(d.path()).unwrap().modified().unwrap(), before, "the coarse tick");
         assert!(!is_idle(d.path(), &mut st), "an mtime this fresh is not trusted");
         scan(d.path(), &mut st, t0 + Duration::from_secs(2));

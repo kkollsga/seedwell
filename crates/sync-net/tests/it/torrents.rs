@@ -7,9 +7,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use trs_sync_net::LocalTorrents;
-use trs_sync_net::service::BoxFuture;
-use trs_sync_proto::ids::FolderId;
+use seedwell_sync_net::LocalTorrents;
+use seedwell_sync_net::service::BoxFuture;
+use seedwell_sync_proto::ids::FolderId;
 
 use crate::chat::start_at;
 use crate::utp::read;
@@ -48,7 +48,7 @@ impl LocalTorrents for Torrents {
     }
 }
 
-fn folder_of(h: &trs_sync_net::SyncHandle, id: &FolderId) -> Option<trs_sync_net::status::FolderStatus> {
+fn folder_of(h: &seedwell_sync_net::SyncHandle, id: &FolderId) -> Option<seedwell_sync_net::status::FolderStatus> {
     h.snapshot().folders.into_iter().find(|f| f.id == id.to_string())
 }
 

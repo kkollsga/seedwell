@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use tokio::sync::{broadcast, mpsc};
-use trs_storage::DiskIo;
+use seedwell_storage::DiskIo;
 
 use crate::api::EngineEvent;
 use crate::organize::DestReservations;
@@ -60,10 +60,10 @@ pub(crate) struct Shared {
     pub simulated: std::sync::Mutex<std::collections::HashSet<crate::api::TorrentId>>,
     /// The loopback streaming server (SPEC 7F), started by the first `stream_url`: until then no
     /// listener and no task exist. Closed at shutdown.
-    pub streams: tokio::sync::OnceCell<Arc<trs_stream::StreamServer>>,
+    pub streams: tokio::sync::OnceCell<Arc<seedwell_stream::StreamServer>>,
     /// The UDP socket shared by uTP and the DHT (`None` when uTP is off or it did not bind). Replaced
     /// by a live port change; torrents hold the same slot and dial through the current socket.
-    pub utp: Arc<RwLock<Option<trs_utp::UtpSocket>>>,
+    pub utp: Arc<RwLock<Option<seedwell_utp::UtpSocket>>>,
     /// Concurrent encrypted handshakes (each costs two modular exponentiations).
     pub mse_slots: tokio::sync::Semaphore,
     /// Peers that did not answer an encrypted handshake but did answer a plain one.
@@ -85,7 +85,7 @@ pub(crate) struct Shared {
     /// goes when the torrent is released or removed.
     pub held_sources: std::sync::Mutex<std::collections::HashMap<crate::api::TorrentId, std::path::PathBuf>>,
     /// The developer log of tracker exchanges (SPEC 8.7); off unless `developer_mode`.
-    pub devlog: Arc<trs_devlog::DevLog>,
+    pub devlog: Arc<seedwell_devlog::DevLog>,
     /// Connectivity as the tracker driver decided it (SPEC 7C.4c).
     pub net: crate::netstate::NetFlags,
     /// Torrent traffic through a SOCKS5 proxy (SPEC §7H): where a connection may go now.
@@ -101,7 +101,7 @@ impl Shared {
         events: broadcast::Sender<EngineEvent>,
         session: mpsc::Sender<SessionMsg>,
     ) -> Self {
-        let devlog = trs_devlog::DevLog::new(cfg.devlog_dir.clone());
+        let devlog = seedwell_devlog::DevLog::new(cfg.devlog_dir.clone());
         let proxy = Arc::new(crate::proxy::ProxyState::new(cfg.proxy.is_some()));
         devlog.set_enabled(cfg.developer_mode);
         Self {

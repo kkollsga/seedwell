@@ -1,11 +1,11 @@
-# trs-metainfo
+# seedwell-metainfo
 
 `.torrent` and magnet parsing, plus the shared identity types (`InfoHash`, `PeerId`).
 
 ## API sketch
 
 ```rust
-use trs_metainfo::{Metainfo, Magnet, InfoHash, PeerId};
+use seedwell_metainfo::{Metainfo, Magnet, InfoHash, PeerId};
 
 let m = Metainfo::from_bytes(&bytes)?;      // or Metainfo::from_info_bytes(info) for BEP 9
 m.info_hash                                  // InfoHash { v1: Option<[u8;20]>, v2: Option<[u8;32]> }
@@ -41,7 +41,7 @@ info_hash.verifies(&metadata_bytes);         // validate BEP 9 metadata against 
 
 | crate | why |
 | --- | --- |
-| `trs-bencode` | the decoder; raw spans for the info-hash |
+| `seedwell-bencode` | the decoder; raw spans for the info-hash |
 | `sha1` 0.11, `sha2` 0.11 (no default features) | RustCrypto; uses the ARM SHA intrinsics on aarch64 via runtime feature detection, so no asm or linking |
 | `getrandom` 0.3 (no default features) | OS entropy for `PeerId::generate` (smaller than pulling in `rand`) |
 
@@ -49,8 +49,8 @@ Dev only: `proptest`, `sha1`.
 
 ## Tests
 
-`cargo test -p trs-metainfo` runs unit tests with hand-built torrents plus real distro torrents in
+`cargo test -p seedwell-metainfo` runs unit tests with hand-built torrents plus real distro torrents in
 `tests/fixtures/` (sources and expected hashes documented in `tests/fixtures.rs`).
-`cargo test -p trs-metainfo -- --ignored` additionally downloads piece 0 of each payload from
+`cargo test -p seedwell-metainfo -- --ignored` additionally downloads piece 0 of each payload from
 official mirrors and checks it against the torrent's piece table. Fuzz targets: `fuzz/`
 (`cargo +nightly fuzz run metainfo|magnet`).

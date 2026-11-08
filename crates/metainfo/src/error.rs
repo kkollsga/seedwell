@@ -6,7 +6,7 @@ use crate::path::PathError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     /// The bencode layer rejected the bytes.
-    Bencode(trs_bencode::Error),
+    Bencode(seedwell_bencode::Error),
     /// The named structure must be a dictionary.
     NotADictionary(&'static str),
     /// A required key is absent.
@@ -79,8 +79,8 @@ impl std::error::Error for Error {
     }
 }
 
-impl From<trs_bencode::Error> for Error {
-    fn from(e: trs_bencode::Error) -> Self {
+impl From<seedwell_bencode::Error> for Error {
+    fn from(e: seedwell_bencode::Error) -> Self {
         Error::Bencode(e)
     }
 }

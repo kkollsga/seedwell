@@ -6,7 +6,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use trs_sync_proto::model::FileKind;
+use seedwell_sync_proto::model::FileKind;
 
 use super::{DirEntry, FileHandle, Fs, Listing, Meta, components};
 
@@ -73,7 +73,7 @@ fn meta_of(path: &Path, m: &fs::Metadata) -> io::Result<Meta> {
     } else {
         (FileKind::File, !ft.is_file())
     };
-    let st = trs_platform::fs::file_stamp(path, m)?;
+    let st = seedwell_platform::fs::file_stamp(path, m)?;
     Ok(Meta {
         kind,
         size: if kind == FileKind::File && !other { m.len() } else { 0 },
@@ -112,7 +112,7 @@ impl FileHandle for StdHandle {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         let mut done = 0;
         while done < buf.len() {
-            match trs_platform::fs::read_at(&self.0, &mut buf[done..], offset + done as u64) {
+            match seedwell_platform::fs::read_at(&self.0, &mut buf[done..], offset + done as u64) {
                 Ok(0) => break,
                 Ok(n) => done += n,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
@@ -123,7 +123,7 @@ impl FileHandle for StdHandle {
     }
 
     fn write_at(&self, offset: u64, buf: &[u8]) -> io::Result<()> {
-        trs_platform::fs::write_all_at(&self.0, buf, offset)
+        seedwell_platform::fs::write_all_at(&self.0, buf, offset)
     }
 
     fn set_len(&self, len: u64) -> io::Result<()> {
@@ -145,7 +145,7 @@ impl FileHandle for StdHandle {
 
 impl Fs for StdFs {
     fn name_problem(&self, name: &str) -> Option<&'static str> {
-        trs_platform::fs::name_problem(name)
+        seedwell_platform::fs::name_problem(name)
     }
 
     fn lstat(&self, rel: &str) -> io::Result<Option<Meta>> {
@@ -153,7 +153,7 @@ impl Fs for StdFs {
         // Gone between the two calls (Windows opens the file for its stamp) is gone too.
         match fs::symlink_metadata(&p).and_then(|m| meta_of(&p, &m)) {
             Ok(m) => Ok(Some(m)),
-            Err(e) if trs_platform::fs::is_not_found(&e) => Ok(None),
+            Err(e) if seedwell_platform::fs::is_not_found(&e) => Ok(None),
             Err(e) => Err(e),
         }
     }
@@ -204,27 +204,27 @@ impl Fs for StdFs {
         // never locked against it (Windows), and a copy that overlapped a write is made again or fails for now. On Unix
         // `std::fs::copy`: a clone (`fclonefileat`) on APFS, else `fcopyfile`; on Linux `copy_file_range`, which
         // reflinks on Btrfs and XFS.
-        trs_platform::fs::copy_shared(&self.join_checked(from)?, &self.join_checked(to)?).map(|_| ())
+        seedwell_platform::fs::copy_shared(&self.join_checked(from)?, &self.join_checked(to)?).map(|_| ())
     }
 
     fn set_mtime(&self, rel: &str, mtime_ns: i64) -> io::Result<()> {
-        trs_platform::fs::set_modified(&self.join_checked(rel)?, system_time(mtime_ns))
+        seedwell_platform::fs::set_modified(&self.join_checked(rel)?, system_time(mtime_ns))
     }
 
     fn set_exec(&self, rel: &str, exec: bool) -> io::Result<()> {
-        trs_platform::fs::set_exec(&self.join_checked(rel)?, exec)
+        seedwell_platform::fs::set_exec(&self.join_checked(rel)?, exec)
     }
 
     fn symlink(&self, target: &str, rel: &str) -> io::Result<()> {
-        trs_platform::fs::symlink(target, &self.join_checked(rel)?)
+        seedwell_platform::fs::symlink(target, &self.join_checked(rel)?)
     }
 
     fn read_link(&self, rel: &str) -> io::Result<String> {
-        trs_platform::fs::read_link(&self.join_checked(rel)?).map_err(|e| io::Error::new(e.kind(), format!("{rel}: {e}")))
+        seedwell_platform::fs::read_link(&self.join_checked(rel)?).map_err(|e| io::Error::new(e.kind(), format!("{rel}: {e}")))
     }
 
     fn sync_dir(&self, rel: &str) -> io::Result<()> {
-        trs_platform::fs::sync_dir(&self.join_checked(rel)?)
+        seedwell_platform::fs::sync_dir(&self.join_checked(rel)?)
     }
 }
 

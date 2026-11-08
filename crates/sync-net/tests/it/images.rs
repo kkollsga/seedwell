@@ -4,10 +4,10 @@
 
 use std::io::Cursor;
 
-use trs_sync_net::chat::{MessageKind, NewImage};
-use trs_sync_net::{Options, SyncHandle};
-use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::members::Role;
+use seedwell_sync_net::chat::{MessageKind, NewImage};
+use seedwell_sync_net::{Options, SyncHandle};
+use seedwell_sync_proto::ids::FolderId;
+use seedwell_sync_proto::members::Role;
 
 use crate::chat::{at, join, start_at};
 use crate::utp::{device_with, until};
@@ -58,7 +58,7 @@ async fn a_member_fetches_an_image_by_its_hash_and_checks_it() {
     let (_, here) = a.chat_attachment(id, &att.hash).unwrap();
     let here = here.unwrap();
     assert!(!has(&here, b"59.9139N"), "the place it was taken does not leave the device");
-    assert_eq!(trs_sync_net::blobs::sha256(&here), trs_sync_net::blobs::hash_from_hex(&att.hash).unwrap());
+    assert_eq!(seedwell_sync_net::blobs::sha256(&here), seedwell_sync_net::blobs::hash_from_hex(&att.hash).unwrap());
 
     until(30, "B has the image", || state(&b, &id) == "available").await;
     let got = b.chat_read(&id, None, None, Some(1)).unwrap().remove(0);
@@ -67,7 +67,7 @@ async fn a_member_fetches_an_image_by_its_hash_and_checks_it() {
     assert_eq!((info.size, bytes.as_deref()), (here.len() as u64, Some(&*here)), "the same bytes, by a prefix of the hash");
     // The preview came with the message; checked and made a PNG for the host.
     let preview = b.chat_attachment_preview(id, &att.hash).unwrap();
-    let thumb = trs_media::thumb_png(&preview).unwrap();
+    let thumb = seedwell_media::thumb_png(&preview).unwrap();
     assert_eq!((thumb.mime, thumb.width, thumb.height), ("image/png", 160, 64));
     // Kept sealed in the channel's own container, which goes with the channel.
     let blobs = dirs[1].path().join("sync").join(format!("{id}.blobs"));
@@ -84,7 +84,7 @@ async fn an_image_waits_for_its_author_and_a_device_without_images_passes_it_on(
     let dirs: Vec<tempfile::TempDir> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
     let a = start_at(dirs[0].path(), "Anna", |_| {}).await;
     // Cy runs a Seedwell without images (0.1.14): it keeps and passes on messages, never images. It admits Bo.
-    let old = |o: &mut Options| o.features &= !trs_sync_proto::msg::FEATURE_BLOBS;
+    let old = |o: &mut Options| o.features &= !seedwell_sync_proto::msg::FEATURE_BLOBS;
     let c = start_at(dirs[2].path(), "Cy", old).await;
     let id: FolderId = a.chat_new("Team", false).await.unwrap().id.parse().unwrap();
     join(&c, &a, &id, Role::Admin, at(&a)).await;

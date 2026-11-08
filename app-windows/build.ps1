@@ -1,5 +1,5 @@
 # Builds Seedwell for Windows from a clean clone, in one command:
-#   1. the Rust core as a DLL (trs-ffi as a cdylib, release; debug with -CoreProfile Debug),
+#   1. the Rust core as a DLL (seedwell-ffi as a cdylib, release; debug with -CoreProfile Debug),
 #   2. its C# bindings (uniffi-bindgen-cs, library mode),
 #   3. the .ico from Assets/icon/*.png,
 #   4. the WinUI 3 app (unpackaged, self-contained, x64).
@@ -23,24 +23,27 @@ $app = $PSScriptRoot
 $repo = Split-Path $app -Parent
 $gen = Join-Path $app 'Generated'
 New-Item -ItemType Directory -Force $gen | Out-Null
+# Only this build's core and bindings: a checkout that built before the 2026-11-07 rename still holds the old module's
+# DLL and .cs, which would be compiled into the app beside these.
+Get-ChildItem $gen -Filter '*_ffi.*' | Where-Object { $_.BaseName -ne 'seedwell_ffi' } | Remove-Item -Force
 
 function Step($what) { Write-Host "== $what" }
 function Check($what) { if ($LASTEXITCODE -ne 0) { throw "$what failed (exit $LASTEXITCODE)" } }
 
 $coreDir = if ($CoreProfile -eq 'Release') { 'release' } else { 'debug' }
-Step "core DLL (cargo rustc -p trs-ffi --crate-type cdylib, $coreDir)"
+Step "core DLL (cargo rustc -p seedwell-ffi --crate-type cdylib, $coreDir)"
 Push-Location $repo
 try {
     # Written out, not splatted: Windows PowerShell 5.1 mangles a splatted '--release' on its way to a native command.
     if ($CoreProfile -eq 'Release') {
-        cargo rustc -p trs-ffi --lib --release --crate-type cdylib
+        cargo rustc -p seedwell-ffi --lib --release --crate-type cdylib
     } else {
-        cargo rustc -p trs-ffi --lib --crate-type cdylib
+        cargo rustc -p seedwell-ffi --lib --crate-type cdylib
     }
     Check 'cargo rustc'
 } finally { Pop-Location }
-$dll = Join-Path $repo "target\$coreDir\trs_ffi.dll"
-Copy-Item $dll (Join-Path $gen 'trs_ffi.dll') -Force
+$dll = Join-Path $repo "target\$coreDir\seedwell_ffi.dll"
+Copy-Item $dll (Join-Path $gen 'seedwell_ffi.dll') -Force
 
 Step 'C# bindings (uniffi-bindgen-cs --library)'
 if (-not (Get-Command uniffi-bindgen-cs -ErrorAction SilentlyContinue)) {

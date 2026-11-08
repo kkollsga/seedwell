@@ -58,11 +58,11 @@ fetch in the log) is unchanged.
 
 ### Rust tests (run by `rust-tests.ps1`)
 
-- `trs-sync-net` `ondemand::a_slow_fetch_answers_each_wait_in_time_and_shows_how_far_it_is`: B's download limited to
+- `seedwell-sync-net` `ondemand::a_slow_fetch_answers_each_wait_in_time_and_shows_how_far_it_is`: B's download limited to
   256 KiB/s on the LAN (`test_limit_lan`, the same switch as `SEEDWELL_QA_LIMIT_LAN`), a 1.5 MB file of noise; waits
   of 250 ms each return within 250 ms + 1.5 s, `done` never goes back and takes at least two partial values, and the
   file arrives whole.
-- `trs-sync-net` `ondemand::a_fetch_while_the_core_is_busy_answers_in_time_and_asks_once_it_is_free`: the folder's
+- `seedwell-sync-net` `ondemand::a_fetch_while_the_core_is_busy_answers_in_time_and_asks_once_it_is_free`: the folder's
   core held for 2 s and then 3 s (`test_lock_core`); each wait returns in time, none gives up (grace 0, stall 0.5 s),
   a cancel meanwhile keeps the request from going in, and the file comes once the core is free.
 
@@ -81,7 +81,7 @@ its own lines, through `os_log`), so the guess that it sent standard error to a 
 
 ### What changed
 
-`Core::new` (`crates/ffi/src/lib.rs`, first thing in `Core::open`) calls `trs_platform::proc::stderr_to_log(<state>\logs\core.log)`.
+`Core::new` (`crates/ffi/src/lib.rs`, first thing in `Core::open`) calls `seedwell_platform::proc::stderr_to_log(<state>\logs\core.log)`.
 When standard error goes nowhere (Windows: `GetStdHandle(STD_ERROR_HANDLE)` is null, `INVALID_HANDLE_VALUE` or of an
 unknown type; Unix: fd 2 is closed or is `/dev/null`), it opens `core.log` for appending and makes it the process's
 standard error (Windows: `SetStdHandle(STD_ERROR_HANDLE, handle)`, the handle kept open for the life of the process;
@@ -117,11 +117,11 @@ written before goes nowhere as it did.)
 
 ### Rust tests (run by `rust-tests.ps1`)
 
-- `trs-platform` `proc::tests::standard_error_that_goes_nowhere_goes_to_the_log`: a copy of the test binary with no
+- `seedwell-platform` `proc::tests::standard_error_that_goes_nowhere_goes_to_the_log`: a copy of the test binary with no
   standard error handle (Windows: `SetStdHandle(…, null)`; Unix: `/dev/null`) redirects once, and both an `eprintln!`
   and a panic's message are in the log; a log over 2 MB is kept as `.1`; with standard error piped, nothing is
   redirected and the lines arrive on the pipe.
-- `trs-ffi` `sync::ondemand::tests::the_cores_messages_reach_its_log_in_an_app_with_no_console`: a copy of the test
+- `seedwell-ffi` `sync::ondemand::tests::the_cores_messages_reach_its_log_in_an_app_with_no_console`: a copy of the test
   binary with no standard error starts a real `Core` with `SEEDWELL_QA_LIMIT_LAN=1`; its `logs/core.log` has the
   started line and folder sync's QA line.
 
@@ -130,7 +130,7 @@ written before goes nowhere as it did.)
 - **Engine:** removing a torrent with its files right after it finished could leave some files behind: the torrent's
   actor answered the stop at once while its files were still being moved out of `.incomplete`, and the removal
   deleted what was at either place at that moment. A stop during that move is now answered when the move is over.
-  `trs-engine` `organize::removing_a_torrent_with_its_files_deletes_its_folder_only` failed 3 of 8 stress runs at
+  `seedwell-engine` `organize::removing_a_torrent_with_its_files_deletes_its_folder_only` failed 3 of 8 stress runs at
   utility priority before, 0 of 10 after; if `rust-tests.ps1` showed it failing now and then on the PC, that was this.
-- **Test:** `trs-cli` `e2e::download_pause_resume_info_stats_and_two_step_remove` walked the download folder a second
+- **Test:** `seedwell-cli` `e2e::download_pause_resume_info_stats_and_two_step_remove` walked the download folder a second
   time while the engine moved a file and could miss it; the redundant walk is gone.

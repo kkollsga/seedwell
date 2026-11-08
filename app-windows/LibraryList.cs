@@ -4,7 +4,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
@@ -76,7 +76,7 @@ sealed class LibraryList
                 {
                     Padding = new Thickness(52, 2, 10, 10),
                     Child = Choosing.Checklist(id, page, app.Choices, app.Files.ShowAll ? double.PositiveInfinity : 280,
-                        showAll: TrsFfiMethods.FileListShowAll(app.Files.ShowAll), toggleShowAll: () => { app.Files.SetShowAll(!app.Files.ShowAll); ChoicesChanged(); }),
+                        showAll: SeedwellFfiMethods.FileListShowAll(app.Files.ShowAll), toggleShowAll: () => { app.Files.SetShowAll(!app.Files.ShowAll); ChoicesChanged(); }),
                 }
                 : null;
             return;
@@ -398,7 +398,7 @@ sealed class LibraryList
         {
             // Files opens the torrent's list under the row; Choice its checklist (the shared chooser).
             var open = disclosure == RowDisclosure.Choice ? app.HeldOpen.Contains(r.Id) : app.Files.IsExpanded(r.Id);
-            var toggle = TrsFfiMethods.FileListToggle(open);
+            var toggle = SeedwellFfiMethods.FileListToggle(open);
             var triangle = new Button
             {
                 Content = new FontIcon { Glyph = open ? "" : "", FontSize = 10 },

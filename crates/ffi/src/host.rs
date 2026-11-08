@@ -42,6 +42,10 @@ pub enum HostWindow {
     FolderShare,
     /// The tracker log viewer (Settings › Advanced › Developer › View Log…).
     TrackerLog,
+    /// The sidebar's groups of channels (SPEC 7G.7 *Groups*): drawn with their channels, their menus and Move to Group ▸.
+    /// A host without it is offered no group and no group command, and lists every channel in the plain list, so a
+    /// channel an agent put in a group never vanishes from a sidebar that cannot draw groups.
+    ChatGroups,
 }
 
 /// Every window: what the Mac passes.
@@ -64,6 +68,7 @@ pub fn host_windows_all() -> Vec<HostWindow> {
         HostWindow::FolderEditor,
         HostWindow::FolderShare,
         HostWindow::TrackerLog,
+        HostWindow::ChatGroups,
     ]
 }
 
@@ -111,15 +116,28 @@ pub(crate) fn disclosure_window(disclosure: RowDisclosure) -> HostWindow {
 }
 
 /// The window a sidebar command opens, if it opens one.
-pub(crate) fn sidebar_command_window(command: SidebarCommand) -> Option<HostWindow> {
+pub(crate) fn sidebar_command_window(command: &SidebarCommand) -> Option<HostWindow> {
     match command {
         SidebarCommand::TrackerInfo => Some(HostWindow::TrackerInfo),
         SidebarCommand::RenameTracker | SidebarCommand::RemoveFavorite => Some(HostWindow::FavoriteEditing),
         SidebarCommand::ShareChannel => Some(HostWindow::ChannelShare),
-        SidebarCommand::NewTopic | SidebarCommand::RenameChannel | SidebarCommand::LeaveChannel => Some(HostWindow::ChatDialogs),
-        SidebarCommand::Mute | SidebarCommand::Unmute | SidebarCommand::ChannelAgents | SidebarCommand::SaveAsFavorite | SidebarCommand::SetFollow { .. } => {
-            None
-        }
+        SidebarCommand::NewTopic
+        | SidebarCommand::RenameChannel
+        | SidebarCommand::LeaveChannel => Some(HostWindow::ChatDialogs),
+        // A host that draws groups has the chat dialogs too (New Group… and Rename Group… ask through them).
+        SidebarCommand::NewGroup
+        | SidebarCommand::RenameGroup
+        | SidebarCommand::MoveToGroup { .. }
+        | SidebarCommand::RemoveFromGroup
+        | SidebarCommand::SetGroupIcon { .. }
+        | SidebarCommand::MoveGroupUp
+        | SidebarCommand::MoveGroupDown
+        | SidebarCommand::DeleteGroup => Some(HostWindow::ChatGroups),
+        SidebarCommand::Mute
+        | SidebarCommand::Unmute
+        | SidebarCommand::ChannelAgents
+        | SidebarCommand::SaveAsFavorite
+        | SidebarCommand::SetFollow { .. } => None,
     }
 }
 
@@ -151,12 +169,18 @@ pub(crate) fn offered_commands(entries: Vec<CommandEntry>, host: &[HostWindow]) 
     out
 }
 
-/// A sidebar menu without the commands `host` cannot open, its separators tidied.
+/// A sidebar menu without the commands `host` cannot open, its separators tidied; a submenu left empty goes.
 pub(crate) fn offered_sidebar(entries: Vec<SidebarMenuEntry>, host: &[HostWindow]) -> Vec<SidebarMenuEntry> {
     let mut out: Vec<SidebarMenuEntry> = Vec::with_capacity(entries.len());
     for e in entries {
         match e {
-            SidebarMenuEntry::Item { command, .. } if !has(host, sidebar_command_window(command)) => {}
+            SidebarMenuEntry::Item { ref command, .. } if !has(host, sidebar_command_window(command)) => {}
+            SidebarMenuEntry::Submenu { title, entries } => {
+                let entries = offered_sidebar(entries, host);
+                if entries.iter().any(|e| !matches!(e, SidebarMenuEntry::Separator)) {
+                    out.push(SidebarMenuEntry::Submenu { title, entries });
+                }
+            }
             SidebarMenuEntry::Separator if matches!(out.last(), None | Some(SidebarMenuEntry::Separator)) => {}
             e => out.push(e),
         }
@@ -180,7 +204,7 @@ mod tests {
         let all = host_windows_all();
         let unique: std::collections::HashSet<_> = all.iter().collect();
         assert_eq!(unique.len(), all.len());
-        assert_eq!(all.len(), 16, "a new HostWindow belongs in host_windows_all");
+        assert_eq!(all.len(), 17, "a new HostWindow belongs in host_windows_all");
         assert_eq!(host_features_all().len(), 3, "a new HostFeature belongs in host_features_all");
     }
 
@@ -217,5 +241,11 @@ mod tests {
         let menu = vec![e("Share…", SidebarCommand::ShareChannel), e("Mute", SidebarCommand::Mute), e("Rename…", SidebarCommand::RenameChannel), SidebarMenuEntry::Separator, e("Leave Channel…", SidebarCommand::LeaveChannel)];
         assert_eq!(offered_sidebar(menu.clone(), &host_windows_all()), menu);
         assert_eq!(offered_sidebar(menu, &[HostWindow::ChannelShare]), vec![e("Share…", SidebarCommand::ShareChannel), e("Mute", SidebarCommand::Mute)]);
+        // Move to Group ▸ needs a host that draws groups; without one the submenu goes whole.
+        let sub = |entries| SidebarMenuEntry::Submenu { title: "Move to Group".into(), entries };
+        let to = e("Agents", SidebarCommand::MoveToGroup { group_id: "g".into() });
+        let with = vec![sub(vec![to.clone(), SidebarMenuEntry::Separator, e("New Group…", SidebarCommand::NewGroup)])];
+        assert_eq!(offered_sidebar(with.clone(), &[HostWindow::ChatGroups]), with);
+        assert!(offered_sidebar(with, &[HostWindow::ChatDialogs]).is_empty());
     }
 }

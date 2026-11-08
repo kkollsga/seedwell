@@ -1,13 +1,13 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
 /// <summary>
 /// Add Folder on Windows (the Mac's Add Folder window), a dialog over the library window drawn from the core's
-/// <c>SyncAddWindowModel</c> (trs-ffi sync_dialogs.rs): its two sides; From this PC the folder chosen with Choose… and
+/// <c>SyncAddWindowModel</c> (seedwell-ffi sync_dialogs.rs): its two sides; From this PC the folder chosen with Choose… and
 /// its note; Shared with me the link with the line the core reads from it, and where it goes (the Location menu, its
 /// Choose…); then Files on demand and "On all my devices". The form is the core's value: this keeps it, edits the mode,
 /// folder, on-demand and devices choice itself, the link through <c>sync_add_set_link</c> and the place through
@@ -26,6 +26,7 @@ sealed class AddFolderDialog
     SyncAddForm form;
     SyncAddWindowModel model;
     bool starting;
+    int placesReading;
     // What runs once the dialog has closed (only one ContentDialog may be open): the new folder's Share dialog.
     Action? next;
 
@@ -35,7 +36,12 @@ sealed class AddFolderDialog
         this.form = form;
         model = app.Core.SyncAddWindow(form, App.HostFeatures);
         link.Text = form.Key;
-        link.TextChanged += (_, _) => { if (this.form.Key != link.Text) Change(app.Core.SyncAddSetLink(this.form, link.Text)); };
+        link.TextChanged += (_, _) =>
+        {
+            if (this.form.Key == link.Text) return;
+            Change(app.Core.SyncAddSetLink(this.form, link.Text));
+            ReadPlaces();
+        };
         dialog = new ContentDialog
         {
             XamlRoot = root,
@@ -66,9 +72,10 @@ sealed class AddFolderDialog
         {
             return;
         }
-        prefill ??= await Clipboard(TrsFfiMethods.SyncLooksLikeLink);
+        prefill ??= await Clipboard(SeedwellFfiMethods.SyncLooksLikeLink);
         var d = new AddFolderDialog(app, root, app.Core.SyncAddForm(prefill));
         Open = d;
+        d.ReadPlaces();
         AppLog.Write($"add folder: open on {d.form.Mode}");
         try { await d.dialog.ShowAsync(); } catch (Exception e) { AppLog.Write($"add folder failed: {e.Message}"); }
         if (Open == d)
@@ -128,6 +135,30 @@ sealed class AddFolderDialog
 
     static TextBlock Note(string text) => new() { Text = text, FontSize = 12, Foreground = Res("TextFillColorSecondaryBrush"), TextWrapping = TextWrapping.Wrap, HorizontalAlignment = HorizontalAlignment.Left, MaxWidth = 440 };
 
+    /// <summary>
+    /// The core says a joinable link's places are still to be read ("Finding a place…", Start off): they look at the disk,
+    /// so off the UI thread. The core drops an answer for another link, or for one already served.
+    /// </summary>
+    async void ReadPlaces()
+    {
+        if (!form.PlacesPending) return;
+        placesReading++;
+        try
+        {
+            var places = await app.Core.SyncAddPlaces(form.Key);
+            if (Open == this) Change(SeedwellFfiMethods.SyncAddSetPlaces(form, places));
+        }
+        catch (Exception e)
+        {
+            AppLog.Write($"add folder: the places were not read: {e.Message}");
+            if (Open == this) Failed(failure, e is CoreException ce ? SeedwellFfiMethods.CoreErrorMessage(ce) : e.Message);
+        }
+        finally
+        {
+            placesReading--;
+        }
+    }
+
     void Change(SyncAddForm next)
     {
         form = next;
@@ -135,7 +166,9 @@ sealed class AddFolderDialog
         Draw();
     }
 
-    void Draw()
+    void Draw() => FocusKeeper.Redraw(content, dialog.XamlRoot, DrawAnew);
+
+    void DrawAnew()
     {
         model = app.Core.SyncAddWindow(form, App.HostFeatures);
         dialog.Title = Title(model.Caption, model.Title);
@@ -198,12 +231,12 @@ sealed class AddFolderDialog
             {
                 var item = new ToggleMenuFlyoutItem { Text = l.Title, IsChecked = l.Path == form.Location };
                 var path = l.Path;
-                item.Click += (_, _) => Change(TrsFfiMethods.SyncAddSetLocation(form, path));
+                item.Click += (_, _) => Change(SeedwellFfiMethods.SyncAddSetLocation(form, path));
                 menu.Items.Add(item);
             }
             menu.Items.Add(new MenuFlyoutSeparator());
             var other = new MenuFlyoutItem { Text = model.LocationChoose };
-            other.Click += async (_, _) => { if (await app.PickFolder(model.LocationPicker) is string parent) Change(TrsFfiMethods.SyncAddChooseParent(form, parent)); };
+            other.Click += async (_, _) => { if (await app.PickFolder(model.LocationPicker) is string parent) Change(SeedwellFfiMethods.SyncAddChooseParent(form, parent)); };
             menu.Items.Add(other);
             place.Flyout = menu;
             content.Children.Add(place);
@@ -242,7 +275,7 @@ sealed class AddFolderDialog
 
     void Tips()
     {
-        foreach (var b in RowCommands.Descendants(dialog.XamlRoot).OfType<Button>())
+        foreach (var b in RowCommands.DialogButtons(dialog))
         {
             if (Equals(b.Content, model.ConfirmTitle)) Help(b, model.ConfirmHelp);
             else if (Equals(b.Content, model.CancelTitle)) Help(b, model.CancelHelp);
@@ -358,7 +391,7 @@ sealed class AddFolderDialog
         }
         catch (CoreException e)
         {
-            error = TrsFfiMethods.CoreErrorMessage(e);
+            error = SeedwellFfiMethods.CoreErrorMessage(e);
         }
         starting = false;
         if (folder is null)
@@ -370,6 +403,8 @@ sealed class AddFolderDialog
         }
         AppLog.Write($"add folder: added {folder.Name} ({folder.Id}), share after {shareAfter}");
         app.ShowPlace(new LibraryPlace.FolderSync());
+        // In a turn of its own: the page drawn, then drawn again with the folder chosen, is one long hold of the UI thread in the first moment of a large add.
+        await Quiet.NextTurn();
         app.LibraryWindow.Pane.SyncPage?.Choose(folder.Id);
         var id = folder.Id;
         next = shareAfter ? () => ShareDialog.Show(app, id) : null;
@@ -385,9 +420,27 @@ sealed class AddFolderDialog
     {
         Change(app.Core.SyncAddSetLink(form, text));
         link.Text = text;
+        ReadPlaces();
     }
-    internal void QaLocation(string path) => Change(TrsFfiMethods.SyncAddSetLocation(form, path));
-    internal void QaParent(string path) => Change(TrsFfiMethods.SyncAddChooseParent(form, path));
+
+    /// <summary>QA: typing a link, the caret at <paramref name="caret"/>, its places then arriving while the user types.</summary>
+    internal void QaType(string text, int caret)
+    {
+        link.Focus(FocusState.Keyboard);
+        link.Text = text;
+        link.Select(caret, 0);
+    }
+    internal string QaFocused => FocusKeeper.Describe(content, dialog.XamlRoot);
+    internal Task<string> QaWalk() => FocusKeeper.QaWalk(content, dialog.XamlRoot, Draw);
+
+    /// <summary>QA and the renders: the places being read now, and the wait for them.</summary>
+    internal int PlacesReading => placesReading;
+    internal async Task PlacesRead()
+    {
+        while (placesReading > 0) await Task.Delay(10);
+    }
+    internal void QaLocation(string path) => Change(SeedwellFfiMethods.SyncAddSetLocation(form, path));
+    internal void QaParent(string path) => Change(SeedwellFfiMethods.SyncAddChooseParent(form, path));
     internal void QaAllDevices(bool on) => Change(form with { AllDevices = on });
     /// <summary>The switches a dialog has drawn: each one's name, whether it is on, and "(off)" when it cannot be switched.</summary>
     internal static string QaSwitches(UIElement content) => string.Join(", ", RowCommands.Tree(content).OfType<ToggleSwitch>().Select(t => $"{t.Header} {t.IsOn}{(t.IsEnabled ? "" : " (off)")}"));

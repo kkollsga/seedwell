@@ -6,13 +6,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
-use trs_sync_net::chat::{AttachmentInfo, MessageInfo, NewAttachment};
-use trs_sync_net::files::DownloadTo;
-use trs_sync_net::room::Place;
-use trs_sync_net::SyncHandle;
-use trs_sync_proto::attach::PIECE;
-use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::members::Role;
+use seedwell_sync_net::chat::{AttachmentInfo, MessageInfo, NewAttachment};
+use seedwell_sync_net::files::DownloadTo;
+use seedwell_sync_net::room::Place;
+use seedwell_sync_net::SyncHandle;
+use seedwell_sync_proto::attach::PIECE;
+use seedwell_sync_proto::ids::FolderId;
+use seedwell_sync_proto::members::Role;
 
 use crate::chat::{at, join, start_at};
 use crate::utp::until;
@@ -79,7 +79,7 @@ async fn a_file_is_served_in_place_checked_piece_by_piece_and_found_gone_when_ch
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     assert_eq!(a.test_file_hooks().served.load(Ordering::SeqCst), 7, "six pieces, and the bad one again");
     assert!(!dl.join("report (1).bin.seedwell-part").exists());
-    assert_eq!(trs_platform::fs::is_marked_downloaded(&path), cfg!(any(target_os = "macos", windows)), "marked as downloaded");
+    assert_eq!(seedwell_platform::fs::is_marked_downloaded(&path), cfg!(any(target_os = "macos", windows)), "marked as downloaded");
 
     // Anna stops sharing it; Cy, who joins later, gets it from Bo's copy.
     let stopped = a.chat_file_stop_sharing(id, &att.hash).unwrap();
@@ -207,7 +207,7 @@ async fn a_private_messages_file_goes_only_between_its_two_devices() {
 /// dismissed: pasted pictures alone too, and a private message whose device went away.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_send_that_fails_later_stays_shown_with_its_reason() {
-    use trs_sync_net::chat::NewImage;
+    use seedwell_sync_net::chat::NewImage;
     let dirs: Vec<tempfile::TempDir> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
     let a = start_at(dirs[0].path(), "Anna", |_| {}).await;
     let b = start_at(dirs[1].path(), "Bo", |_| {}).await;
@@ -229,7 +229,7 @@ async fn a_send_that_fails_later_stays_shown_with_its_reason() {
 
     // A picture for a device no longer connected directly: shown with the reason, nothing kept to send later.
     until(30, "the keys", || a.test_direct_knows(&bd) && b.test_direct_knows(&ad)).await;
-    a.chat_send_direct(&bd, trs_sync_net::chat::MessageKind::Text, "hi", None, None).await.unwrap();
+    a.chat_send_direct(&bd, seedwell_sync_net::chat::MessageKind::Text, "hi", None, None).await.unwrap();
     b.test_refuse_direct(ad);
     until(20, "apart", || !a.chat_directs()[0].online).await;
     let e = a.chat_send_attachments(Place::Direct(bd), None, "", None, None, pasted()).await.unwrap_err().to_string();

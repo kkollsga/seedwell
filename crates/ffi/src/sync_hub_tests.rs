@@ -64,7 +64,7 @@ impl Folder {
     }
 
     fn anchor(&self, seq: u64) -> u64 {
-        trs_sync::ondemand::anchor_of(self.base, seq)
+        seedwell_sync::ondemand::anchor_of(self.base, seq)
     }
 }
 
@@ -167,11 +167,11 @@ impl HostCore for Fakes {
         self.with(f, |x| {
             let from = if anchor == 0 {
                 0
-            } else if x.expired || trs_sync::ondemand::anchor_index(anchor) != x.base || trs_sync::ondemand::anchor_sequence(anchor) > x.seq {
+            } else if x.expired || seedwell_sync::ondemand::anchor_index(anchor) != x.base || seedwell_sync::ondemand::anchor_sequence(anchor) > x.seq {
                 // Another index's anchor, or one from the future (a folder joined again since): as the core's.
                 return Err(od_err(OdKind::AnchorExpired, "expired"));
             } else {
-                trs_sync::ondemand::anchor_sequence(anchor)
+                seedwell_sync::ondemand::anchor_sequence(anchor)
             };
             let pending: Vec<&(u64, String, bool)> = x.log.iter().filter(|(s, _, _)| *s > from).collect();
             let taken = &pending[..pending.len().min(limit as usize)];
@@ -231,10 +231,10 @@ impl HostCore for Fakes {
             Ok(i)
         })
     }
-    fn replace_hold(&self, f: &str) -> Option<trs_sync::ondemand::Hold> {
-        self.folders.lock().unwrap().get(f).filter(|x| x.hold).map(|x| trs_sync::ondemand::Hold { left: x.hold_left, writing: false })
+    fn replace_hold(&self, f: &str) -> Option<seedwell_sync::ondemand::Hold> {
+        self.folders.lock().unwrap().get(f).filter(|x| x.hold).map(|x| seedwell_sync::ondemand::Hold { left: x.hold_left, writing: false })
     }
-    fn delete(&self, f: &str, id: &str, _: Option<trs_sync_net::DeleteSeen>) -> Result<SyncDeleted, OdError> {
+    fn delete(&self, f: &str, id: &str, _: Option<seedwell_sync_net::DeleteSeen>) -> Result<SyncDeleted, OdError> {
         self.calls.lock().unwrap().push(("delete".into(), f.into(), id.into()));
         self.with(f, |x| {
             x.remove(id);
@@ -303,8 +303,25 @@ fn the_hub_lists_every_folder_with_its_kind_in_name_order() {
     let told = Told::default();
     let (mut anchors, mut shown) = (HashMap::new(), None);
     h.watch_once(&told, &mut anchors, &mut shown);
-    assert_eq!(*told.domains.lock().unwrap(), [vec![SyncHostDomain { id: HUB_ID.into(), name: "Seedwell".into() }]]);
+    assert_eq!(*told.domains.lock().unwrap(), [vec![hub_domain()]]);
     assert_eq!(*told.moved.lock().unwrap(), [HUB_ID], "one signal for the whole hub");
+}
+
+/// Fails if the hub's domain has a name of its own: macOS labels a domain "<app> - <name>" in the Finder's sidebar
+/// (0.1.20's "Seedwell - Seedwell") and puts it in `~/Library/CloudStorage/<app>-<name>`. Also fails if the hub's root
+/// comes without a name: the extension would then name it after the domain, which is empty now. Or if the name a host
+/// falls back to, when macOS refuses the empty one, is empty too (a new install would get no entry).
+#[test]
+fn the_hub_has_no_name_of_its_own_so_the_sidebar_says_seedwell() {
+    assert_eq!(hub_domain(), SyncHostDomain { id: HUB_ID.into(), name: String::new() });
+    // The name a host falls back to when the system refuses the empty one is a name (else no entry at all).
+    assert!(!DOMAIN_FALLBACK_NAME.trim().is_empty());
+    let d = tempfile::tempdir().unwrap();
+    let h = hub_host(&three(), d.path());
+    assert_eq!(ok(&h, json!({"op":"item","item":"root"}))["name"], "Seedwell");
+    // A folder's own root keeps the folder's name in the hub.
+    let top = kids(&h, "root");
+    assert!(top.iter().all(|i| i["name"] != "Seedwell" && !i["name"].as_str().unwrap().is_empty()), "{top:?}");
 }
 
 /// Fails if a full folder's item is anything but a link to its absolute place (a relative target would point inside
@@ -694,7 +711,7 @@ fn removing_one_folder_hands_over_its_changes_and_leaves_the_others() {
     let mac = Arc::new(MacHost { host: OnceLock::new(), visible: visible.clone(), place: place.clone(), handed_over: Mutex::new(None), notices: Mutex::new(Vec::new()) });
     let _ = mac.host.set(h.clone());
     let release = Release { host: h.clone(), listener: mac.clone() };
-    trs_sync_net::OnDemandHost::release(&release, "F", "Team", &place).unwrap();
+    seedwell_sync_net::OnDemandHost::release(&release, "F", "Team", &place).unwrap();
 
     assert_eq!(*mac.handed_over.lock().unwrap(), Some(true), "the hand-over was served");
     assert!(fakes.calls.lock().unwrap().iter().any(|c| c.0 == "create" && c.1 == "F" && c.2 == "Pending"));
@@ -719,7 +736,7 @@ fn removing_one_folder_hands_over_its_changes_and_leaves_the_others() {
     assert_eq!(g_after, g_before);
 
     // The core refused after all (`settled`, as it says when the removal ends): the folder is back, listed again.
-    trs_sync_net::OnDemandHost::settled(&release, "F");
+    seedwell_sync_net::OnDemandHost::settled(&release, "F");
     sys.catch_up(&h, 100);
     assert!(sys.items.contains_key("F:a"), "back, from the start");
 }
@@ -940,7 +957,7 @@ fn a_let_go_that_cannot_keep_a_file_keeps_the_folder() {
     let mac = Arc::new(MacHost { host: OnceLock::new(), visible: visible.clone(), place: place.clone(), handed_over: Mutex::new(None), notices: Mutex::new(Vec::new()) });
     let _ = mac.host.set(h.clone());
     let release = Release { host: h.clone(), listener: mac.clone() };
-    let refused = trs_sync_net::OnDemandHost::release(&release, "F", "Team", &place);
+    let refused = seedwell_sync_net::OnDemandHost::release(&release, "F", "Team", &place);
     std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
     let e = refused.unwrap_err();
     assert!(e.contains("late.txt") && e.contains("stays"), "{e}");

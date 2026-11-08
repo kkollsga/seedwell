@@ -349,7 +349,7 @@ Small examples that paid off:
 
 ### 2.2 Seams
 
-- **Rust seams:** one platform crate (`trs-platform`: `fs`, `dirs`, `proc`, `signal`, `net`, `ipc`, `names`) is the
+- **Rust seams:** one platform crate (`seedwell-platform`: `fs`, `dirs`, `proc`, `signal`, `net`, `ipc`, `names`) is the
   only place that names an OS. Everywhere else: no `std::os::unix`, no `libc`, no errno numbers; match
   `io::ErrorKind`. A `cfg`-split module per seam (file watching, IPC transport, trash, secret store).
 - **Host seams:** secrets (Keychain / Credential Manager / Secret Service), keep-awake, power and network changes,

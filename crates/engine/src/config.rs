@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use trs_classify::Category;
-pub use trs_state::config::Schedule as AltSchedule;
+use seedwell_classify::Category;
+pub use seedwell_state::config::Schedule as AltSchedule;
 
 /// Timings that drive the Cold / Warm / Hot power tiers (SPEC 5.1, ENGINE.md 3).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,7 +108,7 @@ pub enum EncryptionPolicy {
 /// What to do with a `.torrent` after it was added.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AfterAdd {
-    /// Move to the Trash (`trs_platform::fs::move_to_trash`: the system's own Trash call on macOS, which keeps the
+    /// Move to the Trash (`seedwell_platform::fs::move_to_trash`: the system's own Trash call on macOS, which keeps the
     /// file in its own volume's Trash with Put Back, the Recycle Bin on Windows, the freedesktop.org home trash
     /// elsewhere).
     Trash,
@@ -145,7 +145,7 @@ pub struct WatchConfig {
     /// Only `.torrent` files that arrived after this moment are picked up (SPEC 7A.1); older ones
     /// are the folder's backlog ([`crate::EngineHandle::watch_backlog`]). `None` means "the
     /// moment this folder joined the list in this process", so a caller that sets nothing never
-    /// mass-adds old files; `trs_state::Config` keeps the persisted value (`since`).
+    /// mass-adds old files; `seedwell_state::Config` keeps the persisted value (`since`).
     pub since: Option<std::time::SystemTime>,
 }
 
@@ -182,7 +182,7 @@ impl Default for DirectConfig {
 /// change of a relocation; returning `false` stops the move right there and leaves everything
 /// as a crash would.
 #[derive(Clone)]
-pub struct MoveFaultFn(pub trs_storage::FaultHook);
+pub struct MoveFaultFn(pub seedwell_storage::FaultHook);
 
 impl std::fmt::Debug for MoveFaultFn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -366,9 +366,9 @@ pub struct EngineConfig {
     /// Test hook for the schedule's notion of "now".
     pub clock: Option<ClockFn>,
     /// Where trackers may live. The default refuses loopback, link-local, cloud metadata and
-    /// private networks (`trs-tracker`'s production policy); tests opt in to loopback, and a
+    /// private networks (`seedwell-tracker`'s production policy); tests opt in to loopback, and a
     /// "my tracker is on my LAN/VPN" setting would set `allow_lan_trackers`.
-    pub tracker_destinations: trs_tracker::policy::DestinationPolicy,
+    pub tracker_destinations: seedwell_tracker::policy::DestinationPolicy,
     /// How many torrents may hash their files at the same time (add with existing data, Recheck,
     /// reconnect after an unplug, launch): 2. A constant of the engine, not a user setting; the
     /// rest wait without an actor ("Waiting to verify"). Read once at start.
@@ -457,7 +457,7 @@ impl Default for EngineConfig {
             direct: DirectConfig::default(),
             trash_dir: None,
             clock: None,
-            tracker_destinations: trs_tracker::policy::DestinationPolicy::STRICT,
+            tracker_destinations: seedwell_tracker::policy::DestinationPolicy::STRICT,
             verify_slots: 2,
             retry_minute: Duration::from_secs(60),
             stall_rate: 2048,

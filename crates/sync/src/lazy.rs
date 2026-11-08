@@ -12,13 +12,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::io;
 
 use sha2::{Digest, Sha256};
-use trs_sync_proto::model::{ChunkRef, FileInfo, FileKind, STATE_DIR, SignedFile, Version};
+use seedwell_sync_proto::model::{ChunkRef, FileInfo, FileKind, STATE_DIR, SignedFile, Version};
 
 use crate::chunk::{self, Chunker, Tier};
 use crate::fs::{Fs, Meta};
 use crate::index::{LocalRecord, Stamp, TierMemo};
 use crate::pull::{ChunkRequest, ChunkSource, FetchError, STREAM_PIECE, StreamAsk, StreamFail};
-use trs_sync_proto::ids::ShortId;
+use seedwell_sync_proto::ids::ShortId;
 
 fn stamp_of(m: &Meta) -> Stamp {
     Stamp { size: m.size, mtime_ns: m.mtime_ns, ctime_ns: m.ctime_ns, inode: m.inode }
@@ -670,7 +670,7 @@ pub fn note_hashed(fs: &dyn Fs, file: &SignedFile) -> io::Result<()> {
         fs.create_dir(&dir)?;
     }
     let mut b = Vec::new();
-    trs_sync_proto::msg::encode_entry(&mut b, 0, false, file);
+    seedwell_sync_proto::msg::encode_entry(&mut b, 0, false, file);
     let fh = fs.open_rw(&note_path(&file.info.path))?;
     fh.set_len(0)?;
     fh.write_at(0, &b)?;
@@ -684,7 +684,7 @@ pub fn noted_hashed(fs: &dyn Fs, v: &FileInfo) -> Option<SignedFile> {
         return None;
     }
     let b = crate::fs::read_all(fs, &note_path(&v.path)).ok()?;
-    let e = trs_sync_proto::msg::decode_entry(&mut trs_sync_proto::codec::Reader::new(&b)).ok()?;
+    let e = seedwell_sync_proto::msg::decode_entry(&mut seedwell_sync_proto::codec::Reader::new(&b)).ok()?;
     let f = e.file;
     (!f.info.is_unhashed() && f.info.path == v.path && f.info.same_content(v)).then_some(f)
 }
@@ -751,8 +751,8 @@ impl StreamCheck {
 mod tests {
     use super::*;
     use crate::fs::{MemFs, write_all};
-    use trs_sync_proto::ids::ShortId;
-    use trs_sync_proto::model::{FileKind, SignedFile};
+    use seedwell_sync_proto::ids::ShortId;
+    use seedwell_sync_proto::model::{FileKind, SignedFile};
 
     fn data(n: usize) -> Vec<u8> {
         let mut s = 7u64;

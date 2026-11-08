@@ -61,10 +61,14 @@ pub struct ServerOptions {
     pub keeps_awake: bool,
     /// The app's updater (`update.*`); a daemon leaves it empty.
     pub builds: crate::builds::BuildsSlot,
+    /// The app's torrent proxy (`proxy.*`); a daemon leaves it empty.
+    pub proxy: crate::proxy::ProxySlot,
     /// Looks for other Seedwells on this computer for `status` (`others`), given this one's state folder: the user's
     /// app sets it (`crate::others::line_now`); a daemon and an isolated (test) run leave it out, so a test never
     /// reports the user's own app.
     pub others: Option<fn(&Path) -> Option<String>>,
+    /// The file the activity log is kept in across restarts (the app's and the daemon's); none: in memory only.
+    pub activity_file: Option<PathBuf>,
 }
 
 impl Default for ServerOptions {
@@ -81,14 +85,16 @@ impl Default for ServerOptions {
             max_strikes: 8,
             keeps_awake: false,
             builds: crate::builds::BuildsSlot::new(),
+            proxy: crate::proxy::ProxySlot::new(),
             others: None,
+            activity_file: None,
         }
     }
 }
 
 impl ServerOptions {
     /// Take the per-client rate (`agents.rate_limit_per_sec`) from the settings.
-    pub fn with_config(mut self, cfg: &trs_state::Config) -> Self {
+    pub fn with_config(mut self, cfg: &seedwell_state::Config) -> Self {
         self.rate_per_sec = cfg.agents.rate_limit_per_sec.max(1);
         self.burst = self.rate_per_sec.saturating_mul(2).max(10);
         self
@@ -191,10 +197,12 @@ struct Ctx<B> {
     holds: Mutex<std::collections::HashMap<String, Holder>>,
     /// Numbers the connections (for `holds`).
     conn_ids: AtomicU64,
+    /// When this server started answering (Unix ms), told in `hello`: a restart's new run has a later one.
+    started_ms: u64,
     /// Receivers of the sync service's channel messages for the chat pump, each made before the request that made it
     /// answers ([`chat_methods::tap`]), so an agent that subscribed misses no message posted after.
     #[cfg(feature = "sync")]
-    chat_taps: tokio::sync::mpsc::UnboundedSender<broadcast::Receiver<trs_sync_net::chat::ChatEvent>>,
+    chat_taps: tokio::sync::mpsc::UnboundedSender<broadcast::Receiver<seedwell_sync_net::chat::ChatEvent>>,
 }
 
 /// A running server. Dropping it stops accepting, closes connections and removes the socket.
@@ -279,7 +287,7 @@ pub async fn serve_backend<B: Backend>(
     let path = path.as_ref().to_path_buf();
     let bound = transport::bind(&path).await?;
     let (stop_tx, stop_rx) = watch::channel(false);
-    let activity = ActivityLog::new();
+    let activity = opts.activity_file.clone().map_or_else(ActivityLog::new, ActivityLog::persisted);
     let awake = Awake::new();
     #[cfg(feature = "sync")]
     let (chat_taps, chat_taps_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -305,6 +313,7 @@ pub async fn serve_backend<B: Backend>(
         stop: stop_rx.clone(),
         holds: Mutex::new(std::collections::HashMap::new()),
         conn_ids: AtomicU64::new(0),
+        started_ms: now_ms(),
         #[cfg(feature = "sync")]
         chat_taps,
         opts,
@@ -702,10 +711,32 @@ fn expand_save_path(p: &Option<String>, level: Permission) -> Result<Option<Path
     Ok(Some(path))
 }
 
-/// The app's updater, for `update.*`.
-fn updater<B: Backend>(ctx: &Ctx<B>) -> Result<std::sync::Arc<dyn crate::builds::Builds>, ApiError> {
-    ctx.opts.builds.get().ok_or_else(|| ApiError::new(ErrorCode::Unsupported, "this Seedwell installs no builds (the app does; a daemon does not)"))
+/// The app's torrent proxy, for `proxy.*`.
+fn proxy<B: Backend>(ctx: &Ctx<B>) -> Result<std::sync::Arc<dyn crate::proxy::ProxyControl>, ApiError> {
+    ctx.opts.proxy.get().ok_or_else(|| ApiError::new(ErrorCode::Unsupported, "this Seedwell has no torrent proxy (the app has; a daemon has not)"))
 }
+
+/// What a `proxy.*` call did: the proxy as it is now, with the sentence.
+async fn proxy_reply<B: Backend>(ctx: &Ctx<B>, call: impl FnOnce(&dyn crate::proxy::ProxyControl) -> Result<String, String> + Send + 'static) -> Result<Reply, ApiError> {
+    let p = proxy(ctx)?;
+    let out = blocking(move || -> Result<ProxyDto, ApiError> {
+        let note = call(&*p).map_err(ApiError::invalid)?;
+        Ok(ProxyDto { note, ..p.status() })
+    })
+    .await??;
+    reply(&out)
+}
+
+/// The app's updater, for `update.*` and `restart`: in an app still starting, once it registered; a daemon says
+/// `daemon_says`.
+async fn updater<B: Backend>(ctx: &Ctx<B>, daemon_says: &str) -> Result<std::sync::Arc<dyn crate::builds::Builds>, ApiError> {
+    ctx.opts.builds.wait(crate::builds::STARTING).await.map_err(|why| match why {
+        crate::builds::NoBuilds::Daemon => ApiError::new(ErrorCode::Unsupported, daemon_says),
+        crate::builds::NoBuilds::Starting => ApiError::new(ErrorCode::Timeout, "Seedwell is still starting: try again in a moment"),
+    })
+}
+
+const NO_BUILDS: &str = "this Seedwell installs no builds (the app does; a daemon does not)";
 
 /// A path given to `update.*`: absolute, no `..`.
 fn absolute(p: &str) -> Result<PathBuf, ApiError> {
@@ -743,6 +774,8 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
                 permission: level.as_str().to_owned(),
                 methods: Method::ALL.iter().filter(|m| level.allows(m.required())).map(|m| m.name().to_owned()).collect(),
                 rate_limit_per_sec: ctx.opts.rate_per_sec,
+                pid: std::process::id(),
+                started_ms: ctx.started_ms,
             })
         }
         Request::Ping(_) => reply(&json!({ "pong": true, "time_ms": now_ms() })),
@@ -800,7 +833,7 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
                 d.trackers.clear();
             }
             for t in &mut d.trackers {
-                t.url = trs_state::url::redact_url(&t.url);
+                t.url = seedwell_state::url::redact_url(&t.url);
                 t.status = clip(&scrub_urls(&t.status), 300);
             }
             if p.peers == Some(false) {
@@ -822,8 +855,56 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
         }
         Request::SettingsGet(p) => {
             let st = ctx.state.clone();
+            if let Some(file) = p.file {
+                if p.keys.is_some() {
+                    return Err(ApiError::params("give keys or a file, not both"));
+                }
+                let file = crate::settings::check_file(&file)?;
+                let doc = blocking(move || crate::settings::doc_get(&st.rules(), &st.profiles(), file)).await??;
+                let mut settings = serde_json::Map::new();
+                settings.insert(file.to_owned(), doc);
+                return reply(&SettingsDto { settings, changed: vec![], note: String::new() });
+            }
+            // The proxy's key is in the secret store, not the file: whether one is installed (never the key), with every
+            // setting, by its name, or inside `network` and `network.proxy`.
+            const KEY: &str = "network.proxy.key";
+            let keys = p.keys;
+            let rest: Option<Vec<String>> = keys.as_ref().map(|ks| ks.iter().filter(|k| *k != KEY).cloned().collect());
             let cfg = blocking(move || st.config()).await?;
-            let map = crate::settings::get(&cfg, p.keys.as_deref())?;
+            let mut map = crate::settings::get(&cfg, rest.as_deref())?;
+            let wanted: Vec<String> = match &keys {
+                None => vec![KEY.to_owned()],
+                Some(ks) => ks.iter().filter(|k| crate::settings::under(KEY, k)).cloned().collect(),
+            };
+            if !wanted.is_empty() {
+                let Some(px) = ctx.opts.proxy.get() else {
+                    // Asked for by name: no proxy here (a daemon) says so; in a listing or a table it is left out.
+                    if keys.as_ref().is_some_and(|ks| ks.iter().any(|k| k == KEY)) {
+                        return Err(proxy(ctx).err().unwrap_or_else(|| ApiError::internal("no proxy")));
+                    }
+                    return reply(&SettingsDto { settings: map, changed: vec![], note: String::new() });
+                };
+                let has = blocking(move || px.status().has_key).await?;
+                let v = Value::String(if has { "installed" } else { "none" }.into());
+                for k in wanted {
+                    match KEY.strip_prefix(k.as_str()).and_then(|r| r.strip_prefix('.')) {
+                        // Inside a table that was asked for.
+                        Some(inner) => {
+                            let mut at = map.get_mut(&k);
+                            let parts: Vec<&str> = inner.split('.').collect();
+                            for part in &parts[..parts.len() - 1] {
+                                at = at.and_then(|t| t.get_mut(*part));
+                            }
+                            if let (Some(Value::Object(t)), Some(last)) = (at, parts.last()) {
+                                t.insert((*last).to_owned(), v.clone());
+                            }
+                        }
+                        None => {
+                            map.insert(k, v.clone());
+                        }
+                    }
+                }
+            }
             reply(&SettingsDto { settings: map, changed: vec![], note: String::new() })
         }
         Request::EventsSubscribe(p) => {
@@ -870,11 +951,11 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
         }
         Request::AwakeStatus(_) => awake_status(ctx).await,
         Request::UpdateStatus(_) => {
-            let b = updater(ctx)?;
+            let b = updater(ctx, NO_BUILDS).await?;
             reply(&blocking(move || b.status()).await?)
         }
         Request::UpdateInstall(p) => {
-            let b = updater(ctx)?;
+            let b = updater(ctx, NO_BUILDS).await?;
             let path = absolute(&p.path)?;
             let out = blocking(move || -> Result<UpdateStatusDto, ApiError> {
                 let note = b.install(&path, p.sha256.as_deref().map(str::trim).filter(|s| !s.is_empty())).map_err(ApiError::invalid)?;
@@ -884,7 +965,7 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
             reply(&out)
         }
         Request::UpdateDevBuilds(p) => {
-            let b = updater(ctx)?;
+            let b = updater(ctx, NO_BUILDS).await?;
             let out = blocking(move || -> Result<UpdateStatusDto, ApiError> {
                 let note = b.set_dev_builds(p.on).map_err(ApiError::invalid)?;
                 Ok(UpdateStatusDto { note, ..b.status() })
@@ -896,7 +977,7 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
             Ok(r)
         }
         Request::UpdateWatch(p) => {
-            let b = updater(ctx)?;
+            let b = updater(ctx, NO_BUILDS).await?;
             let folder = p.folder.as_deref().map(absolute).transpose()?;
             let out = blocking(move || -> Result<UpdateStatusDto, ApiError> {
                 let note = b.watch(folder.as_deref()).map_err(ApiError::invalid)?;
@@ -906,7 +987,7 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
             reply(&out)
         }
         Request::UpdateNow(_) => {
-            let b = updater(ctx)?;
+            let b = updater(ctx, NO_BUILDS).await?;
             let out = blocking(move || -> Result<UpdateStatusDto, ApiError> {
                 let note = b.update_now().map_err(ApiError::invalid)?;
                 Ok(UpdateStatusDto { note, ..b.status() })
@@ -914,6 +995,14 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
             .await??;
             let mut r = reply(&out)?;
             r.note = Some(out.note);
+            Ok(r)
+        }
+        Request::Restart(_) => {
+            let b = updater(ctx, "this Seedwell cannot restart itself (the app can; a daemon is restarted by whoever started it)").await?;
+            let out = blocking(move || b.restart()).await?.map_err(ApiError::invalid)?;
+            let out = RestartDto { pid: std::process::id(), started_ms: ctx.started_ms, ..out };
+            let mut r = reply(&out)?;
+            r.note = Some(out.note.clone());
             Ok(r)
         }
         Request::AgentsRequest(p) => agents_request(ctx, conn, p).await,
@@ -927,7 +1016,7 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
             let out = blocking(move || {
                 let enabled = st.config().advanced.developer_mode;
                 let dir = st.dir().join("logs");
-                let q = trs_devlog::read::Query {
+                let q = seedwell_devlog::read::Query {
                     torrent: p.torrent.clone(),
                     tracker: p.tracker.clone(),
                     event: p.event.clone(),
@@ -936,7 +1025,7 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
                     limit: p.limit.unwrap_or(50).clamp(1, 500) as usize,
                 };
                 let since = p.since_ms.unwrap_or(0);
-                let entries: Vec<Value> = trs_devlog::read::tail(&dir, &q)
+                let entries: Vec<Value> = seedwell_devlog::read::tail(&dir, &q)
                     .iter()
                     .filter_map(|l| serde_json::from_str::<Value>(l).ok())
                     .filter(|v| v["ts_ms"].as_u64().unwrap_or(0) > since)
@@ -946,6 +1035,71 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
             .await?;
             reply(&out)
         }
+        Request::TrackerLogClear(_) => {
+            ctx.backend.tracker_log_clear(&ctx.state.dir().join("logs")).await;
+            reply(&json!({ "cleared": true }))
+        }
+        Request::ProxyStatus(_) => {
+            let p = proxy(ctx)?;
+            reply(&blocking(move || p.status()).await?)
+        }
+        Request::ProxySet(p) => {
+            if p.on.is_none() && p.country.is_none() {
+                return Err(ApiError::params("give on or country"));
+            }
+            // All or nothing: a switch that cannot be made leaves the country as it was.
+            proxy_reply(ctx, move |x| {
+                let before = x.status();
+                if p.on.is_some_and(|on| on != before.enabled) && !before.has_key {
+                    return Err("No proxy key is installed: set one up first (seedwell proxy nordvpn, or custom).".into());
+                }
+                let mut said = Vec::new();
+                if let Some(code) = &p.country {
+                    said.push(x.country(code)?);
+                }
+                if let Some(on) = p.on {
+                    match x.switch(on) {
+                        Ok(s) => said.push(s),
+                        Err(e) => {
+                            if p.country.is_some() {
+                                let _ = x.country(&before.country);
+                            }
+                            return Err(e);
+                        }
+                    }
+                }
+                Ok(said.join(" "))
+            })
+            .await
+        }
+        Request::ProxyKey(p) => {
+            let ProxyKeyParams { kind, user, pass, host, port } = p;
+            match kind.as_str() {
+                "nordvpn" => {
+                    let (Some(user), Some(pass)) = (user, pass) else {
+                        return Err(ApiError::params("nordvpn takes user and pass (NordVPN's service credentials)"));
+                    };
+                    if host.is_some() || port.is_some() {
+                        return Err(ApiError::params("nordvpn uses NordVPN's own servers: no host or port"));
+                    }
+                    proxy_reply(ctx, move |x| x.nordvpn(user, pass)).await
+                }
+                "custom" => {
+                    let (Some(host), Some(port)) = (host, port) else {
+                        return Err(ApiError::params("custom takes host and port"));
+                    };
+                    let key = match (user, pass) {
+                        (Some(u), Some(p)) => Some((u, p)),
+                        (None, None) => None,
+                        _ => return Err(ApiError::params("give both user and pass, or neither")),
+                    };
+                    proxy_reply(ctx, move |x| x.custom(host, port, key)).await
+                }
+                _ => Err(ApiError::params("kind is nordvpn or custom")),
+            }
+        }
+        Request::ProxyRemoveKey(_) => proxy_reply(ctx, |x| x.remove_key()).await,
+        Request::ProxyFaster(_) => proxy_reply(ctx, |x| x.faster()).await,
         Request::Activity(p) => {
             // What agents did in a channel closed to agents (or with private messages, while those are) is left out:
             // its entries name the channel. The user sees every entry in the app.
@@ -996,7 +1150,7 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
         }
         Request::SetLimits(p) => {
             for v in [p.down_limit, p.up_limit, p.alt_down_limit, p.alt_up_limit].into_iter().flatten() {
-                if v > trs_state::config::MAX_RATE {
+                if v > seedwell_state::config::MAX_RATE {
                     return Err(ApiError::params("limit above 1 TiB/s"));
                 }
             }
@@ -1011,7 +1165,7 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
         }
         Request::SetTrackerLimits(p) => {
             for v in [p.down_limit, p.up_limit].into_iter().flatten() {
-                if v > trs_state::config::MAX_RATE {
+                if v > seedwell_state::config::MAX_RATE {
                     return Err(ApiError::params("limit above 1 TiB/s"));
                 }
             }
@@ -1050,10 +1204,10 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
                 let private = if set.get(&id2).is_some() {
                     rows.iter().any(|r| r.private && r.tracker_profile.as_deref() == Some(id2.as_str()))
                 } else if id2 == "other-private" {
-                    rows.iter().any(|r| r.private && r.tracker_profile.is_none() && trs_state::trackers::group_of_host(&r.tracker_host).is_none())
+                    rows.iter().any(|r| r.private && r.tracker_profile.is_none() && seedwell_state::trackers::group_of_host(&r.tracker_host).is_none())
                 } else {
                     rows.iter().any(|r| {
-                        r.private && r.tracker_profile.is_none() && trs_state::trackers::group_of_host(&r.tracker_host).is_some_and(|g| g.key == id2)
+                        r.private && r.tracker_profile.is_none() && seedwell_state::trackers::group_of_host(&r.tracker_host).is_some_and(|g| g.key == id2)
                     })
                 };
                 if !private {
@@ -1265,6 +1419,11 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
         | Request::ChatStopSharing(_)
         | Request::ChatMute(_)
         | Request::ChatRename(_)
+        | Request::ChatGroups(_)
+        | Request::ChatGroupNew(_)
+        | Request::ChatGroupEdit(_)
+        | Request::ChatGroupDelete(_)
+        | Request::ChatSetGroup(_)
         | Request::ChatAddAddress(_)
         | Request::ChatSetWake(_)
         | Request::ChatSetAgents(_)
@@ -1277,20 +1436,53 @@ async fn dispatch<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &mut Conn, req: Request) 
         | Request::ChatDmDelete(_)) => chat_call(ctx, conn, r).await,
         Request::SettingsSet(p) => {
             let st = ctx.state.clone();
-            let changes = p.changes;
+            let SettingsSetParams { changes, file, doc } = p;
             let changed = blocking(move || {
-                let cfg = st.config();
-                let (new, changed) = crate::settings::apply(&cfg, &changes)?;
-                st.save_config(&new).map_err(|e| ApiError::invalid(clip(&e.to_string(), 300)))?;
-                Ok::<_, ApiError>(changed)
+                let save_err = |e: seedwell_state::DocError| ApiError::invalid(clip(&e.to_string(), 300));
+                match (file, doc) {
+                    (None, None) => {
+                        let cfg = st.config();
+                        let (new, changed) = crate::settings::apply(&cfg, &changes)?;
+                        if !changed.is_empty() {
+                            st.save_config(&new).map_err(save_err)?;
+                        }
+                        Ok::<_, ApiError>(changed)
+                    }
+                    (Some(file), Some(doc)) if changes.is_empty() => {
+                        let same = match crate::settings::check_file(&file)? {
+                            "rules" => {
+                                let old = st.rules();
+                                let new = crate::settings::set_rules(&old, doc)?;
+                                let same = new == old;
+                                if !same {
+                                    st.save_rules(&new).map_err(save_err)?;
+                                }
+                                same
+                            }
+                            _ => {
+                                let old = st.profiles();
+                                let new = crate::settings::set_trackers(&old, doc)?;
+                                let same = new == old;
+                                if !same {
+                                    st.save_profiles(&new).map_err(save_err)?;
+                                }
+                                same
+                            }
+                        };
+                        Ok(if same { Vec::new() } else { vec![format!("{file}.toml")] })
+                    }
+                    _ => Err(ApiError::params("give changes, or a file (rules or trackers) with its doc")),
+                }
             })
             .await??;
+            let nothing = changed.is_empty();
             let mut r = reply(&SettingsDto {
                 settings: Default::default(),
                 changed: changed.clone(),
-                note: "saved; the running app applies settings within a few seconds".into(),
+                note: if nothing { "nothing changed: every value given was already in force".into() } else { "saved; the running app applies settings within a few seconds".into() },
             })?;
-            r.note = Some(changed.join(", "));
+            // The activity log names what really changed, never what was only asked.
+            r.note = Some(if nothing { "nothing changed".into() } else { changed.join(", ") });
             Ok(r)
         }
     }
@@ -1743,7 +1935,7 @@ async fn trackers<B: Backend>(ctx: &Arc<Ctx<B>>) -> Result<Reply, ApiError> {
         out.profiles.push(d);
     }
     for r in rows.iter().filter(|r| r.tracker_profile.is_none() && r.kind == "torrent") {
-        match trs_state::trackers::group_of_host(&r.tracker_host) {
+        match seedwell_state::trackers::group_of_host(&r.tracker_host) {
             Some(g) => {
                 let i = match out.groups.iter().position(|d| d.id == g.key) {
                     Some(i) => i,
@@ -1771,7 +1963,7 @@ async fn trackers<B: Backend>(ctx: &Arc<Ctx<B>>) -> Result<Reply, ApiError> {
     reply(&out)
 }
 
-fn bucket_dto(b: &trs_state::StatsBucket) -> BucketDto {
+fn bucket_dto(b: &seedwell_state::StatsBucket) -> BucketDto {
     BucketDto {
         downloaded: b.downloaded,
         uploaded: b.uploaded,
@@ -1785,7 +1977,7 @@ fn bucket_dto(b: &trs_state::StatsBucket) -> BucketDto {
 }
 
 async fn tracker_stats<B: Backend>(ctx: &Arc<Ctx<B>>, p: TrackerStatsParams) -> Result<Reply, ApiError> {
-    use trs_state::Day;
+    use seedwell_state::Day;
     let name = p.tracker.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("all").to_ascii_lowercase();
     let days = p.days.unwrap_or(30).clamp(1, 400);
     let st = ctx.state.clone();
@@ -1793,7 +1985,7 @@ async fn tracker_stats<B: Backend>(ctx: &Arc<Ctx<B>>, p: TrackerStatsParams) -> 
     let out = blocking(move || -> Result<TrackerStatsDto, ApiError> {
         let name2 = name2.replace("other_private", "other-private");
         let profiles = st.profiles();
-        let scopes = trs_state::stats::scopes_for(&profiles, &name2);
+        let scopes = seedwell_state::stats::scopes_for(&profiles, &name2);
         let special = matches!(name2.as_str(), "all" | "public" | "other-private");
         if !special && profiles.get(&name2).is_none() {
             // An automatic tracker is named by its domain and exists while it has history.
@@ -1805,8 +1997,8 @@ async fn tracker_stats<B: Backend>(ctx: &Arc<Ctx<B>>, p: TrackerStatsParams) -> 
         let today = Day::from_unix(now_secs() as i64, st.tz_offset());
         let (summary, series) = st
             .with_store(|s| {
-                let mut sum = trs_state::StatsSummary::default();
-                let mut series: Vec<(Day, trs_state::StatsBucket)> = Vec::new();
+                let mut sum = seedwell_state::StatsSummary::default();
+                let mut series: Vec<(Day, seedwell_state::StatsBucket)> = Vec::new();
                 for sc in &scopes {
                     sum.add(&s.stats_summary(sc, today)?);
                     for (i, (d, b)) in s.stats_series(sc, today, days)?.into_iter().enumerate() {

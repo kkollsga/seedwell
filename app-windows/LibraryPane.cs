@@ -3,7 +3,7 @@ using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
@@ -155,7 +155,7 @@ sealed class LibraryPane
                     sources.Add((await data.GetWebLinkAsync()).OriginalString);
                 }
                 else if (data.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.Text)
-                    && TrsFfiMethods.AddLinkSource(await data.GetTextAsync()) is string link)
+                    && SeedwellFfiMethods.AddLinkSource(await data.GetTextAsync()) is string link)
                 {
                     sources.Add(link);
                 }
@@ -406,7 +406,7 @@ sealed class LibraryPane
         title.Visibility = m.Page == LibraryPage.TrackerInfo ? Visibility.Collapsed : Visibility.Visible;
         // The rows' live rates, as the Mac's tracker header (Fmt.liveRate with its arrow).
         // On the Info page the header has them (the core's TrackerHeaderModel).
-        rates.Text = m.TrackerRates is TrackerRates r && m.Page != LibraryPage.TrackerInfo ? $"{TrsFfiMethods.FmtLiveRate(r.Down, "↓")}   {TrsFfiMethods.FmtLiveRate(r.Up, "↑")}" : "";
+        rates.Text = m.TrackerRates is TrackerRates r && m.Page != LibraryPage.TrackerInfo ? $"{SeedwellFfiMethods.FmtLiveRate(r.Down, "↓")}   {SeedwellFfiMethods.FmtLiveRate(r.Up, "↑")}" : "";
         // Another place: every torrent opens closed again.
         if (before is not null && !Equals(before.Place, m.Place)) app.Files.CollapseAll();
         if (SidebarKey(m.Sidebar) != sidebarKey || !Equals(before?.Place, m.Place))
@@ -457,22 +457,16 @@ sealed class LibraryPane
         }
         var chats = m.Sidebar.Chats;
         sidebar.Children.Add(Section(chats.Title));
-        foreach (var c in chats.Channels)
+        // The user's groups first, each with its channels under it while open; then the channels in none.
+        foreach (var g in chats.Groups)
         {
-            sidebar.Children.Add(Item(c.Item, m.Place, 0, c.Open ? "" : "", () => { library.SetChannelOpen(ChannelId(c.Item.Place), !c.Open); Refresh(); }));
-            if (c.Open)
+            sidebar.Children.Add(GroupRow(g));
+            if (g.Open)
             {
-                foreach (var t in c.Topics)
-                {
-                    sidebar.Children.Add(Item(t, m.Place, 1));
-                }
-                if (c.NewTopic is SidebarAdd add)
-                {
-                    var place = c.Item.Place;
-                    sidebar.Children.Add(AddLine(add, 1, () => { if (Channel(place) is SyncChannel ch) app.ChatDialogs.Show(TrsFfiMethods.ChatNewTopicDialog(ch), ch); }));
-                }
+                foreach (var c in g.Channels) DrawChannel(c, m.Place, 1);
             }
         }
+        foreach (var c in chats.Channels) DrawChannel(c, m.Place, 0);
         if (chats.Add is SidebarAdd newChannel)
         {
             sidebar.Children.Add(AddLine(newChannel, 0, () => NewChannelDialog.Show(app, null)));
@@ -491,6 +485,101 @@ sealed class LibraryPane
         }
     }
 
+    /// <summary>A channel's row, and while it is open its topics and New Topic… under it, <paramref name="indent"/> steps in.</summary>
+    void DrawChannel(SidebarChannel c, LibraryPlace selected, int indent)
+    {
+        sidebar.Children.Add(Item(c.Item, selected, indent, c.Open ? "" : "", () => { library.SetChannelOpen(ChannelId(c.Item.Place), !c.Open); Refresh(); }));
+        if (!c.Open)
+        {
+            return;
+        }
+        foreach (var t in c.Topics)
+        {
+            sidebar.Children.Add(Item(t, selected, indent + 1));
+        }
+        if (c.NewTopic is SidebarAdd add)
+        {
+            var place = c.Item.Place;
+            sidebar.Children.Add(AddLine(add, indent + 1, () => { if (Channel(place) is SyncChannel ch) app.ChatDialogs.Show(SeedwellFfiMethods.ChatNewTopicDialog(ch), ch); }));
+        }
+    }
+
+    /// <summary>
+    /// A group of channels (SPEC 7G.7 Groups): its disclosure, its icon where a channel's is, its name, its unread count;
+    /// not a place, so a click opens or closes it. Closed while it holds the channel shown, its icon is in the accent colour
+    /// (the sidebar's selection mark). Its own menu on a right-click.
+    /// </summary>
+    UIElement GroupRow(SidebarChatGroup group)
+    {
+        var id = group.Id;
+        var open = group.Open;
+        void Toggle() { library.SetGroupOpen(id, !open); Refresh(); }
+        var g = new Grid { ColumnSpacing = 10, Padding = new Thickness(0, 6, 10, 6), CornerRadius = new CornerRadius(4), Background = new SolidColorBrush(Colors.Transparent) };
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        g.ColumnDefinitions.Add(new ColumnDefinition());
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var head = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2 };
+        var b = new Button { Content = new FontIcon { Glyph = open ? "" : "", FontSize = 9 }, Width = 18, Height = 20, Padding = new Thickness(0), Background = new SolidColorBrush(Colors.Transparent), BorderThickness = new Thickness(0) };
+        b.Click += (_, _) => Toggle();
+        // The click is the chevron's alone: its tap must not reach the row too (which toggles as well, so one click would
+        // open and close again).
+        b.Tapped += (_, e) => e.Handled = true;
+        head.Children.Add(b);
+        var icon = new FontIcon { Glyph = GroupGlyph(group.Icon), FontSize = 16 };
+        if (group.HoldsSelection) icon.Foreground = (Brush)Application.Current.Resources["AccentTextFillColorPrimaryBrush"];
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(icon, group.IconLabel);
+        head.Children.Add(icon);
+        g.Children.Add(head);
+        var name = new TextBlock { Text = group.Title, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
+        if (group.Unread > 0) name.FontWeight = FontWeights.SemiBold;
+        Grid.SetColumn(name, 1);
+        g.Children.Add(name);
+        if (group.Unread > 0)
+        {
+            var badge = new InfoBadge { Value = (int)group.Unread, VerticalAlignment = VerticalAlignment.Center };
+            Grid.SetColumn(badge, 2);
+            g.Children.Add(badge);
+        }
+        ToolTipService.SetToolTip(g, group.Help.Length > 0 ? group.Help : null);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(g, group.Title);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetItemStatus(g, group.IconLabel);
+        g.Tag = new GroupTag(group.Title, open, group.HoldsSelection, group.Icon);
+        g.Tapped += (_, _) => Toggle();
+        g.RightTapped += (_, e) =>
+        {
+            var entries = library.SidebarGroupMenu(id);
+            if (entries.Length == 0)
+            {
+                return;
+            }
+            SidebarMenu(entries, null, id).ShowAt(g, e.GetPosition(g));
+            e.Handled = true;
+        };
+        return g;
+    }
+
+    /// <summary>
+    /// A group's icon as a Segoe Fluent glyph: the one table (the Mac's is SidebarSymbols.group). No default arm: a new
+    /// icon of the core is a compile warning here, not a folder drawn in its place.
+    /// </summary>
+#pragma warning disable CS8524 // (a number that is no icon: the core never sends one)
+    internal static string GroupGlyph(ChatGroupIcon icon) => icon switch
+    {
+        ChatGroupIcon.Sparkles => "",
+        ChatGroupIcon.Folder => "",
+        ChatGroupIcon.Briefcase => "",
+        ChatGroupIcon.House => "",
+        ChatGroupIcon.People => "",
+        ChatGroupIcon.Star => "",
+        ChatGroupIcon.Hammer => "",
+        ChatGroupIcon.Book => "",
+        ChatGroupIcon.GameController => "",
+        ChatGroupIcon.Heart => "",
+        ChatGroupIcon.Globe => "",
+        ChatGroupIcon.Tray => "",
+    };
+#pragma warning restore CS8524
+
     /// <summary>
     /// What the sidebar's drawing depends on: the core's signature (which items, in what order, open or not) and what
     /// each item shows (its icon, counts, dot, tag and texts), which the core changes in place under the same signature
@@ -499,14 +588,32 @@ sealed class LibraryPane
     /// <summary>The sidebar as last drawn (QA checks it follows the core).</summary>
     internal string SidebarDrawn => sidebarKey;
 
+    /// <summary>
+    /// The sidebar's rows as drawn, top to bottom (QA): a section "#Title", an item its name after a dot per step in, a
+    /// group "[group Name open|closed holds? Icon]", an add line "+Title". A row drawn twice, or one left behind by a
+    /// channel that moved, shows here (each row is a child of the sidebar, one under the other).
+    /// </summary>
+    internal string QaSidebarRows() => string.Join(" | ", sidebar.Children.Select(c => c switch
+    {
+        Grid { Tag: GroupTag t } => $"[group {t.Title} {(t.Open ? "open" : "closed")}{(t.Holds ? " holds" : "")} {t.Icon}]",
+        Grid { Tag: int indent } g => $"{new string('.', indent)}{Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(g)}",
+        TextBlock t => $"#{t.Text}",
+        StackPanel line => $"+{line.Children.OfType<TextBlock>().FirstOrDefault()?.Text}",
+        _ => c.GetType().Name,
+    }));
+
+    sealed record GroupTag(string Title, bool Open, bool Holds, ChatGroupIcon Icon);
+
     static string SidebarKey(SidebarModel s)
     {
         static string Item(SidebarItem i) => $"{i.Title}/{i.Icon}/{i.Unread}/{i.Badge}/{i.Count}/{i.Online}/{i.Flag?.Help}/{i.Tag?.Text}/{i.Help}";
         var items = s.Places
-            .Concat(s.Chats.Channels.SelectMany(c => c.Topics.Prepend(c.Item)))
+            .Concat(s.Chats.Groups.SelectMany(g => g.Channels).Concat(s.Chats.Channels).SelectMany(c => c.Topics.Prepend(c.Item)))
             .Concat(s.Directs?.Items ?? [])
             .Concat(s.Trackers?.Items ?? []);
-        return $"{s.Signature}#{string.Join(";", items.Select(Item))}#{s.Chats.Add?.Title}";
+        // A group's row: what it shows, open or not, holding the selection (its channels are among the items above).
+        var groups = s.Chats.Groups.Select(g => $"{g.Id}/{g.Title}/{g.Icon}/{g.Unread}/{g.Open}/{g.HoldsSelection}/{g.Help}/{string.Join(",", g.Channels.Select(c => ChannelId(c.Item.Place)))}");
+        return $"{s.Signature}#{string.Join(";", groups)}#{string.Join(";", items.Select(Item))}#{s.Chats.Add?.Title}";
     }
 
     static string ChannelId(LibraryPlace p) => p is LibraryPlace.Chat c ? c.ChannelId : "";
@@ -538,7 +645,7 @@ sealed class LibraryPane
     UIElement Item(SidebarItem item, LibraryPlace selected, int indent, string? disclosure = null, Action? disclose = null)
     {
         bool on = Equals(item.Place, selected);
-        var g = new Grid { ColumnSpacing = 10, Padding = new Thickness(indent * 18 + (disclosure is null ? 10 : 0), 6, 10, 6), CornerRadius = new CornerRadius(4) };
+        var g = new Grid { ColumnSpacing = 10, Padding = new Thickness(indent * 18 + (disclosure is null ? 10 : 0), 6, 10, 6), CornerRadius = new CornerRadius(4), Tag = indent };
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         g.ColumnDefinitions.Add(new ColumnDefinition());
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -548,6 +655,8 @@ sealed class LibraryPane
             // As the Mac's: a channel's disclosure before its icon.
             var b = new Button { Content = new FontIcon { Glyph = disclosure, FontSize = 9 }, Width = 18, Height = 20, Padding = new Thickness(0), Background = new SolidColorBrush(Colors.Transparent), BorderThickness = new Thickness(0) };
             b.Click += (_, _) => disclose();
+            // The click is the chevron's alone: its tap must not reach the row too (which selects the channel).
+            b.Tapped += (_, e) => e.Handled = true;
             head.Children.Add(b);
         }
         g.Background = on ? (Brush)Application.Current.Resources["SubtleFillColorSecondaryBrush"] : new SolidColorBrush(Colors.Transparent);
@@ -655,15 +764,30 @@ sealed class LibraryPane
         return line;
     }
 
-    MenuFlyout SidebarMenu(SidebarMenuEntry[] entries, LibraryPlace place)
+    /// <summary>
+    /// A sidebar menu: of an item at <paramref name="place"/>, or of the group <paramref name="groupId"/>. Submenus (Move to
+    /// Group, a group's Icon) are drawn the same way, within.
+    /// </summary>
+    MenuFlyout SidebarMenu(SidebarMenuEntry[] entries, LibraryPlace? place, string? groupId = null)
     {
         var menu = new MenuFlyout();
+        foreach (var item in SidebarMenuItems(entries, place, groupId)) menu.Items.Add(item);
+        return menu;
+    }
+
+    IEnumerable<MenuFlyoutItemBase> SidebarMenuItems(SidebarMenuEntry[] entries, LibraryPlace? place, string? groupId)
+    {
         foreach (var e in entries)
         {
             switch (e)
             {
                 case SidebarMenuEntry.Separator:
-                    menu.Items.Add(new MenuFlyoutSeparator());
+                    yield return new MenuFlyoutSeparator();
+                    break;
+                case SidebarMenuEntry.Submenu sub:
+                    var s = new MenuFlyoutSubItem { Text = sub.Title };
+                    foreach (var child in SidebarMenuItems(sub.Entries, place, groupId)) s.Items.Add(child);
+                    yield return s;
                     break;
                 case SidebarMenuEntry.Item it:
                     // A checked entry (On All My Devices while it is on) draws its check mark.
@@ -678,12 +802,11 @@ sealed class LibraryPane
                         mi.Foreground = (Brush)Application.Current.Resources["SystemFillColorCriticalBrush"];
                     }
                     var command = it.Command;
-                    mi.Click += (_, _) => RunSidebarCommand(command, place);
-                    menu.Items.Add(mi);
+                    mi.Click += (_, _) => RunSidebarCommand(command, place, groupId);
+                    yield return mi;
                     break;
             }
         }
-        return menu;
     }
 
     /// <summary>
@@ -691,9 +814,44 @@ sealed class LibraryPane
     /// this host has (<c>set_host_windows</c>); the chat ones act on the channel as it is now (the menu may have been
     /// open a while), as the Mac's SidebarMenus.run.
     /// </summary>
-    internal void RunSidebarCommand(SidebarCommand command, LibraryPlace place)
+    internal void RunSidebarCommand(SidebarCommand command, LibraryPlace? place, string? groupId = null)
     {
-        var c = Channel(place);
+        var c = place is null ? null : Channel(place);
+        // A group command without a dialog: in order off the UI thread, the sidebar read again after it, a failure an
+        // alert under the core's title (moving a channel, or changing the group) with the error's sentence.
+        void Group(string what, Func<Task> work, bool movingChannel) =>
+            CoreCalls.InOrder(what, work, Refresh, e => app.Alert(new SyncAlert(SeedwellFfiMethods.ChatGroupFailureTitle(movingChannel), e)));
+        switch (command)
+        {
+            case SidebarCommand.MoveToGroup to when c is not null:
+                Group("chat set group", () => app.Core.ChatSetGroup(c.Id, to.GroupId), true);
+                return;
+            case SidebarCommand.RemoveFromGroup when c is not null:
+                Group("chat set group", () => app.Core.ChatSetGroup(c.Id, null), true);
+                return;
+            case SidebarCommand.NewGroup when c is not null:
+                app.ChatDialogs.Show(SeedwellFfiMethods.ChatNewGroupDialog(), c);
+                return;
+            case SidebarCommand.RenameGroup when groupId is not null:
+                if (GroupNow(groupId) is SyncChatGroup renamed) app.ChatDialogs.Show(SeedwellFfiMethods.ChatRenameGroupDialog(renamed), null, groupId: renamed.Id);
+                return;
+            case SidebarCommand.SetGroupIcon icon when groupId is not null:
+                Group("chat group icon", () => app.Core.ChatGroupSetIcon(groupId, icon.Icon), false);
+                return;
+            case SidebarCommand.MoveGroupUp or SidebarCommand.MoveGroupDown when groupId is not null:
+                var up = command is SidebarCommand.MoveGroupUp;
+                Group("chat group move", () => app.Core.ChatGroupMove(groupId, up), false);
+                return;
+            case SidebarCommand.DeleteGroup when groupId is not null:
+                Group("chat group delete", () => app.Core.ChatGroupDelete(groupId), false);
+                return;
+        }
+        if (place is null)
+        {
+            AppLog.Write($"sidebar command {command} on group {groupId}: nothing to run");
+            Refresh();
+            return;
+        }
         switch (command)
         {
             case SidebarCommand.ShareChannel when c is not null:
@@ -722,16 +880,16 @@ sealed class LibraryPane
                 CoreCalls.InOrder("set follow", () => app.Core.SyncSetFollow(c.Id, follow.On), Refresh, e => app.Alert(new SyncAlert(e, "")));
                 break;
             case SidebarCommand.NewTopic when c is not null:
-                app.ChatDialogs.Show(TrsFfiMethods.ChatNewTopicDialog(c), c);
+                app.ChatDialogs.Show(SeedwellFfiMethods.ChatNewTopicDialog(c), c);
                 break;
             case SidebarCommand.RenameChannel when c is not null:
-                app.ChatDialogs.Show(TrsFfiMethods.ChatRenameDialog(c), c);
+                app.ChatDialogs.Show(SeedwellFfiMethods.ChatRenameDialog(c), c);
                 break;
             case SidebarCommand.LeaveChannel when c is not null:
-                app.ChatDialogs.Show(TrsFfiMethods.ChatLeaveDialog(c), c);
+                app.ChatDialogs.Show(SeedwellFfiMethods.ChatLeaveDialog(c), c);
                 break;
             case SidebarCommand.ChannelAgents when c is not null:
-                app.ChatDialogs.Show(TrsFfiMethods.ChatAgentsDialog(c), c);
+                app.ChatDialogs.Show(SeedwellFfiMethods.ChatAgentsDialog(c), c);
                 break;
             default:
                 // Not offered on Windows (its window is not in the host's set) or the channel is gone.
@@ -739,6 +897,17 @@ sealed class LibraryPane
                 break;
         }
         Refresh();
+    }
+
+    /// <summary>A group as the core has it now (Rename's dialog shows its name now).</summary>
+    SyncChatGroup? GroupNow(string id)
+    {
+        try { return app.Core.ChatGroups().FirstOrDefault(g => g.Id == id); }
+        catch (Exception e)
+        {
+            AppLog.Write($"chat groups failed: {e.Message}");
+            return null;
+        }
     }
 
     /// <summary>The channel of a chat place, as the core has it now.</summary>
@@ -896,7 +1065,7 @@ sealed class LibraryPane
             DefaultButton = ContentDialogButton.Primary,
             IsPrimaryButtonEnabled = false,
         };
-        box.TextChanged += (_, _) => d.IsPrimaryButtonEnabled = TrsFfiMethods.AddLinkSource(box.Text) is not null;
+        box.TextChanged += (_, _) => d.IsPrimaryButtonEnabled = SeedwellFfiMethods.AddLinkSource(box.Text) is not null;
         addSheet = d;
         _ = Show();
 
@@ -906,7 +1075,7 @@ sealed class LibraryPane
             try { result = await d.ShowAsync(); } catch { result = ContentDialogResult.None; }
             addSheet = null;
             library.CloseAddSheet();
-            if (result == ContentDialogResult.Primary && TrsFfiMethods.AddLinkSource(box.Text) is string source)
+            if (result == ContentDialogResult.Primary && SeedwellFfiMethods.AddLinkSource(box.Text) is string source)
             {
                 app.Add([source]);
             }
@@ -922,7 +1091,7 @@ sealed class LibraryPane
     internal FolderSyncPage? SyncPage => syncPage;
     internal ChatPage? ChatPageShown => chatPage;
 
-    /// <summary>The Settings page last made (QA reaches its sections).</summary>
+    /// <summary>The Settings page, once made: one for the pane's life (QA reaches its sections).</summary>
     internal SettingsPage? SettingsPageShown { get; private set; }
 
     /// <summary>The add sheet's dialog while it is open (the visual QA run draws it).</summary>
@@ -948,7 +1117,8 @@ sealed class LibraryPane
         }
         if (m.Page == LibraryPage.Settings)
         {
-            SettingsPageShown = new SettingsPage(app);
+            if (SettingsPageShown is null) SettingsPageShown = new SettingsPage(app);
+            else SettingsPageShown.Opened();
             return SettingsPageShown.Root;
         }
         if (m.Page == LibraryPage.FolderSync)

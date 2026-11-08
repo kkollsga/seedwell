@@ -1,13 +1,15 @@
 //! The main window's sidebar (SPEC 8.3, 7G.7) as a view model every host draws: the places (Downloads, Sharing,
-//! Folder Sync) with their badges, the channels with their topics, the private conversations, the trackers in their
+//! Folder Sync) with their badges, the channels with their topics (under the user's groups, if any), the private
+//! conversations, the trackers in their
 //! order, the footer with the live rates, and each item's context menu. Rust decides (docs/CROSS-PLATFORM.md §1) what
 //! is listed, in what order, every text and tooltip and what each menu offers; the host draws and runs the commands.
 
 use std::cmp::Ordering;
 
-use trs_control::display as d;
-use trs_platform::shortcut;
+use seedwell_control::display as d;
+use seedwell_platform::shortcut;
 
+use crate::chat_groups::{ChatGroupIcon, SyncChatGroup};
 use crate::chat_text::{agent_tag, general_unread, named, subtitle, topic_line};
 use crate::devices_text::FollowLine;
 use crate::display::{rate_limit_help, RateDirection};
@@ -93,10 +95,39 @@ pub struct SidebarChannel {
     pub new_topic: Option<SidebarAdd>,
 }
 
-/// The Chats section: every channel, and "New Channel…" under them. Always there.
+/// A group of channels (SPEC §7G.7 *Groups*): a row with its icon and name that opens like a channel's disclosure,
+/// its channels under it (each still with its topics). Not a place: selecting it only opens or closes it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, uniffi::Record)]
+pub struct SidebarChatGroup {
+    /// Its id: what `Library::set_group_open` and `Library::sidebar_group_menu` take.
+    pub id: String,
+    pub title: String,
+    /// Drawn where a channel's icon is (the host's table maps it to its symbol).
+    pub icon: ChatGroupIcon,
+    /// The icon's spoken name ("Sparkles").
+    pub icon_label: String,
+    /// Closed: its channels' unread messages together (a muted channel adds none), drawn as a channel's count; open:
+    /// 0 (each channel shows its own).
+    pub unread: u32,
+    /// Its channels are shown (`Library::set_group_open`; a group starts open).
+    pub open: bool,
+    /// Closed while the channel shown (or one of its topics) is in it: the row stands for the selection the user can no
+    /// longer see, drawn with its icon in the accent colour as the sidebar's selection marks are. The page stays as it
+    /// is; opening the group shows the selected row again.
+    pub holds_selection: bool,
+    pub help: String,
+    /// Its channels, by name.
+    pub channels: Vec<SidebarChannel>,
+}
+
+/// The Chats section: the user's groups first (in the user's order), then every channel in none, and "New Channel…"
+/// under them. Always there. Without groups it is the plain list of channels.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, uniffi::Record)]
 pub struct SidebarChats {
     pub title: String,
+    /// The groups, in the user's order, each with its channels.
+    pub groups: Vec<SidebarChatGroup>,
+    /// The channels in no group.
     pub channels: Vec<SidebarChannel>,
     /// "New Channel…", while the host has the New Channel window.
     pub add: Option<SidebarAdd>,
@@ -154,8 +185,10 @@ pub struct SidebarModel {
     pub signature: String,
 }
 
-/// What an entry of a sidebar item's context menu does; the item it was opened on says to what.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+/// What an entry of a sidebar item's context menu does; the item it was opened on says to what (a channel's General,
+/// or for the group commands the group whose menu it is: `Library::sidebar_group_menu`). A group command without a
+/// dialog that fails is told under `chat_group_failure_title` (moving a channel: `true`).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
 pub enum SidebarCommand {
     /// The tracker's Info page.
     TrackerInfo,
@@ -176,6 +209,22 @@ pub enum SidebarCommand {
     ChannelAgents,
     /// "On All My Devices" switched to `on` (`Core::sync_set_follow`).
     SetFollow { on: bool },
+    /// The channel goes into the group (`Core::chat_set_group(channel, Some(group_id))`).
+    MoveToGroup { group_id: String },
+    /// The channel goes out of its group (`Core::chat_set_group(channel, None)`).
+    RemoveFromGroup,
+    /// `chat_new_group_dialog`, then `Core::chat_group_new(name, None, Some(channel))`: a new group with the channel.
+    NewGroup,
+    /// On a group: `chat_rename_group_dialog(group)`, then `Core::chat_group_rename(group, name)`.
+    RenameGroup,
+    /// On a group: `Core::chat_group_set_icon(group, icon)`.
+    SetGroupIcon { icon: ChatGroupIcon },
+    /// On a group: `Core::chat_group_move(group, true)`.
+    MoveGroupUp,
+    /// On a group: `Core::chat_group_move(group, false)`.
+    MoveGroupDown,
+    /// On a group: `Core::chat_group_delete(group)`, at once: its channels go back to the plain list, nothing is lost.
+    DeleteGroup,
 }
 
 /// One line of a sidebar item's context menu.
@@ -192,6 +241,8 @@ pub enum SidebarMenuEntry {
         /// A tooltip, for a host whose menus show one (empty: none).
         help: String,
     },
+    /// A submenu: Move to Group ▸, a group's Icon ▸.
+    Submenu { title: String, entries: Vec<SidebarMenuEntry> },
     Separator,
 }
 
@@ -290,6 +341,9 @@ pub(crate) struct SidebarInputs<'a> {
     pub channels: &'a [SyncChannel],
     pub topics: &'a dyn Fn(&str) -> &'a [SyncTopic],
     pub open: &'a dyn Fn(&str) -> bool,
+    /// The groups of channels, in the user's order, and whether each is open.
+    pub groups: &'a [SyncChatGroup],
+    pub group_open: &'a dyn Fn(&str) -> bool,
     /// The private conversations, the one just started first while it has no message.
     pub directs: &'a [SyncDirect],
     pub place: &'a LibraryPlace,
@@ -345,6 +399,45 @@ fn channel(c: &SyncChannel, topics: &[SyncTopic], open: bool, dialogs: bool) -> 
     }
 }
 
+/// A group with `channels` (its own, drawn already): closed, it counts their unread messages (a muted one shows none).
+fn group(g: &SyncChatGroup, channels: Vec<Counted>, open: bool, place: &LibraryPlace) -> SidebarChatGroup {
+    let shown = match place {
+        LibraryPlace::Chat { channel_id, .. } => channels.iter().any(|c| matches!(&c.channel.item.place, LibraryPlace::Chat { channel_id: id, .. } if id == channel_id)),
+        _ => false,
+    };
+    let n = channels.len();
+    let help = match n {
+        0 => format!("{}: no channels yet. Put one in with Move to Group in a channel's menu", g.name),
+        1 => format!("{}: 1 channel", g.name),
+        n => format!("{}: {n} channels", g.name),
+    };
+    // A closed channel's row shows its total; an open one only General's: the total is the channel's own count.
+    let unread = if open { 0 } else { channels.iter().map(|c| c.total_unread).sum() };
+    SidebarChatGroup {
+        id: g.id.clone(),
+        title: g.name.clone(),
+        icon: g.icon,
+        icon_label: g.icon.label().into(),
+        unread,
+        open,
+        holds_selection: !open && shown,
+        help,
+        channels: channels.into_iter().map(|c| c.channel).collect(),
+    }
+}
+
+/// The group a channel is listed under: its own when that group is here; one deleted elsewhere in the file, or made by
+/// a newer version, leaves it in the plain list.
+fn group_of<'a>(c: &'a SyncChannel, groups: &[SyncChatGroup]) -> Option<&'a str> {
+    c.group.as_deref().filter(|g| groups.iter().any(|x| x.id == *g))
+}
+
+/// A channel drawn, with its total unread (none when muted): what its group counts while closed.
+struct Counted {
+    channel: SidebarChannel,
+    total_unread: u32,
+}
+
 fn direct(dm: &SyncDirect) -> SidebarItem {
     let name = named(&dm.name, &dm.user);
     SidebarItem {
@@ -397,11 +490,21 @@ fn signature(m: &SidebarModel) -> String {
     for p in &m.places {
         s.push_str(&format!("{:?}{},", p.place, p.flag.is_some() as u8));
     }
-    for c in &m.chats.channels {
+    let channel = |s: &mut String, c: &SidebarChannel| {
         s.push_str(&format!("|{}{}{}{}:", c.item.title, c.open as u8, c.new_topic.is_some() as u8, c.item.tag.as_ref().map_or("", |t| t.help.as_str())));
         for t in &c.topics {
             s.push_str(&format!("{:?},", t.place));
         }
+    };
+    for g in &m.chats.groups {
+        s.push_str(&format!("|G{}{}{:?}{}{}[", g.id, g.title, g.icon, g.open as u8, g.holds_selection as u8));
+        for c in &g.channels {
+            channel(&mut s, c);
+        }
+        s.push(']');
+    }
+    for c in &m.chats.channels {
+        channel(&mut s, c);
     }
     for sec in [&m.directs, &m.trackers].into_iter().flatten() {
         s.push_str(&format!("|{}:", sec.title));
@@ -420,11 +523,23 @@ pub(crate) fn sidebar(i: &SidebarInputs) -> SidebarModel {
         _ => None,
     };
     let trackers: Vec<SidebarItem> = visible_trackers(&i.snapshot.trackers, selected).into_iter().map(tracker).collect();
+    let dialogs = has(i.host, Some(HostWindow::ChatDialogs));
+    let counted = |c: &SyncChannel| Counted {
+        channel: channel(c, (i.topics)(&c.id), (i.open)(&c.id), dialogs),
+        total_unread: if c.muted { 0 } else { c.unread },
+    };
+    let in_group = |c: &SyncChannel| group_of(c, i.groups).map(str::to_owned);
+    let groups = i
+        .groups
+        .iter()
+        .map(|g| group(g, i.channels.iter().filter(|c| in_group(c).as_deref() == Some(g.id.as_str())).map(counted).collect(), (i.group_open)(&g.id), i.place))
+        .collect();
     let mut m = SidebarModel {
         places: places(i),
         chats: SidebarChats {
             title: "Chats".into(),
-            channels: i.channels.iter().map(|c| channel(c, (i.topics)(&c.id), (i.open)(&c.id), has(i.host, Some(HostWindow::ChatDialogs)))).collect(),
+            groups,
+            channels: i.channels.iter().filter(|c| in_group(c).is_none()).map(|c| counted(c).channel).collect(),
             add: has(i.host, Some(HostWindow::NewChannel)).then(|| SidebarAdd {
                 title: "New Channel…".into(),
                 help: "Make a channel with your devices, the people you share with and their agents, or join one with a link".into(),
@@ -442,7 +557,11 @@ pub(crate) fn sidebar(i: &SidebarInputs) -> SidebarModel {
 // MARK: Context menus
 
 fn entry(title: &str, command: SidebarCommand) -> SidebarMenuEntry {
-    SidebarMenuEntry::Item { title: title.into(), command, destructive: false, checked: false, enabled: true, help: String::new() }
+    entry_enabled(title, command, true)
+}
+
+fn entry_enabled(title: &str, command: SidebarCommand, enabled: bool) -> SidebarMenuEntry {
+    SidebarMenuEntry::Item { title: title.into(), command, destructive: false, checked: false, enabled, help: String::new() }
 }
 
 /// The context menu of a tracker: a favorite's Info, Rename and Remove from Favorites; an automatic tracker's Info and
@@ -469,10 +588,67 @@ pub(crate) fn tracker_menu(t: &TrackerSummary) -> Vec<SidebarMenuEntry> {
     Vec::new()
 }
 
+/// Move to Group ▸ of a channel: each group (checked on the channel's), New Group… (a new one with the channel), and
+/// Remove from Group while it is in one.
+pub(crate) fn move_to_group_menu(c: &SyncChannel, groups: &[SyncChatGroup]) -> SidebarMenuEntry {
+    let current = c.group.as_deref().filter(|g| groups.iter().any(|x| x.id == *g));
+    let mut entries: Vec<SidebarMenuEntry> = groups
+        .iter()
+        .map(|g| SidebarMenuEntry::Item {
+            title: g.name.clone(),
+            command: SidebarCommand::MoveToGroup { group_id: g.id.clone() },
+            destructive: false,
+            checked: current == Some(g.id.as_str()),
+            enabled: true,
+            help: String::new(),
+        })
+        .collect();
+    if !entries.is_empty() {
+        entries.push(SidebarMenuEntry::Separator);
+    }
+    entries.push(entry("New Group…", SidebarCommand::NewGroup));
+    if current.is_some() {
+        entries.push(entry("Remove from Group", SidebarCommand::RemoveFromGroup));
+    }
+    SidebarMenuEntry::Submenu { title: "Move to Group".into(), entries }
+}
+
+/// The context menu of a group (the `index`th of `count`): Rename Group…, Icon ▸ (each icon, the group's checked),
+/// Move Up and Move Down (with another group to pass), and Delete Group (at once: it loses nothing).
+pub(crate) fn group_menu(g: &SyncChatGroup, index: usize, count: usize) -> Vec<SidebarMenuEntry> {
+    let icons = ChatGroupIcon::ALL
+        .iter()
+        .map(|i| SidebarMenuEntry::Item {
+            title: i.label().into(),
+            command: SidebarCommand::SetGroupIcon { icon: *i },
+            destructive: false,
+            checked: *i == g.icon,
+            enabled: true,
+            help: String::new(),
+        })
+        .collect();
+    let mut v = vec![entry("Rename Group…", SidebarCommand::RenameGroup), SidebarMenuEntry::Submenu { title: "Icon".into(), entries: icons }];
+    if count > 1 {
+        v.push(SidebarMenuEntry::Separator);
+        v.push(entry_enabled("Move Up", SidebarCommand::MoveGroupUp, index > 0));
+        v.push(entry_enabled("Move Down", SidebarCommand::MoveGroupDown, index + 1 < count));
+    }
+    v.push(SidebarMenuEntry::Separator);
+    v.push(SidebarMenuEntry::Item {
+        title: "Delete Group".into(),
+        command: SidebarCommand::DeleteGroup,
+        destructive: true,
+        checked: false,
+        enabled: true,
+        help: "Its channels go back to the plain list under Chats; nothing else changes".into(),
+    });
+    v
+}
+
 /// The context menu of a channel: Share… (when this computer may share it), New Topic… (unless it may only read),
-/// Mute or Unmute, Agents: Yes/No… (owners and admins), On All My Devices (`follow`, while it is shown), Rename…, and
-/// Leave Channel….
-pub(crate) fn channel_menu(c: &SyncChannel, follow: &FollowLine) -> Vec<SidebarMenuEntry> {
+/// Mute or Unmute, Agents: Yes/No… (owners and admins), On All My Devices (`follow`, while it is shown), Rename…,
+/// Move to Group ▸ and Leave Channel….
+pub(crate) fn channel_menu(c: &SyncChannel, follow: &FollowLine, groups: &[SyncChatGroup]) -> Vec<SidebarMenuEntry> {
     let mut v = Vec::new();
     if sync_can_share(c.role) {
         v.push(entry("Share…", SidebarCommand::ShareChannel));
@@ -496,6 +672,7 @@ pub(crate) fn channel_menu(c: &SyncChannel, follow: &FollowLine) -> Vec<SidebarM
         });
     }
     v.push(entry("Rename…", SidebarCommand::RenameChannel));
+    v.push(move_to_group_menu(c, groups));
     v.push(SidebarMenuEntry::Separator);
     v.push(entry("Leave Channel…", SidebarCommand::LeaveChannel));
     v

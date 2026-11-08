@@ -6,8 +6,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::members::Role;
+use seedwell_sync_proto::ids::FolderId;
+use seedwell_sync_proto::members::Role;
 
 use crate::service::{Options, SyncHandle, held_until};
 use crate::shared::lock;

@@ -5,10 +5,10 @@
 use std::path::Path;
 use std::time::Duration;
 
-use trs_sync_net::service::HELD_READ_ONLY;
-use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::keys::Access;
-use trs_sync_proto::members::Role;
+use seedwell_sync_net::service::HELD_READ_ONLY;
+use seedwell_sync_proto::ids::FolderId;
+use seedwell_sync_proto::keys::Access;
+use seedwell_sync_proto::members::Role;
 
 use crate::utp::{Device, addr, device_with, read, until};
 
@@ -51,7 +51,7 @@ async fn shared() -> Shared {
     Shared { a, b, c, id, dirs }
 }
 
-fn status_of(d: &Device, id: &FolderId) -> trs_sync_net::status::FolderStatus {
+fn status_of(d: &Device, id: &FolderId) -> seedwell_sync_net::status::FolderStatus {
     d.h.snapshot().folders.into_iter().find(|f| f.id == id.to_string()).unwrap()
 }
 

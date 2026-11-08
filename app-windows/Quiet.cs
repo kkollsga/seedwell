@@ -37,6 +37,22 @@ static class Quiet
     [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
     static extern nint SetWindowLongPtr(nint hwnd, int index, nint value);
 
+    /// <summary>What awaits this goes on in a dispatcher turn of its own: the UI thread answers in between.</summary>
+    public static Task NextTurn()
+    {
+        var turn = new TaskCompletionSource();
+        Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().TryEnqueue(turn.SetResult);
+        return turn.Task;
+    }
+
+    /// <summary>What awaits this goes on once the turns already due have run, a layout pass among them.</summary>
+    public static Task AfterLayout()
+    {
+        var turn = new TaskCompletionSource();
+        Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, turn.SetResult);
+        return turn.Task;
+    }
+
     /// <summary>
     /// Waits until a change is laid out and drawn: a layout pass now, then the next frame XAML renders, at most
     /// <paramref name="capMs"/> (no frame comes while nothing changed; a locked screen still lays out).

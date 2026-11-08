@@ -3,8 +3,8 @@
 //! SPEC 7C.1 clamps on whatever it accepts.
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
-use trs_tracker::response::{MAX_INTERVAL, MAX_PEERS, Timing};
-use trs_tracker::{parse_announce_response, scrape};
+use seedwell_tracker::response::{MAX_INTERVAL, MAX_PEERS, Timing};
+use seedwell_tracker::{parse_announce_response, scrape};
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(r) = parse_announce_response(data) {

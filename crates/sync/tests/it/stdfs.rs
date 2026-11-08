@@ -2,9 +2,9 @@
 
 use std::io;
 
-use trs_sync::fs::{Fs, StdFs, read_all, write_all};
-use trs_sync::path::probe_case_insensitive;
-use trs_sync_proto::model::FileKind;
+use seedwell_sync::fs::{Fs, StdFs, read_all, write_all};
+use seedwell_sync::path::probe_case_insensitive;
+use seedwell_sync_proto::model::FileKind;
 
 fn folder() -> (tempfile::TempDir, StdFs) {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -30,7 +30,7 @@ fn files_dirs_and_metadata() {
     // Where the disk keeps an executable bit it round-trips; elsewhere (Windows) setting it is
     // accepted and changes nothing.
     fs.create_dir(".seedwell").unwrap();
-    let exec_bits = trs_sync::path::probe_exec_bits(&fs).unwrap();
+    let exec_bits = seedwell_sync::path::probe_exec_bits(&fs).unwrap();
     fs.set_exec("a/f.txt", true).unwrap();
     assert_eq!(fs.lstat("a/f.txt").unwrap().unwrap().exec, exec_bits);
     fs.set_exec("a/f.txt", false).unwrap();

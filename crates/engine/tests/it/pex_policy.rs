@@ -7,9 +7,9 @@ use std::time::Duration;
 use common::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use trs_engine::*;
-use trs_state::trackers::{Profile, UrlPattern};
-use trs_state::{RuleSet, TrackerProfiles};
+use seedwell_engine::*;
+use seedwell_state::trackers::{Profile, UrlPattern};
+use seedwell_state::{RuleSet, TrackerProfiles};
 
 fn policy(allow_pex: bool) -> PolicyData {
     let mut tp = TrackerProfiles::default();

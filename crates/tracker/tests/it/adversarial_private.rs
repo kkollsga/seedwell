@@ -6,10 +6,10 @@ use crate::adversarial_support;
 
 use adversarial_support::*;
 use proptest::prelude::*;
-use trs_tracker::http::resolve_redirect;
-use trs_tracker::store::{TimingKey, TimingStore};
-use trs_tracker::url::Scheme;
-use trs_tracker::{AnnounceParams, Event, TorrentEvent, TrackerUrl, build_announce_url};
+use seedwell_tracker::http::resolve_redirect;
+use seedwell_tracker::store::{TimingKey, TimingStore};
+use seedwell_tracker::url::Scheme;
+use seedwell_tracker::{AnnounceParams, Event, TorrentEvent, TrackerUrl, build_announce_url};
 
 const SECRET: &str = "S3CR3TPASSKEY0123456789abcdef";
 
@@ -217,15 +217,15 @@ fn hub_gate_and_report_debug_output_never_contain_the_passkey() {
         "reports/events/params leak the passkey"
     );
     // the request object handed to the transports prints safely too
-    let mut hub = trs_tracker::hub::TrackerHub::new(
-        trs_tracker::gate::GateConfig::default(),
-        trs_tracker::MemoryStore::new(),
+    let mut hub = seedwell_tracker::hub::TrackerHub::new(
+        seedwell_tracker::gate::GateConfig::default(),
+        seedwell_tracker::MemoryStore::new(),
         3,
     );
     hub.add_torrent(spec(2, &[&[url.as_str()]]), ms(0)).unwrap();
     hub.set_stats(
         &ih(2),
-        trs_tracker::Stats {
+        seedwell_tracker::Stats {
             uploaded: 0,
             downloaded: 0,
             corrupt: 0,
@@ -255,7 +255,7 @@ fn bug_store_keys_leak_the_passkey_in_debug() {
         tracker_url: format!("http://t.test/announce?passkey={SECRET}"),
     };
     assert!(!format!("{key:?}").contains(SECRET));
-    let mut st = trs_tracker::MemoryStore::new();
+    let mut st = seedwell_tracker::MemoryStore::new();
     st.save(&key, &Default::default()).unwrap();
     assert!(!format!("{st:?}").contains(SECRET));
 }
@@ -269,7 +269,7 @@ fn tracker_supplied_text_is_sanitised_but_may_echo_the_passkey() {
         "d14:failure reason{}:bad passkey {SECRET}e",
         12 + SECRET.len()
     );
-    let e = trs_tracker::parse_announce_response(body.as_bytes()).unwrap_err();
+    let e = seedwell_tracker::parse_announce_response(body.as_bytes()).unwrap_err();
     assert!(e.to_string().contains(SECRET));
 }
 
@@ -283,7 +283,7 @@ fn hub_only_ever_contacts_urls_from_the_spec_even_with_hostile_answers() {
         let mut r = ok(300, None).unwrap();
         r.tracker_id = Some(b"http://evil.test/".to_vec().into_boxed_slice());
         r.warning = Some("please announce to http://evil.test/announce".into());
-        r.peers = vec![trs_tracker::Peer {
+        r.peers = vec![seedwell_tracker::Peer {
             addr: "127.0.0.1:1".parse().unwrap(),
             peer_id: None,
         }];

@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use trs_storage::{Mode, PieceOutcome};
-use trs_wire::target_depth;
+use seedwell_storage::{Mode, PieceOutcome};
+use seedwell_wire::target_depth;
 
 use super::{DetailParts, PeerHave, Torrent, TorrentMsg, TorrentReport};
 use crate::api::{FileInfo, FilePriority, PeerInfo};
@@ -24,6 +24,8 @@ impl Torrent {
     /// Called once startup finished and the torrent can talk to peers.
     pub(super) async fn after_ready(&mut self, first: Vec<TorrentMsg>) {
         let now = Instant::now();
+        // Before the first peer is served: its extended handshake says whether we want anything.
+        self.advertise_upload_only();
         if let Some(p) = self.pending_prios.take() {
             self.set_file_priorities(p);
         }
@@ -61,7 +63,7 @@ impl Torrent {
 
     pub(super) fn apply_switch(
         &mut self,
-        layout: Arc<trs_storage::Layout>,
+        layout: Arc<seedwell_storage::Layout>,
         save_path: PathBuf,
         staging: Option<PathBuf>,
         placement: Option<crate::persist::Placement>,
@@ -492,6 +494,7 @@ impl Torrent {
         for k in &keys {
             self.update_interest(*k);
         }
+        self.advertise_upload_only();
         if complete {
             self.become_seed();
         } else {
@@ -551,9 +554,9 @@ impl Torrent {
     /// A storage handle whose layout leaves out the skipped files that were never written, so
     /// the move does not trip over files that do not exist (SPEC 7A.1: junk starts unchecked).
     /// Skipped files that do exist (the edge of a piece reached into them) are moved with the rest.
-    fn partial_finalize_handle(&self) -> Option<trs_storage::TorrentHandle> {
+    fn partial_finalize_handle(&self) -> Option<seedwell_storage::TorrentHandle> {
         use std::path::{Path, PathBuf};
-        use trs_storage::{FilePath, FileSpec, Layout, Location, PathRef, TorrentConfig};
+        use seedwell_storage::{FilePath, FileSpec, Layout, Location, PathRef, TorrentConfig};
         let (m, d) = (self.meta.as_ref()?, self.ctx.disk.get()?);
         let mut files = Vec::with_capacity(m.layout.file_count());
         for i in 0..m.layout.file_count() {
@@ -623,7 +626,7 @@ impl Torrent {
                 if let Some(h) = &hold {
                     h.quiesce_writes()?.await?;
                 }
-                handle.finalize(journal, trs_storage::FinalizeOptions::default())?.await.map(|_| ())
+                handle.finalize(journal, seedwell_storage::FinalizeOptions::default())?.await.map(|_| ())
             }
             .await
             .map_err(|e| e.to_string());
@@ -640,7 +643,7 @@ impl Torrent {
             Ok(()) => {
                 let complete = self.complete();
                 if let Some(d) = self.ctx.disk.get() {
-                    d.handle.set_location(trs_storage::Location::Final);
+                    d.handle.set_location(seedwell_storage::Location::Final);
                     d.handle.resume_writes();
                     // A torrent with skipped files may still download the rest later.
                     if complete {
@@ -698,6 +701,7 @@ impl Torrent {
         } else if !self.finished_reported {
             self.on_wanted_done();
         }
+        self.advertise_upload_only();
         self.refresh_all_interest();
         self.refill_all();
         if !done {
@@ -735,7 +739,7 @@ impl Torrent {
                     0
                 };
                 let path = match m.layout.file_path(i) {
-                    trs_storage::PathRef::Relative(p) | trs_storage::PathRef::Absolute(p) => {
+                    seedwell_storage::PathRef::Relative(p) | seedwell_storage::PathRef::Absolute(p) => {
                         p.to_string_lossy().into_owned()
                     }
                 };

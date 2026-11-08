@@ -1,4 +1,4 @@
-//! trs-tracker: BitTorrent tracker communication that is correct by
+//! seedwell-tracker: BitTorrent tracker communication that is correct by
 //! construction (SPEC 7B/7C). See README.md for the architecture, the invariant
 //! to test mapping and how an engine drives it.
 #![forbid(unsafe_code)]

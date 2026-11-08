@@ -1,7 +1,7 @@
 # tests/linux: Seedwell on Linux distros and against real tracker software
 
 Everything here runs in containers (colima/docker on the Mac) and never touches the host's
-Seedwell, Transmission or Downloads. Daemons run with `HOME` in a temp dir and `TRS_FORBID_REAL_HOME=1`.
+Seedwell, Transmission or Downloads. Daemons run with `HOME` in a temp dir and `SEEDWELL_FORBID_REAL_HOME=1`.
 
 ```
 colima start --cpu 4 --memory 6
@@ -30,8 +30,8 @@ storage, dht, utp, http, state, classify, engine, control, cli and portmap, and 
 ## 2. Lab: mock trackers, real trackers, real clients
 
 * `build-linux-binaries.sh` builds `seedwell` (CLI + `daemon`) and `tracker-probe` in the Debian 13 image.
-* `lab/Dockerfile` (image `trs-lab`): Debian 13 + `transmission-daemon` 4.1.0-beta.2, `qbittorrent-nox` 5.1.0,
-  `opentracker` (all distro packages) + the two binaries. `lab/Dockerfile.trackers` (image `trs-trackers`): chihaya
+* `lab/Dockerfile` (image `seedwell-lab`): Debian 13 + `transmission-daemon` 4.1.0-beta.2, `qbittorrent-nox` 5.1.0,
+  `opentracker` (all distro packages) + the two binaries. `lab/Dockerfile.trackers` (image `seedwell-trackers`): chihaya
   (built from source, `main`), `aquatic_http`, `aquatic_udp`, `aquatic_ws`.
 * `lab/run-in-lab.sh NAME SCRIPT [VAR=val ...]` runs a script from `lab/` in a fresh container and copies `/out` back.
   * `lab/a1-lifecycle.sh`: Seedwell against Debian's real tracker through `tracker-probe proxy` (add, pause at 20 %,
@@ -39,14 +39,14 @@ storage, dht, utp, http, state, classify, engine, control, cli and portmap, and 
   * `lab/mock-run.sh`: Seedwell against `tracker-probe mock` instances (regular announce timing, dual-stack failure
     modes, the 500-torrent storm). `MOCKS='name,ip,port,interval,min,v6mode,count[,delay_ms[,seed]]'`.
 * `lab/swarm.py up|matrix|transports|handshake|collect|down`: opentracker, chihaya, aquatic and three clients on a
-  docker network (`trslab`, 198.51.100.0/24): Seedwell seeds to Transmission and qBittorrent, and the reverse, over
+  docker network (`seedwelllab`, 198.51.100.0/24): Seedwell seeds to Transmission and qBittorrent, and the reverse, over
   HTTP and UDP trackers, with sha256 verification; TCP/uTP interop with iptables byte counters.
 * `lab/pcap2jsonl.py`: tracker-side pcap to `tracker-probe` records, so `tracker-probe check` judges what a real
   tracker received. `lab/peerwire.py`: decodes BitTorrent and BEP 10 handshakes from a pcap.
 
 ### Why RFC 5737 addresses
 
-Seedwell's production destination policy (`trs-tracker` `DestinationPolicy::STRICT`, SSRF protection) refuses
+Seedwell's production destination policy (`seedwell-tracker` `DestinationPolicy::STRICT`, SSRF protection) refuses
 loopback, link-local and private-network tracker addresses. `seedwell daemon` has no switch to relax that, and the
 test must exercise the unmodified policy, so every mock and tracker listens on a documentation address
 (203.0.113.0/24, 198.51.100.0/24, 2001:db8::/32) added to `lo` or the lab network, which the policy allows.

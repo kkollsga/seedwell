@@ -1,7 +1,7 @@
-# trs-media
+# seedwell-media
 
 Images in chat (SPEC §7G.7 *Attachments*): what an image a message carries may be, made safe to send and to show.
-No I/O and no networking; `trs-sync-net` stores and moves the bytes.
+No I/O and no networking; `seedwell-sync-net` stores and moves the bytes.
 
 * `sniff`: PNG, JPEG, GIF, WebP or SVG, found from the bytes alone (never the extension). HEIC is refused with a
   sentence that says what to do.

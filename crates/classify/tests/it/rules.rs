@@ -1,6 +1,6 @@
 //! One test per detection rule, through the public API.
 
-use trs_classify::{Category, Classification, FileEntry, Input, JunkKind, classify};
+use seedwell_classify::{Category, Classification, FileEntry, Input, JunkKind, classify};
 
 fn run(
     name: &str,

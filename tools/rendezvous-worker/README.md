@@ -55,7 +55,7 @@ cd tools/rendezvous-worker && node --test
 `test.mjs` runs `worker.js` against a small local fake of the Workers runtime (Node 22.5 or later for
 `node:sqlite` and Ed25519 in WebCrypto; it skips without them): first-key ownership, replays, the size cap, the
 expiry and the rate limits. Nothing goes to the network. The Rust side's tests use a loopback fake of the same API
-(`trs-rendezvous`'s `testkit`).
+(`seedwell-rendezvous`'s `testkit`).
 
 ## API v1
 

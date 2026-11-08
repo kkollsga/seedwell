@@ -5,6 +5,7 @@ import AppKit
 ///
 ///     ui dump                          the accessibility tree of the window (role, label, frame in window points, y from the top)
 ///     ui state                         selection, file selection, expanded lists, the shared chooser models
+///     ui overflow                      the views laid out past the window's left or right edge
 ///     ui ping                          how long the main run loop takes to serve a block queued from another thread
 @MainActor enum QAInspect {
     struct Item {
@@ -88,6 +89,88 @@ import AppKit
             for s in v.subviews { walk(s, depth + 1) }
         }
         walk(root, 0)
+    }
+
+    /// `ui overflow`: the outermost views of the window laid out past its left or right edge, "overflow: none" when
+    /// there are none. A page wider than the window (Settings › Rules at the 820-point minimum) made the whole content,
+    /// sidebar and tab bar too, wider than the window and pushed it aside. Hidden views do not count, and a view
+    /// inside a scroll view that scrolls sideways is the scroll view's to show.
+    static func overflow(window win: NSWindow?) -> String {
+        guard let win, let root = win.contentView else { return "overflow: no window" }
+        let width = root.bounds.width
+        var found: [String] = []
+        func walk(_ v: NSView, _ depth: Int) {
+            guard depth < 80, !v.isHidden, v.alphaValue > 0 else { return }
+            let f = v.convert(v.bounds, to: root)
+            if f.width > 0, f.height > 0, f.minX < -1 || f.maxX > width + 1 {
+                found.append("\(type(of: v)) x \(Int(f.minX)) width \(Int(f.width))")
+                return
+            }
+            if let scroll = v as? NSScrollView, scroll.hasHorizontalScroller { return }
+            for s in v.subviews { walk(s, depth + 1) }
+        }
+        walk(root, 0)
+        return found.isEmpty ? "overflow: none (window \(Int(width)))" : "overflow: \(found.prefix(4).joined(separator: "; ")) (window \(Int(width)))"
+    }
+
+    /// The row views of the window's lists (a sidebar's outline too) as drawn now: shown, not faded out, with their
+    /// frames in their list's points.
+    static func drawnRows(in win: NSWindow) -> [(list: NSTableView, frame: NSRect, what: String)] {
+        var out: [(NSTableView, NSRect, String)] = []
+        func walk(_ v: NSView, _ depth: Int) {
+            guard depth < 60, !v.isHidden else { return }
+            if let list = v as? NSTableView {
+                for case let row as NSTableRowView in list.subviews where !row.isHidden {
+                    let opacity = row.layer?.presentation()?.opacity ?? Float(row.alphaValue)
+                    guard opacity > 0.01 else { continue }
+                    let index = list.row(for: row)
+                    let label = row.subviews.compactMap { ($0 as? NSTableCellView).flatMap { QAInspect.text(in: $0) } }.first ?? ""
+                    let what = "row \(index) '\(label)' alpha \(String(format: "%.2f", row.alphaValue)) anim \(row.layer?.animationKeys()?.joined(separator: "+") ?? "none")"
+                    out.append((list, row.layer?.presentation()?.frame ?? row.frame, what))
+                }
+                return
+            }
+            for s in v.subviews { walk(s, depth + 1) }
+        }
+        if let root = win.contentView { walk(root, 0) }
+        return out
+    }
+
+    /// Two rows of one list drawn in one place ("2 rows at y 250"), none: empty. A row that lingers over another, or a
+    /// disclosure caught while it closes, drew two channels' names over each other in a QA shot (2026-11-07).
+    static func overlappingRows(in win: NSWindow) -> [String] {
+        let rows = drawnRows(in: win)
+        var found: [String] = []
+        for (i, a) in rows.enumerated() {
+            for b in rows[(i + 1)...] where a.list === b.list {
+                let both = a.frame.intersection(b.frame)
+                if !both.isNull, both.height > min(a.frame.height, b.frame.height) / 2 { found.append("2 rows at y \(Int(a.frame.minY)) (\(a.what); \(b.what))") }
+            }
+        }
+        return found
+    }
+
+    /// The first words a view's accessibility tree says (a row's name).
+    static func text(in v: NSView) -> String? {
+        func walk(_ o: Any, _ depth: Int) -> String? {
+            guard depth < 12, let a = o as? NSAccessibilityProtocol else { return nil }
+            if let l = a.accessibilityLabel(), !l.isEmpty { return l }
+            for c in a.accessibilityChildren() ?? [] { if let t = walk(c, depth + 1) { return t } }
+            return nil
+        }
+        return walk(v, 0)
+    }
+
+    /// A list's rows are moving (a disclosure opening or closing, a row fading): their layers have animations.
+    static func rowsAnimating(in win: NSWindow) -> Bool {
+        func walk(_ v: NSView, _ depth: Int) -> Bool {
+            guard depth < 60, !v.isHidden else { return false }
+            if let list = v as? NSTableView {
+                return list.subviews.contains { !($0.layer?.animationKeys() ?? []).isEmpty }
+            }
+            return v.subviews.contains { walk($0, depth + 1) }
+        }
+        return win.contentView.map { walk($0, 0) } ?? false
     }
 
     static func ping(report: @escaping @MainActor (String) -> Void) {

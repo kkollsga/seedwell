@@ -1,13 +1,13 @@
 //! Joins the real DHT and runs one get_peers lookup for a hex info hash, printing progress.
 //!
 //! ```text
-//! cargo run -p trs-dht --example lookup -- 7acf8fb590b2060dd9c3146ef770169d593433b0
+//! cargo run -p seedwell-dht --example lookup -- 7acf8fb590b2060dd9c3146ef770169d593433b0
 //! ```
 //!
 //! No announce is ever sent. Only use it with info hashes of legal public torrents.
 
 use std::time::{Duration, Instant};
-use trs_dht::{DriverConfig, LookupUpdate, PublicInfoHash, spawn};
+use seedwell_dht::{DriverConfig, LookupUpdate, PublicInfoHash, spawn};
 
 fn parse_hex(s: &str) -> Option<[u8; 20]> {
     if s.len() != 40 {

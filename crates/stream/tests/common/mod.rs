@@ -4,7 +4,7 @@ pub mod fake;
 pub mod fixtures;
 
 use std::sync::{Arc, Mutex};
-use trs_stream::{Config, Event, StreamServer};
+use seedwell_stream::{Config, Event, StreamServer};
 
 pub const MIB: u64 = 1024 * 1024;
 

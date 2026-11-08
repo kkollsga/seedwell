@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use trs_state::{Config, Document};
+use seedwell_state::{Config, Document};
 
 // Any text: parsing must not panic; anything accepted must render and parse back to itself.
 fuzz_target!(|data: &[u8]| {

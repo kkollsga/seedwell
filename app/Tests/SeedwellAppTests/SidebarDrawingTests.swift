@@ -248,6 +248,35 @@ import Testing
     /// row), and in a window that is not key; dark and light; as QA's shots draw (Reduce transparency, VibrancyPass).
     /// A channel's "agents" tag is drawn and reported, not required: its word is vibrant text, which only the window
     /// server draws, so an in-process picture of it is not what users see.
+    /// The renderer (`--render-snapshots`) drew every main window's sidebar blank, one flat colour: the sidebar is glass,
+    /// which the window server composites, and the renderer drew its windows in-process without the in-app materials a
+    /// QA run has. Drawn as the renderer now draws (materials in the app, `VibrancyPass`), the sidebar shows its rows.
+    @Test func theRenderersWindowPictureDrawsTheSidebar() async throws {
+        QuietRun.drawMaterialsInApp(true)
+        defer { QuietRun.drawMaterialsInApp(false) }
+        let w = SnapshotWindow(contentViewController: NSHostingController(rootView: Sidebar(selection: Selection(), marks: true)))
+        w.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+        w.appearance = NSAppearance(named: .darkAqua)
+        w.titlebarAppearsTransparent = true
+        w.titleVisibility = .hidden
+        w.setContentSize(NSSize(width: 640, height: 360))
+        w.setFrameOrigin(SnapshotWindow.offscreen)
+        w.orderFront(nil)
+        defer { w.contentViewController = nil; w.close() }
+        let frame = try #require(w.contentView?.superview)
+        let rep = try #require(await SnapshotRenderer.windowImage(frame))
+        let data = try #require(rep.bitmapData)
+        // The sidebar column below the title bar (pixels at 2x): its row labels and icons give it many colours.
+        var seen = Set<UInt32>()
+        for y in stride(from: 120, to: min(600, rep.pixelsHigh), by: 2) {
+            for x in stride(from: 20, to: 380, by: 2) {
+                let i = y * rep.bytesPerRow + x * 4
+                seen.insert(UInt32(data[i]) << 24 | UInt32(data[i + 1]) << 16 | UInt32(data[i + 2]) << 8 | UInt32(data[i + 3]))
+            }
+        }
+        #expect(seen.count > 20, "the sidebar drew \(seen.count) colours")
+    }
+
     @Test func theMarksReadInEveryStateOfTheirRow() async throws {
         _ = NSApplication.shared
         let restore = Self.reduceTransparency()

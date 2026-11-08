@@ -1,7 +1,7 @@
 //! Property tests for `structure()`: it never panics, and every file index appears exactly once.
 
 use proptest::prelude::*;
-use trs_classify::{Category, FileEntry, Input, Structure, classify, structure};
+use seedwell_classify::{Category, FileEntry, Input, Structure, classify, structure};
 
 const COMPS: &[&str] = &[
     "Season 1",
@@ -154,7 +154,7 @@ proptest! {
         let sizes: Vec<u64> = files.iter().map(|f| f.1).collect();
         let mut c = classify(&Input::new("x", &entries));
         for j in junk {
-            c.junk_files.push(trs_classify::JunkFile { index: j, kind: trs_classify::JunkKind::Nfo });
+            c.junk_files.push(seedwell_classify::JunkFile { index: j, kind: seedwell_classify::JunkKind::Nfo });
         }
         for cat in Category::ALL {
             c.category = cat;

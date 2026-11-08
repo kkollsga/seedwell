@@ -40,30 +40,22 @@ struct SidebarView: View {
                     .help(p.help)
                     .tag(p.place)
             }
-            // Channels (SPEC 7G.7): each is a tab of its own, like a tracker, its topics under it.
+            // Channels (SPEC 7G.7): each is a tab of its own, like a tracker, its topics under it; the user's groups first,
+            // each opening like a channel with its channels under it (a group is no place: a click opens or closes it).
             Section(sb.chats.title) {
-                ForEach(sb.chats.channels, id: \.item.place) { c in
-                    DisclosureGroup(isExpanded: Binding(get: { c.open }, set: { model.setChannelOpen(c.item.place, $0) })) {
-                        ForEach(c.topics, id: \.place) { t in
-                            ChatSidebarRow(icon: SidebarSymbols.symbol(t.icon), name: t.title, unread: t.unread)
-                                .tag(t.place)
-                                .help(t.help)
-                        }
-                        if let add = c.newTopic {
-                            Button { SidebarMenus.run(.newTopic, on: c.item.place, commands: commands) } label: {
-                                Label(add.title, systemImage: "plus").foregroundStyle(.secondary)
-                            }
-                            .buttonStyle(.plain)
-                            .help(add.help)
-                        }
+                ForEach(sb.chats.groups, id: \.id) { g in
+                    DisclosureGroup(isExpanded: Binding(get: { g.open }, set: { model.setGroupOpen(g.id, $0) })) {
+                        ForEach(g.channels, id: \.item.place) { c in ChannelDisclosure(c: c, model: model, commands: commands) }
                     } label: {
-                        // Open, the channel's row is its General; closed, it counts its topics too.
-                        ChatSidebarRow(icon: SidebarSymbols.symbol(c.item.icon), name: c.item.title, unread: c.item.unread, tag: c.item.tag)
-                            .tag(c.item.place)
-                            .help(c.item.help)
-                            .contextMenu { MenuEntriesView(entries: SidebarMenus.entries(for: c.item.place, model: model, commands: commands)) }
+                        ChatSidebarRow(icon: SidebarSymbols.group(g.icon), name: g.title, unread: g.unread, iconLabel: g.iconLabel,
+                                       iconAccent: g.holdsSelection)
+                            .contentShape(Rectangle())
+                            .onTapGesture { model.setGroupOpen(g.id, !g.open) }
+                            .help(g.help)
+                            .contextMenu { MenuEntriesView(entries: SidebarMenus.groupEntries(g.id, model: model, commands: commands)) }
                     }
                 }
+                ForEach(sb.chats.channels, id: \.item.place) { c in ChannelDisclosure(c: c, model: model, commands: commands) }
                 if let add = sb.chats.add {
                     Button { commands.chat.showNew() } label: {
                         Label(add.title, systemImage: "plus").foregroundStyle(.secondary)
@@ -95,6 +87,11 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        // A channel moved into or out of a group (or a group made or deleted) builds the list anew instead of moving
+        // rows between parents in place: the outline list left the moved channel's old row view drawn at its place
+        // (row -1, no longer in the list), and once the group closed the next channel's row was drawn over it, two names
+        // in one row. Opening and closing keep the list (and their animation).
+        .id(Self.groupsKey(sb.chats))
         .safeAreaInset(edge: .bottom, spacing: 0) {
             let f = sb.footer
             HStack(spacing: 10) {
@@ -129,6 +126,43 @@ struct SidebarView: View {
     }
 }
 
+extension SidebarView {
+    /// Which groups there are and which channels each holds, not whether they are open.
+    static func groupsKey(_ chats: SidebarChats) -> String {
+        chats.groups.map { g in g.id + ":" + g.channels.map { "\($0.item.place)" }.joined(separator: ",") }.joined(separator: "|")
+    }
+}
+
+/// A channel in the sidebar: its General as the row, its topics and New Topic… under it while it is open.
+struct ChannelDisclosure: View {
+    let c: SidebarChannel
+    let model: LibraryModel
+    let commands: Commands
+
+    var body: some View {
+        DisclosureGroup(isExpanded: Binding(get: { c.open }, set: { model.setChannelOpen(c.item.place, $0) })) {
+            ForEach(c.topics, id: \.place) { t in
+                ChatSidebarRow(icon: SidebarSymbols.symbol(t.icon), name: t.title, unread: t.unread)
+                    .tag(t.place)
+                    .help(t.help)
+            }
+            if let add = c.newTopic {
+                Button { SidebarMenus.run(.newTopic, on: c.item.place, commands: commands) } label: {
+                    Label(add.title, systemImage: "plus").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help(add.help)
+            }
+        } label: {
+            // Open, the channel's row is its General; closed, it counts its topics too.
+            ChatSidebarRow(icon: SidebarSymbols.symbol(c.item.icon), name: c.item.title, unread: c.item.unread, tag: c.item.tag)
+                .tag(c.item.place)
+                .help(c.item.help)
+                .contextMenu { MenuEntriesView(entries: SidebarMenus.entries(for: c.item.place, model: model, commands: commands)) }
+        }
+    }
+}
+
 /// The SF Symbols of the sidebar's items.
 enum SidebarSymbols {
     static func symbol(_ icon: SidebarIcon) -> String {
@@ -145,20 +179,61 @@ enum SidebarSymbols {
         case .tracker: "dot.radiowaves.left.and.right"
         }
     }
+
+    /// A group's icon (SPEC 7G.7 Groups): the one table of them on the Mac (Windows has its own, of Segoe Fluent glyphs).
+    static func group(_ icon: ChatGroupIcon) -> String {
+        switch icon {
+        case .sparkles: "sparkles"
+        case .folder: "folder"
+        case .briefcase: "briefcase"
+        case .house: "house"
+        case .people: "person.2"
+        case .star: "star"
+        case .hammer: "hammer"
+        case .book: "book"
+        case .gameController: "gamecontroller"
+        case .heart: "heart"
+        case .globe: "globe"
+        case .tray: "tray"
+        }
+    }
 }
 
 /// The context menus of the sidebar's items as the core lists them, run here (the window and QA both draw them).
 @MainActor enum SidebarMenus {
     static func entries(for place: LibraryPlace, model: LibraryModel, commands: Commands) -> [MenuEntry] {
-        model.library.sidebarMenu(place: place).map { e in
+        menu(model.library.sidebarMenu(place: place)) { run($0, on: place, commands: commands) }
+    }
+
+    /// A group's menu (Rename Group…, Icon ▸, Move Up/Down, Delete Group); its commands run on that group.
+    static func groupEntries(_ id: String, model: LibraryModel, commands: Commands) -> [MenuEntry] {
+        menu(model.library.sidebarGroupMenu(groupId: id)) { runGroup($0, id, commands: commands) }
+    }
+
+    private static func menu(_ entries: [SidebarMenuEntry], _ run: @escaping @MainActor (SidebarCommand) -> Void) -> [MenuEntry] {
+        entries.map { e in
             switch e {
             case .separator:
                 return .separator
+            case let .submenu(title, children):
+                return .submenu(title, menu(children, run))
             case let .item(title, command, destructive, checked, enabled, _):
-                return .item(title, checked: checked, enabled: enabled, role: destructive ? .destructive : .normal) {
-                    run(command, on: place, commands: commands)
-                }
+                return .item(title, checked: checked, enabled: enabled, role: destructive ? .destructive : .normal) { run(command) }
             }
+        }
+    }
+
+    /// A group command on the group as it is now (the menu may have been open a while).
+    static func runGroup(_ command: SidebarCommand, _ id: String, commands: Commands) {
+        guard let g = commands.core.chatGroups().first(where: { $0.id == id }) else { return }
+        let chat = commands.chat
+        switch command {
+        case .renameGroup: chat.renameGroup(g)
+        case .setGroupIcon(let icon): chat.setGroupIcon(g, icon)
+        case .moveGroupUp: chat.moveGroup(g, up: true)
+        case .moveGroupDown: chat.moveGroup(g, up: false)
+        case .deleteGroup: chat.deleteGroup(g)
+        default: break
         }
     }
 
@@ -186,6 +261,9 @@ enum SidebarSymbols {
             case .leaveChannel: chat.leave(c)
             case .channelAgents: chat.askAgents(c)
             case .setFollow(let on): chat.setFollow(c, on)
+            case .moveToGroup(let group): chat.moveToGroup(c, group)
+            case .removeFromGroup: chat.moveToGroup(c, nil)
+            case .newGroup: chat.newGroup(with: c)
             default: break
             }
         default:

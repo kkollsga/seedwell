@@ -5,67 +5,158 @@ import SwiftUI
 /// a link with them and copies it; the sharing period (an owner's setting, applied at once: when it ends, every
 /// device but the owners' is removed); and the active links, each with Revoke. Opened on a folder not synced yet
 /// (Share ▸ Seedwell in Finder), it is add and share in one: Copy Link starts syncing the folder from this Mac first.
-/// The form, its rules and every word are the core's (`Core::sync_share_*`, trs-ffi `sync_share.rs`).
+/// The form, its rules and every word are the core's (`Core::sync_share_*`, seedwell-ffi `sync_share.rs`).
+///
+/// The core draws the dialog after each change only (the form, the links, a switch applied), and again as often as its
+/// `refreshMs` asks while the dialog is open (the countdown, and what changed elsewhere: the folder removed on another
+/// device, this computer's role, Read only or On all my devices switched), off the main thread; a drawing the same as the
+/// last is not shown again. The view draws the last drawing and never asks the core itself, so a render (and SwiftUI
+/// renders often) costs the core nothing. Opening, the folder's form is read off the main thread too; until the first
+/// drawing is there the dialog says it is opening.
 @MainActor @Observable final class SyncShareModel {
     @ObservationIgnored let core: Core
-    var form: SyncShareForm
+    /// What is chosen. Each change is drawn by the core (`window`).
+    var form: SyncShareForm {
+        didSet { if opened && form != oldValue { draw() } }
+    }
     /// The folder was added (by Copy Link): its id.
     @ObservationIgnored var onAdded: (String) -> Void = { _ in }
     private(set) var invites: [SyncInvite] = []
+    /// The dialog as the core drew it after the last change; `nil` while it opens.
+    private(set) var window: SyncShareWindowModel?
     var error: String?
     var busy = false
     /// "Link copied", shown for a moment after Copy Link.
     var copied = false
     @ObservationIgnored private var copiedTask: Task<Void, Never>?
+    /// The form is the folder's (read from the core), not the opening one: its changes are drawn.
+    @ObservationIgnored private var opened = false
+    /// The latest drawing asked for (an older one that comes back after it is dropped), and the countdown's next one.
+    @ObservationIgnored private var drawing: Task<Void, Never>?
+    @ObservationIgnored private var drawn = 0
+    @ObservationIgnored private var tick: Task<Void, Never>?
+    /// The links being read.
+    @ObservationIgnored private var loading: Task<Void, Never>?
+    @ObservationIgnored private var loads = 0
+    /// How many times the core drew the dialog (tests: after changes only, never once per render), and how many of
+    /// those drawings were new and shown (tests: a refresh that finds nothing changed shows nothing).
+    @ObservationIgnored private(set) var draws = 0
+    @ObservationIgnored private(set) var shown = 0
+    /// The wait the core's `refreshMs` asks for (tests: shorter).
+    @ObservationIgnored var refreshAfter: (UInt32) -> Duration = { .milliseconds(Int($0)) }
+    /// The first real content was drawn in the view (the window centres itself again on it).
+    @ObservationIgnored var onFirstContent: () -> Void = {}
+    @ObservationIgnored private var contentShown = false
 
     /// `copied`: show the "Link copied" state (snapshots).
     init(core: Core, id: String, copied: Bool = false) {
         self.core = core
-        form = core.syncShareForm(id: id)
+        form = syncShareFormOpening(id: id)
         self.copied = copied
-        reload()
+        Task { [weak self] in
+            let f = await Task.detached(priority: .userInitiated) { core.syncShareForm(id: id) }.value
+            guard let self else { return }
+            form = f
+            opened = true
+            draw()
+            reload()
+        }
     }
 
     /// A folder not synced yet: shared from this Mac when the first link is made.
     init(core: Core, newFolder path: String) {
         self.core = core
         form = core.syncShareFormNew(path: path)
+        opened = true
+        draw()
         reload()
     }
 
     /// The folder or channel (empty while it is not synced yet).
     var id: String { form.id }
 
-    /// The dialog as the core draws it now.
-    func window(now: Date = .now) -> SyncShareWindowModel {
-        core.syncShareWindow(form: form, invites: invites, nowUnixS: UInt64(max(0, now.timeIntervalSince1970)), clock: MacClock())
+    /// The view drew its first real content (not "opening"): told once.
+    func firstContentShown() {
+        guard !contentShown else { return }
+        contentShown = true
+        onFirstContent()
+    }
+
+    /// Once the dialog is drawn as it is now (the form read, the last change drawn), or after `limit` at most (the
+    /// renderer, tests, and the window waiting a moment before it shows the opening state).
+    func ready(within limit: Duration = .seconds(5)) async {
+        let end = ContinuousClock.now + limit
+        while ContinuousClock.now < end {
+            if isReady { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    /// The dialog is drawn as it is now: the form read, the links read, the last change drawn. (Tests check it after
+    /// `ready(within:)`: on a busy machine its limit can pass first, with an older drawing shown.)
+    var isReady: Bool { window != nil && opened && drawing == nil && loading == nil }
+
+    /// The core draws the dialog as it is now, off the main thread; then, after `refreshMs`, reads the links and draws it
+    /// again (the countdown, changes made elsewhere).
+    func draw() {
+        tick?.cancel()
+        drawn += 1
+        let (core, form, invites, n) = (core, form, invites, drawn)
+        drawing = Task { [weak self] in
+            let w = await Task.detached(priority: .userInitiated) {
+                core.syncShareWindow(form: form, invites: invites, nowUnixS: UInt64(max(0, Date().timeIntervalSince1970)), clock: MacClock())
+            }.value
+            // A change since: its own drawing is on its way.
+            guard let self, n == drawn else { return }
+            draws += 1
+            // The same as shown: nothing to draw again (a refresh mostly finds nothing changed).
+            if w != window {
+                window = w
+                shown += 1
+            }
+            drawing = nil
+            guard let ms = w.refreshMs else { return }
+            let wait = refreshAfter(ms)
+            tick = Task { [weak self] in
+                try? await Task.sleep(for: wait)
+                if !Task.isCancelled { self?.reload() }
+            }
+        }
     }
 
     func reload() {
         let (core, id) = (core, form.id)
         guard form.newPath == nil else { invites = []; return }
-        Task {
+        loads += 1
+        let n = loads
+        loading = Task {
             let list = await Task.detached(priority: .userInitiated) { core.syncInvites(id: id) }.value
-            invites = list
+            // A later read is on its way (the countdown's, while the opening one was slow): this older list is not
+            // drawn over it, and the dialog is not ready before it.
+            guard n == loads else { return }
+            if list != invites { invites = list }
+            loading = nil
+            draw()
         }
     }
 
     /// Starts a sharing period of `days` from now, or ends the period (`0`: shared with no end). Owners only.
     func setSharing(days: UInt32) {
-        setSharing(until: syncSharingEnd(days: days, nowUnixS: UInt64(Date().timeIntervalSince1970)))
-    }
-
-    /// Adds `days` to the running period's end.
-    func extendSharing(days: UInt32) {
-        let until = core.syncSnapshot().folders.first { $0.id == form.id }?.shareUntilS ?? core.chatChannels().first { $0.id == form.id }?.shareUntilS
-        setSharing(until: syncSharingExtended(untilS: until, days: days, nowUnixS: UInt64(Date().timeIntervalSince1970)))
-    }
-
-    /// Sets the end of the sharing (Unix seconds; `0` = no end). Applies at once, for every device.
-    private func setSharing(until: UInt64) {
+        let until = syncSharingEnd(days: days, nowUnixS: UInt64(Date().timeIntervalSince1970))
         let (core, id) = (core, form.id)
+        changeSharing { try await core.syncSetShareUntil(id: id, untilS: until) }
+    }
+
+    /// Adds `days` to the running period's end (the core reads it).
+    func extendSharing(days: UInt32) {
+        let (core, id) = (core, form.id)
+        changeSharing { try await core.syncShareExtend(id: id, days: days, nowUnixS: UInt64(Date().timeIntervalSince1970)) }
+    }
+
+    /// Changes the sharing period (applied at once, for every device), then reads the links and draws it again.
+    private func changeSharing(_ call: @escaping @Sendable () async throws -> Void) {
         Task {
-            let r: Result<Void, Error> = await catching { try await core.syncSetShareUntil(id: id, untilS: until) }
+            let r: Result<Void, Error> = await catching { try await call() }
             if case .failure(let e) = r { error = SyncText.message(e) }
             reload()
         }
@@ -95,12 +186,14 @@ import SwiftUI
             case .success(let f): self.form.role = f.role
             case .failure(let e): error = SyncText.message(e)
             }
+            // The switch as it is now (applied, or not).
+            draw()
         }
     }
 
     /// Makes a link with the settings and copies it (a secret: shown nowhere, never logged).
     func copyLink(actions: SyncActions) {
-        guard window().copyTitle != nil, !busy else { return }
+        guard window?.copyTitle != nil, !busy else { return }
         busy = true
         error = nil
         let (core, form) = (core, form)
@@ -115,7 +208,7 @@ import SwiftUI
                 actions.copy(c.invite.link)
                 copied = true
                 copiedTask?.cancel()
-                let ms = window().copiedMs
+                let ms = window?.copiedMs ?? 0
                 // The enclosing Task already holds `self`; this one keeps it a few seconds at most.
                 copiedTask = Task {
                     try? await Task.sleep(for: .milliseconds(Int(ms)))
@@ -124,7 +217,10 @@ import SwiftUI
                 reload()
             case .failure(let e):
                 // A folder not synced yet may be synced by now (the error says what failed after that).
-                if wasNew, let f = core.syncSnapshot().folders.first(where: { $0.path == form.newPath }) {
+                let path = form.newPath
+                var added: SyncFolder?
+                if wasNew { added = await Task.detached { core.syncSnapshot().folders.first { $0.path == path } }.value }
+                if let f = added {
                     self.form.id = f.id
                     self.form.newPath = nil
                     onAdded(f.id)
@@ -151,9 +247,17 @@ struct SyncShareView: View {
     var done: () -> Void = {}
 
     var body: some View {
-        // The countdown ticks while the dialog is open (as often as the core asks).
-        TimelineView(.periodic(from: .now, by: 60)) { context in
-            content(model.window(now: context.date))
+        // The core's last drawing (the model asks for the next after a change, and as often as the countdown needs).
+        if let w = model.window {
+            content(w)
+                // Its window was made around "opening" and grows to this: it centres itself again.
+                .onAppear { model.firstContentShown() }
+        } else {
+            // Opening: the folder's form and the first drawing are read off the main thread.
+            ProgressView().controlSize(.small)
+                .frame(width: 460, height: 160)
+                .background(.background)
+                .accessibilityIdentifier("sync-share-opening")
         }
     }
 

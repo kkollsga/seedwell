@@ -7,7 +7,7 @@
 
 use std::io;
 
-use trs_sync_proto::model::FileKind;
+use seedwell_sync_proto::model::FileKind;
 
 mod disk;
 mod flush;
@@ -100,7 +100,7 @@ pub trait Fs: Send + Sync {
     fn hard_link(&self, from: &str, to: &str) -> io::Result<()>;
     /// Copies a file; a clone (copy on write) where the filesystem supports it (APFS). A program writing `from`
     /// meanwhile is never refused, and a copy that overlapped a write is never handed back: it is made again, or fails
-    /// with `ResourceBusy` (`trs_platform::fs::copy_shared`).
+    /// with `ResourceBusy` (`seedwell_platform::fs::copy_shared`).
     fn copy(&self, from: &str, to: &str) -> io::Result<()>;
     /// Sets the modification time.
     fn set_mtime(&self, rel: &str, mtime_ns: i64) -> io::Result<()>;
@@ -144,7 +144,7 @@ pub fn write_all(fs: &dyn Fs, rel: &str, data: &[u8]) -> io::Result<()> {
 /// Splits a relative path into its components, refusing anything that could leave the folder root:
 /// an absolute path, `..`, `.`, empty components and NUL. `""` is the root itself (no components).
 ///
-/// Paths are checked by [`trs_sync_proto::model::validate_path`] long before they get here; this is the
+/// Paths are checked by [`seedwell_sync_proto::model::validate_path`] long before they get here; this is the
 /// second line of defense, so a bug elsewhere cannot write outside the folder.
 pub fn components(rel: &str) -> io::Result<Vec<&str>> {
     if rel.is_empty() {

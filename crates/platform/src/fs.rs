@@ -502,6 +502,14 @@ pub fn is_in_use(e: &io::Error) -> bool {
     cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33))
 }
 
+/// Whether `e` means the file is busy for now and the same call may work a moment later: another program holds it
+/// ([`is_in_use`]: on Windows ERROR_SHARING_VIOLATION 32, ERROR_LOCK_VIOLATION 33, which std leaves uncategorized),
+/// or [`io::ErrorKind::ResourceBusy`] (a file [`copy_shared`] saw change during every copy; `EBUSY`; Windows'
+/// ERROR_BUSY). Anything else (missing, denied, a full disk) does not go away by trying again.
+pub fn is_busy(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::ResourceBusy || is_in_use(e)
+}
+
 /// Whether another program holds the file at `path` so that it cannot be renamed or removed now
 /// (Windows: open without letting others delete it). Opens the file once to ask, with delete access
 /// and no data access; nothing is read or changed. Always `false` elsewhere.
@@ -1021,6 +1029,43 @@ mod tests {
         test_while_copying(&from, None);
         assert_eq!(e.kind(), io::ErrorKind::ResourceBusy, "{e}");
         assert!(!to.exists(), "no torn copy is left");
+    }
+
+    /// The failure: a file busy for now (another program holds it, or it changed during every copy) is told apart from
+    /// a lasting error by its words or not at all, so a host either gives up on a save that a moment later would work
+    /// or tries every error again. Windows' sharing and lock violations reach std as uncategorized raw errors 32 and 33:
+    /// they count only there (32 is EPIPE on Unix).
+    #[test]
+    fn busy_is_only_a_file_held_or_changing_now() {
+        assert!(is_busy(&io::Error::new(io::ErrorKind::ResourceBusy, "changed while it was copied")));
+        for lasting in [io::ErrorKind::NotFound, io::ErrorKind::PermissionDenied, io::ErrorKind::StorageFull, io::ErrorKind::Other] {
+            assert!(!is_busy(&io::Error::from(lasting)), "{lasting:?}");
+        }
+        assert_eq!(is_busy(&io::Error::from_raw_os_error(32)), cfg!(windows), "a sharing violation");
+        assert_eq!(is_busy(&io::Error::from_raw_os_error(33)), cfg!(windows), "a lock violation");
+        #[cfg(unix)]
+        assert!(is_busy(&io::Error::from_raw_os_error(libc::EBUSY)));
+
+        // Changed during every copy.
+        let t = tempfile::tempdir().unwrap();
+        let (from, to) = (t.path().join("log.txt"), t.path().join("copy"));
+        std::fs::write(&from, b"x").unwrap();
+        let f = from.clone();
+        test_while_copying(&from, Some(Box::new(move |attempt| std::fs::write(&f, vec![b'y'; attempt as usize + 2]).unwrap())));
+        let e = copy_shared(&from, &to).unwrap_err();
+        test_while_copying(&from, None);
+        assert!(is_busy(&e), "{e}");
+
+        // Another program holds it with no sharing (Windows): opening it is a sharing violation, busy.
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            let held = std::fs::OpenOptions::new().read(true).write(true).share_mode(0).open(&from).unwrap();
+            let e = File::open(&from).unwrap_err();
+            assert!(is_busy(&e), "{e} ({:?})", e.raw_os_error());
+            drop(held);
+            assert!(File::open(&from).is_ok());
+        }
     }
 
     /// The failure (Windows): the copy opens its source without `FILE_SHARE_WRITE`, as `CopyFileExW` does, and another

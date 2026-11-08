@@ -126,12 +126,12 @@ impl Calls {
     }
 
     fn time<T>(&mut self, name: &'static str, f: impl FnOnce(&Core) -> T) -> T {
-        trs_sync_net::shared::take_longest_lock_wait();
+        seedwell_sync_net::shared::take_longest_lock_wait();
         let at = Instant::now();
         let out = f(&self.core);
         let took = at.elapsed();
         if took > BOUND {
-            let wait = trs_sync_net::shared::take_longest_lock_wait();
+            let wait = seedwell_sync_net::shared::take_longest_lock_wait();
             let said = wait.map_or_else(|| "no wait for a lock of folder sync".into(), |(d, at)| format!("waited {d:?} for a lock at {at}"));
             self.waits.insert(name, format!("{took:?}: {said}"));
         }
@@ -184,6 +184,13 @@ impl Calls {
         self.time_async("async set_sync_port", |c| c.set_sync_port_async(port));
         self.time_async("async chat_set_muted", |c| c.chat_set_muted_async("00".repeat(16), true));
         self.time_async("async chat_rename", |c| c.chat_rename_async("00".repeat(16), "Renamed".into()));
+        // The sidebar's group commands (a click in a menu): each answers at once, its save on the settings' lane.
+        self.time_async("async chat_group_new", |c| c.chat_group_new_async("Group".into(), None, None));
+        self.time_async("async chat_set_group", |c| c.chat_set_group_async("00".repeat(16), None));
+        self.time_async("async chat_group_rename", |c| c.chat_group_rename_async("nope".into(), "Renamed".into()));
+        self.time_async("async chat_group_set_icon", |c| c.chat_group_set_icon_async("nope".into(), ChatGroupIcon::Star));
+        self.time_async("async chat_group_move", |c| c.chat_group_move_async("nope".into(), true));
+        self.time_async("async chat_group_delete", |c| c.chat_group_delete_async("nope".into()));
         let f = self.favorites.clone();
         self.time_async("async FavoriteEditor.set_limits", |_| f.set_limits_async("public".into(), 1_000_000, 0));
         let f = self.favorites.clone();
@@ -201,6 +208,8 @@ impl Calls {
         self.time("sharing_rows", |c| c.sharing_rows(q));
         self.time("sharing_counts", |c| c.sharing_counts(None, None, String::new()));
         self.time("chat_channels", |c| c.chat_channels());
+        // The sidebar's groups: read with the channels on each refresh, and by the hosts' group menus.
+        self.time("chat_groups", |c| c.chat_groups());
         self.time("chat_directs", |c| c.chat_directs());
         self.time("devices_view", |c| c.devices_view());
         self.time("sync_settings", |c| c.sync_settings());
@@ -209,6 +218,10 @@ impl Calls {
         self.time("sync_nav_pane", |c| c.sync_nav_pane());
         self.time("agents_awake", |c| c.agents_awake());
         self.time("listen_port", |c| c.listen_port());
+        // The Add Folder dialog as it opens and is drawn, and its link's places read apart.
+        let add = self.time("sync_add_form", |c| c.sync_add_form(None));
+        self.time("sync_add_window", |c| c.sync_add_window(add, crate::host::host_features_all()));
+        self.time_async("async sync_add_places", |c| c.sync_add_places_async(String::new()));
         let lib = self.library.clone();
         let at = Instant::now();
         lib.model(1_792_938_725_000);
@@ -219,6 +232,26 @@ impl Calls {
             self.time("sync_activity", |c| c.sync_activity(id.clone()));
             self.time("sync_members", |c| c.sync_members(id.clone()));
             self.time("sync_invites", |c| c.sync_invites(id.clone()));
+            // The folder's dialogs as the hosts draw them on their UI thread: Share (also opened by itself after Add
+            // Folder), Edit, and their switches; and where the Finder's hub shows the folder.
+            let form = self.time("sync_share_form", |c| c.sync_share_form(id.clone()));
+            self.time("sync_share_window", |c| c.sync_share_window(form.clone(), Vec::new(), 1_792_938_725, Arc::new(Clock)));
+            // The Share dialog as a host opens and draws it, all in one: its form, its links, its drawing.
+            self.time("Share dialog opened and drawn", |c| {
+                let form = c.sync_share_form(id.clone());
+                let invites = c.sync_invites(id.clone());
+                c.sync_share_window(form, invites, 1_792_938_725, Arc::new(Clock))
+            });
+            // Its Extend (a save: once a run of rounds, as a user clicks it).
+            if !self.slowest.contains_key("async sync_share_extend") {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                self.time_async("async sync_share_extend", |c| c.sync_share_extend_async(id.clone(), 1, now));
+            }
+            self.time("sync_follow_line", |c| c.sync_follow_line(id.clone()));
+            self.time("sync_read_only_line", |c| c.sync_read_only_line(id.clone()));
+            let edit = self.time("sync_edit_form", |c| c.sync_edit_form(id.clone()));
+            self.time("sync_edit_window", |_| sync_edit_window(edit, crate::host::host_windows_all(), crate::host::host_features_all()));
+            self.time("sync_host_hub_item", |c| c.sync_host_hub_item(id.clone()));
         }
         if let Some(p) = place {
             let p = p.to_string();
@@ -277,7 +310,7 @@ fn the_apps_calls_never_wait_for_a_first_scan_a_held_folder_a_rescan_or_a_busy_e
     // admitted elsewhere does) on a disk that is slow to save (as one whose virus scanner reads each new file:
     // Windows' Defender).
     core.backend.test_stall_engine(Duration::from_secs(3));
-    trs_sync_net::shared::test_slow_saves(SLOW_SAVE);
+    seedwell_sync_net::shared::test_slow_saves(SLOW_SAVE);
     let renaming = Arc::new(AtomicBool::new(true));
     let renames = Arc::new(AtomicU32::new(0));
     let renamer = {
@@ -307,7 +340,7 @@ fn the_apps_calls_never_wait_for_a_first_scan_a_held_folder_a_rescan_or_a_busy_e
     }
     renaming.store(false, Ordering::SeqCst);
     renamer.join().unwrap();
-    trs_sync_net::shared::test_slow_saves(Duration::ZERO);
+    seedwell_sync_net::shared::test_slow_saves(Duration::ZERO);
     calls.assert_quick("during the first scan, a busy engine and slow saves");
     let renamed = renames.load(Ordering::SeqCst);
     assert!(renamed >= 3, "the device was renamed {renamed} times");
@@ -317,7 +350,7 @@ fn the_apps_calls_never_wait_for_a_first_scan_a_held_folder_a_rescan_or_a_busy_e
 
     // The folder's core held (as a long pull holds it) for three seconds.
     let (h, _) = core.backend.sync().service().unwrap();
-    let fid: trs_sync_proto::ids::FolderId = id.parse().unwrap();
+    let fid: seedwell_sync_proto::ids::FolderId = id.parse().unwrap();
     let mut calls = Calls::new(&core);
     h.test_lock_core(&fid, Duration::from_secs(3));
     calls.rounds_while(Duration::from_millis(2500), Some(&id), None, |_| false);
@@ -388,7 +421,7 @@ fn the_apps_calls_never_wait_for_a_folder_move_or_a_big_file_being_sent() {
 
     // Saves are slow (as on a disk whose virus scanner reads each new file first), so that the move and the message
     // below last long enough for a call that waited for them to show: on a fast disk each takes less than `BOUND`.
-    trs_sync_net::shared::test_slow_saves(SLOW_SAVE);
+    seedwell_sync_net::shared::test_slow_saves(SLOW_SAVE);
 
     // A move while the first scan runs (it stops the folder, moves the files, opens it again), from another thread as
     // the app's Edit Folder does.
@@ -421,7 +454,7 @@ fn the_apps_calls_never_wait_for_a_folder_move_or_a_big_file_being_sent() {
     let at = Instant::now();
     calls.rounds_while(Duration::from_secs(30), None, Some(&channel), move |c| c.chat_pending_sends(ch.clone()).is_empty());
     let took = at.elapsed();
-    trs_sync_net::shared::test_slow_saves(Duration::ZERO);
+    seedwell_sync_net::shared::test_slow_saves(Duration::ZERO);
     calls.assert_quick("while a big file is prepared for a chat message");
     assert!(took >= 2 * BOUND, "the message was prepared in {took:?}: too short for a call that waited for it to show");
     core.shutdown(5);
@@ -439,7 +472,7 @@ fn chat_reads_while(what: &str, times: u32, act: impl Fn(&Core, &str, &Path, u32
     let channel = rt.block_on(h.chat_new("Saves", false)).unwrap().id;
     // Primed as the app is.
     Calls::new(&core).round(None, Some(&channel));
-    trs_sync_net::shared::test_slow_saves(SLOW_SAVE);
+    seedwell_sync_net::shared::test_slow_saves(SLOW_SAVE);
     let worker = {
         let (core, channel) = (core.clone(), channel.clone());
         std::thread::spawn(move || {
@@ -454,7 +487,7 @@ fn chat_reads_while(what: &str, times: u32, act: impl Fn(&Core, &str, &Path, u32
         calls.round(None, Some(&channel));
         std::thread::sleep(Duration::from_millis(10));
     }
-    trs_sync_net::shared::test_slow_saves(Duration::ZERO);
+    seedwell_sync_net::shared::test_slow_saves(Duration::ZERO);
     assert!(worker.is_finished(), "{what}: not done in 90 s");
     worker.join().unwrap();
     calls.assert_quick(what);
@@ -644,7 +677,7 @@ fn the_users_commands_return_at_once_and_reach_a_busy_engine_in_order() {
 #[test]
 fn the_proxy_icon_never_waits_for_a_key_test_or_a_busy_engine() {
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
-    let fake = rt.block_on(trs_socks::testkit::FakeProxy::start("svc-user", "svc-pass"));
+    let fake = rt.block_on(seedwell_socks::testkit::FakeProxy::start("svc-user", "svc-pass"));
     fake.set_delay(Duration::from_millis(1500));
     let (core, _work, _tmp) = real_core();
     core.set_proxy_preset_for_tests(vec![fake.addr().ip().to_string()], fake.addr().port());
@@ -667,5 +700,210 @@ fn the_proxy_icon_never_waits_for_a_key_test_or_a_busy_engine() {
     assert!(slowest < BOUND, "a proxy model took {slowest:?} (timers late by {:?})", timer_lateness());
     assert!(saw_progress, "the window says the key is being tested, and the icon asks again soon");
     assert!(wait(test).is_ok());
+    core.shutdown(5);
+}
+
+/// The failure this targets: **adding a big folder "On all my devices", files on demand for the other devices, holds up
+/// the app's UI thread** while the folder is added, its first scan runs and its statement goes to the user's devices (a
+/// 914 GB, 407-file folder of films, 2026-11-06). Add Folder's Start runs on a thread of its own, as the hosts run it
+/// (`sync_add_start_async`); meanwhile and after it, every call the hosts make on their UI thread is timed (the menu,
+/// the window, Finder's badges, and the folder's Share and Edit dialogs with their switches), every save slow.
+#[test]
+fn the_apps_calls_never_wait_for_a_big_folder_added_on_all_my_devices() {
+    /// Films of 64 MiB: only their size is set (sparse where the disk allows it), so a scan that reads them is slow.
+    const FILMS: usize = 40;
+    const FILM: u64 = 64 << 20;
+    let (core, work, _tmp) = real_core();
+    let place = work.join("Movies");
+    std::fs::create_dir_all(&place).unwrap();
+    for i in 0..FILMS {
+        std::fs::File::create(place.join(format!("Film {i:03}.mkv"))).unwrap().set_len(FILM).unwrap();
+    }
+    // A group of this computer's own devices (the "On all my devices" statement is said in it).
+    core.devices_pair_link().unwrap();
+    Calls::new(&core).round(None, None);
+    let shown = crate::devices_text::FollowLine { shown: true, ..core.sync_follow_line_new(false) };
+    let form = SyncAddForm { folder: place.display().to_string(), on_demand: true, all_devices: true, follow: shown, ..core.sync_add_form(None) };
+
+    seedwell_sync_net::shared::test_slow_saves(SLOW_SAVE);
+    let adder = {
+        let core = core.clone();
+        std::thread::spawn(move || core.sync_add_start(form))
+    };
+    let mut calls = Calls::new(&core);
+    calls.rounds_while(Duration::from_secs(30), None, None, |_| adder.is_finished());
+    let f = adder.join().unwrap().unwrap();
+    let id = f.id.clone();
+    // Its first scan (it lists the films, reading none of them) and the statement's saves, and a while after.
+    let end = Instant::now() + Duration::from_secs(30);
+    let mut listed = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < end && Instant::now() < listed + Duration::from_secs(2) {
+        calls.round(Some(&id), None);
+        if listed > Instant::now() && folder_state(&core, &id).is_some_and(|s| s.state != SyncState::Scanning && s.files >= FILMS as u64) {
+            listed = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    seedwell_sync_net::shared::test_slow_saves(Duration::ZERO);
+    calls.assert_quick("while a big folder is added on all my devices");
+    let s = folder_state(&core, &id).unwrap();
+    // Listed once is what counts: a later scan may have begun since (the watcher's events for the films written just
+    // before the folder was added arrive after the first scan), and its Scanning is no failure.
+    assert!(listed <= Instant::now() && s.files >= FILMS as u64, "the films were not listed in 30 s: {s:?}");
+    assert!(core.sync_follow_line(id.clone()).on, "the folder is not on all my devices");
+    assert!(s.on_demand_others && !s.on_demand, "on demand for the other devices, its files in place here: {s:?}");
+    core.shutdown(5);
+}
+
+/// The failure this targets: **the Share dialog's draw makes the status of every folder and channel** on the hosts'
+/// UI thread (a snapshot: each folder's members, absences and index; every channel's messages counted for its unread
+/// count), each time it is drawn, for one folder's name, role, sharing end and chat and the channels' names. Measured
+/// while a 407-film folder was added on all my devices next to six folders and 6000 chat messages (debug build): 1.1 ms
+/// a draw (p99 2.8 ms), growing with every folder and message; reading that folder alone, 0.12 ms (p99 0.3 ms). Fails
+/// when a call the dialog makes as it opens or is drawn makes a status, or when what it reads says another name, role,
+/// sharing end or chat than the snapshot and the channel list do.
+#[test]
+fn the_share_dialog_reads_its_folder_alone_and_says_what_the_snapshot_says() {
+    let (core, work, _tmp) = real_core();
+    let place = work.join("Films");
+    tree(&place, 10, 0);
+    let f = core.sync_add_folder(place.display().to_string()).unwrap();
+    // The folder's link joins a new channel, and its sharing ends in a day; a channel of its own besides.
+    let with_chat = SyncShareForm { with_chat: true, ..core.sync_share_form(f.id.clone()) };
+    let chat = core.sync_share_copy_link(with_chat).unwrap().form.chat;
+    core.sync_set_share_until(f.id.clone(), 1_900_000_000).unwrap();
+    let other = core.backend.sync().chat_new("Notes", false).unwrap().id;
+    core.sync_set_share_until(other.clone(), 1_900_000_100).unwrap();
+
+    let before = seedwell_sync_net::shared::statuses_made_here();
+    for id in [&f.id, &other] {
+        let form = core.sync_share_form(id.clone());
+        let invites = core.sync_invites(id.clone());
+        let w = core.sync_share_window(form.clone(), invites, 1_792_938_725, Arc::new(Clock));
+        assert!(w.gone.is_none() && w.copy_title.is_some(), "{w:?}");
+        core.sync_share_window(SyncShareForm { role: SyncRole::ReadOnly, ..form }, Vec::new(), 1_792_938_725, Arc::new(Clock));
+    }
+    core.sync_share_window(sync_share_form_opening("0".repeat(32)), Vec::new(), 1_792_938_725, Arc::new(Clock));
+    let made = seedwell_sync_net::shared::statuses_made_here() - before;
+    assert_eq!(made, 0, "the Share dialog made {made} folder or channel statuses");
+    // (The count counts: a snapshot makes one per folder.)
+    core.sync_snapshot();
+    assert!(seedwell_sync_net::shared::statuses_made_here() > before);
+
+    // What the dialog reads is what the snapshot and the channel list say.
+    let sync = core.backend.sync();
+    let s = folder_state(&core, &f.id).unwrap();
+    let t = sync.share_target(&f.id).unwrap();
+    assert_eq!((t.name, t.role, t.share_until_s, t.is_channel, t.channel_id), (s.name, s.role, s.share_until_s, false, s.channel_id.clone()));
+    assert_eq!(s.channel_id.as_deref(), Some(chat.as_str()), "the folder's chat");
+    let channels = core.chat_channels();
+    let c = channels.iter().find(|c| c.id == other).unwrap();
+    let t = sync.share_target(&other).unwrap();
+    assert_eq!((t.name.as_str(), t.role, t.share_until_s, t.is_channel, t.channel_id), (c.name.as_str(), c.role, c.share_until_s, true, None));
+    let listed: Vec<(String, String, SyncRole)> = sync.share_channels().into_iter().map(|c| (c.id, c.name, c.role)).collect();
+    let all: Vec<(String, String, SyncRole)> = channels.into_iter().map(|c| (c.id, c.name, c.role)).collect();
+    assert_eq!(listed, all, "the channels, in the channel list's order");
+    assert!(sync.share_target(&"0".repeat(32)).is_none() && sync.share_target("not an id").is_none());
+    core.shutdown(5);
+}
+
+
+/// The failure this targets: **the Add Folder and Edit dialogs look at the disk on the hosts' UI thread**, where a
+/// network drive that does not answer (a NAS asleep, a share gone) holds the dialog, and the app with it, for as long
+/// as it likes. The Add dialog asked whether its location's folder is there on every render, and numbered a pasted
+/// link's default place and looked for a folder of its name there (resolving the path of every synced folder) on every
+/// keystroke; the Edit dialog asked whether the folder's parent is there on every render. A test cannot make a drive
+/// stop answering, so it changes what those questions would find between two runs of the calls the hosts make on their
+/// UI thread: the default location with a folder of the link's name in it, the folder a place was chosen in and the
+/// edited folder's parent are there, then gone. Calls that never look answer the same both times. The places the
+/// dialog needs from the disk come from `sync_add_places` (run apart, off the UI thread), which does see the change.
+#[test]
+fn the_add_and_edit_dialogs_never_look_at_the_disk_so_a_drive_that_does_not_answer_cannot_hold_up_the_ui() {
+    let (core, work, _tmp) = real_core();
+    let places = work.join("Places");
+    let mut s = core.sync_settings();
+    s.default_location = places.display().to_string();
+    core.set_sync_settings(s).unwrap();
+    // A link to a folder named Team not synced here (made, shared, then removed).
+    let team = work.join("Mine").join("Team");
+    tree(&team, 3, 0);
+    let f = core.sync_add_folder(team.display().to_string()).unwrap();
+    let link = core.sync_create_invite(f.id.clone(), SyncRole::ReadWrite, 1, 7, None).unwrap().link;
+    core.sync_remove(f.id, false).unwrap();
+    // A folder in the Edit dialog, and a folder picked in the pickers.
+    let notes = work.join("Edit").join("Notes");
+    tree(&notes, 3, 0);
+    let edited = core.sync_add_folder(notes.display().to_string()).unwrap();
+    let chosen = work.join("Chosen");
+    // Windows refuses to rename a folder while a handle is open beneath it, and the core watches the edited folder in
+    // `Edit`: there the edited folder's parent stays (the Mac and Linux runs take it away).
+    let mut gone = vec![(places.clone(), "Places away"), (chosen.clone(), "Chosen away")];
+    if !cfg!(windows) {
+        gone.push((work.join("Edit"), "Edit away"));
+    }
+    let there = |on: bool| {
+        for (dir, away) in &gone {
+            let away = work.join(away);
+            if on && !dir.exists() {
+                std::fs::create_dir_all(&away).unwrap();
+                std::fs::rename(&away, dir).unwrap();
+            } else if !on && dir.exists() {
+                std::fs::rename(dir, &away).unwrap();
+            }
+        }
+        if on {
+            std::fs::create_dir_all(places.join("Team")).unwrap();
+        }
+    };
+    there(true);
+    // The forms the host holds (values: the same both times), with the places as read while everything is there.
+    let read = core.sync_add_places(link.clone());
+    assert!(read.default_location.as_deref().is_some_and(|p| p.ends_with("Team 2")) && read.existing_folder.is_some() && read.default_parent_there, "{read:?}");
+    let opening = core.sync_add_form(Some(link.clone()));
+    let placed = sync_add_set_places(opening.clone(), read.clone());
+    let edit = core.sync_edit_form(edited.id.clone());
+    let (mac, windows) = (crate::host::host_features_all(), Vec::new());
+    // Every call the hosts make on their UI thread while the dialogs are open, and what each answers.
+    let calls = |core: &Core| -> Vec<String> {
+        let mut out = Vec::new();
+        let local = core.sync_add_form(None);
+        let typed = core.sync_add_set_link(local.clone(), link.clone());
+        let existing = sync_add_set_location(placed.clone(), read.existing_folder.clone().unwrap());
+        let picked = sync_add_choose_parent(placed.clone(), chosen.display().to_string());
+        let not_a_link = core.sync_add_set_link(placed.clone(), "hello".into());
+        for form in [&local, &opening, &typed, &placed, &existing, &picked, &not_a_link] {
+            out.push(format!("{form:?}"));
+            for features in [&mac, &windows] {
+                out.push(format!("{:?}", core.sync_add_window(form.clone(), features.clone())));
+            }
+        }
+        out.push(format!("{:?}", core.sync_add_form(Some(link.clone()))));
+        out.push(format!("{:?}", sync_add_set_places(typed, read.clone())));
+        let moved = sync_edit_choose_parent(edit.clone(), chosen.display().to_string());
+        for form in [&edit, &moved] {
+            out.push(format!("{:?}", sync_edit_window(form.clone(), crate::host::host_windows_all(), mac.clone())));
+        }
+        out
+    };
+    let with_disk = calls(&core);
+    there(false);
+    let without = calls(&core);
+    for (a, b) in with_disk.iter().zip(&without) {
+        assert_eq!(a, b, "a call of the dialogs answered after looking at the disk");
+    }
+    assert_eq!(with_disk.len(), without.len());
+    // What was read then is what the dialog shows: the picker opens in the folders known to be there.
+    let w = core.sync_add_window(placed.clone(), mac.clone());
+    assert_eq!(w.location_picker.start.as_deref(), Some(places.display().to_string().as_str()));
+    assert_eq!(w.locations.len(), 2, "the numbered place and the folder of that name there: {w:?}");
+    assert_eq!(sync_edit_window(edit.clone(), crate::host::host_windows_all(), mac.clone()).move_picker.start, Some(work.join("Edit").display().to_string()));
+    // The disk did change under the calls: read now, the places say so.
+    let gone = core.sync_add_places(link.clone());
+    assert_eq!(
+        (gone.default_location.as_deref(), gone.existing_folder.as_deref(), gone.default_parent_there),
+        (Some(places.join("Team").display().to_string().as_str()), None, false)
+    );
+    let w = core.sync_add_window(sync_add_set_places(opening, gone), mac);
+    assert_eq!(w.location_picker.start, None, "the default location's folder is not there: the system's choice");
     core.shutdown(5);
 }

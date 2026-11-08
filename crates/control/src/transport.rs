@@ -1,6 +1,6 @@
 //! How the control connection travels (docs/CROSS-PLATFORM.md §2, the transport seam): a Unix socket
 //! file on macOS and Linux, a named pipe on Windows. Both reach only the same user, and both are
-//! named by one path (the pipe's name is derived from it, `trs_platform::ipc::pipe_name`). There is
+//! named by one path (the pipe's name is derived from it, `seedwell_platform::ipc::pipe_name`). There is
 //! no TCP listener, ever (SPEC 9A.1).
 
 use std::io;
@@ -255,7 +255,7 @@ mod imp {
 
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
     use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient, NamedPipeServer};
-    use trs_platform::ipc::{OwnerOnly, create_pipe as create, pipe_name};
+    use seedwell_platform::ipc::{OwnerOnly, create_pipe as create, pipe_name};
 
     use super::Bound;
 

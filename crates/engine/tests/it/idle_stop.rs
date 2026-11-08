@@ -5,10 +5,10 @@ use crate::common;
 use std::time::{Duration, Instant};
 
 use common::*;
-use trs_engine::*;
-use trs_state::duration::Secs;
-use trs_state::rules::{DefaultRule, IdleSetting, IdleStop, Match, Rule, SeedingGoal};
-use trs_state::{RuleSet, TrackerProfiles};
+use seedwell_engine::*;
+use seedwell_state::duration::Secs;
+use seedwell_state::rules::{DefaultRule, IdleSetting, IdleStop, Match, Rule, SeedingGoal};
+use seedwell_state::{RuleSet, TrackerProfiles};
 
 const BELOW: u64 = 1_000_000;
 const HOURS: u32 = 3;

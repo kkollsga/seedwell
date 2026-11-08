@@ -18,7 +18,7 @@
 //! freedesktop.org home trash (its per-volume trash folders, `$topdir/.Trash-$uid`, are not used). The Mac's own
 //! call keeps every item on its own volume, so there the volume rule does not apply.
 //!
-//! Under test (a cargo test binary, or `TRS_FORBID_REAL_HOME`; `TRS_ALLOW_REAL_HOME=1` overrides), the Mac's own call
+//! Under test (a cargo test binary, or `SEEDWELL_FORBID_REAL_HOME`; `SEEDWELL_ALLOW_REAL_HOME=1` overrides), the Mac's own call
 //! and Windows' Recycle Bin are refused: they are the user's real Trash whatever `HOME` (or `USERPROFILE`) says. Tests
 //! name a Trash folder.
 //!
@@ -161,7 +161,7 @@ pub fn move_to_trash(path: &Path, trash_dir: Option<&Path>, other: OtherVolume) 
                     return Err(TrashError::Io(io::Error::other(concat!(
                         "refusing to use the real ",
                         crate::trash!(),
-                        " while running under test (name a Trash folder; TRS_ALLOW_REAL_HOME=1 overrides)"
+                        " while running under test (name a Trash folder; SEEDWELL_ALLOW_REAL_HOME=1 overrides)"
                     ))));
                 }
                 recycle::recycle(path).map(|()| Trashed::RecycleBin)
@@ -178,7 +178,7 @@ pub fn move_to_trash(path: &Path, trash_dir: Option<&Path>, other: OtherVolume) 
                     return Err(TrashError::Io(io::Error::other(concat!(
                         "refusing to use the real ",
                         crate::trash!(),
-                        " while running under test (name a Trash folder; TRS_ALLOW_REAL_HOME=1 overrides)"
+                        " while running under test (name a Trash folder; SEEDWELL_ALLOW_REAL_HOME=1 overrides)"
                     ))));
                 }
                 mac::trash(path).map(Trashed::At)
@@ -203,12 +203,12 @@ pub fn move_to_trash(path: &Path, trash_dir: Option<&Path>, other: OtherVolume) 
 
 /// Whether this process runs under test, where the system's own Trash (the Mac's Trash call, Windows' Recycle Bin: always
 /// the user's real one, whatever `HOME` says) is refused: a
-/// cargo test binary (it lives in a `deps` folder), or `TRS_FORBID_REAL_HOME` (a daemon a test started), unless
-/// `TRS_ALLOW_REAL_HOME` is set. The same rule as the engine's real-home guard.
+/// cargo test binary (it lives in a `deps` folder), or `SEEDWELL_FORBID_REAL_HOME` (a daemon a test started), unless
+/// `SEEDWELL_ALLOW_REAL_HOME` is set. The same rule as the engine's real-home guard.
 #[cfg(any(target_os = "macos", windows))]
 fn real_trash_forbidden() -> bool {
     let test_binary = std::env::current_exe().ok().and_then(|p| p.parent().and_then(|d| d.file_name()).map(|n| n == "deps")).unwrap_or(false);
-    (cfg!(test) || test_binary || std::env::var_os("TRS_FORBID_REAL_HOME").is_some()) && std::env::var_os("TRS_ALLOW_REAL_HOME").is_none()
+    (cfg!(test) || test_binary || std::env::var_os("SEEDWELL_FORBID_REAL_HOME").is_some()) && std::env::var_os("SEEDWELL_ALLOW_REAL_HOME").is_none()
 }
 
 /// What [`move_to_trash`] with the same arguments would do now, without moving anything: where the item would go (the
@@ -584,17 +584,17 @@ mod mac {
         }
 
         /// The one test that uses the real Trash: a file made in a temporary folder goes to the user's Trash, where it
-        /// stays (Finder's Put Back shows where it came from). Run by hand only: `cargo test -p trs-platform -- --ignored
+        /// stays (Finder's Put Back shows where it came from). Run by hand only: `cargo test -p seedwell-platform -- --ignored
         /// the_real_trash`.
         #[test]
         #[ignore = "moves a file into the user's real Trash"]
         fn the_real_trash_takes_a_file_from_a_temporary_folder() {
             let t = tempfile::tempdir().unwrap();
             let f = t.path().join(format!("seedwell-trash-test-{}.txt", std::process::id()));
-            std::fs::write(&f, b"a test file from trs-platform; safe to delete").unwrap();
+            std::fs::write(&f, b"a test file from seedwell-platform; safe to delete").unwrap();
             let went = trash(&f).unwrap();
             assert!(!f.exists() && went.is_file(), "{}", went.display());
-            assert_eq!(std::fs::read(&went).unwrap(), b"a test file from trs-platform; safe to delete");
+            assert_eq!(std::fs::read(&went).unwrap(), b"a test file from seedwell-platform; safe to delete");
         }
     }
 }

@@ -9,8 +9,8 @@ use common::*;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
-use trs_stream::container::{Fetched, Probe, probe_mkv, probe_mp4};
-use trs_stream::{Config, FileRange, PlanConfig, Priority};
+use seedwell_stream::container::{Fetched, Probe, probe_mkv, probe_mp4};
+use seedwell_stream::{Config, FileRange, PlanConfig, Priority};
 
 fn ffprobe_duration(p: &Path) -> f64 {
     let out = Command::new("/opt/homebrew/bin/ffprobe")
@@ -37,7 +37,7 @@ fn mp4_atoms(data: &[u8]) -> Vec<(String, u64, u64)> {
 }
 
 /// Drive a probe over a real file, returning the result and the (offset, len) fetches it asked for.
-fn drive(path: &Path, p: fn(u64, &Fetched) -> Probe) -> (trs_stream::container::ContainerInfo, Vec<(u64, usize)>) {
+fn drive(path: &Path, p: fn(u64, &Fetched) -> Probe) -> (seedwell_stream::container::ContainerInfo, Vec<(u64, usize)>) {
     let f = std::fs::File::open(path).unwrap();
     let len = f.metadata().unwrap().len();
     let mut fetched = Fetched::new();
@@ -51,7 +51,7 @@ fn drive(path: &Path, p: fn(u64, &Fetched) -> Probe) -> (trs_stream::container::
             Probe::Need { offset, len } => {
                 needs.push((offset, len));
                 let mut b = vec![0u8; len];
-                trs_platform::fs::read_exact_at(&f, &mut b, offset).unwrap();
+                seedwell_platform::fs::read_exact_at(&f, &mut b, offset).unwrap();
                 fetched.add(offset, b);
             }
         }

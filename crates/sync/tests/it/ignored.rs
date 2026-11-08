@@ -7,14 +7,14 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use trs_sync::clock::Clock;
-use trs_sync::folder::{FolderConfig, FolderCore, RemoteIndex};
-use trs_sync::fs::{Fs, MemFs, read_all, write_all};
-use trs_sync::ignore::Ignore;
-use trs_sync::index::{IndexStore, MemStore};
-use trs_sync::pull::{ChunkRequest, ChunkSource, FetchError, PullReport};
-use trs_sync::scan::ScanJob;
-use trs_sync_proto::device::DeviceKey;
+use seedwell_sync::clock::Clock;
+use seedwell_sync::folder::{FolderConfig, FolderCore, RemoteIndex};
+use seedwell_sync::fs::{Fs, MemFs, read_all, write_all};
+use seedwell_sync::ignore::Ignore;
+use seedwell_sync::index::{IndexStore, MemStore};
+use seedwell_sync::pull::{ChunkRequest, ChunkSource, FetchError, PullReport};
+use seedwell_sync::scan::ScanJob;
+use seedwell_sync_proto::device::DeviceKey;
 
 use crate::flow::{Key, learn_writers};
 
@@ -113,7 +113,7 @@ impl ChunkSource for Disks<'_> {
 /// Pulls until nothing more happens; returns the report totals and every path whose chunks were asked for.
 fn pull(to: &mut Dev, from: &[&Dev]) -> (PullReport, Vec<String>) {
     let source = Disks { disks: from.iter().map(|d| &d.fs).collect(), asked: Default::default() };
-    let name = |_: trs_sync_proto::ids::ShortId| "other".to_string();
+    let name = |_: seedwell_sync_proto::ids::ShortId| "other".to_string();
     let mut total = PullReport::default();
     loop {
         let r = to.core.pull(&source, &name, 64 << 20).unwrap();
@@ -283,7 +283,7 @@ fn needs_stored_with_other_patterns_are_worked_out_again_when_the_folder_opens()
     write_all(&pc.fs, "real.md", b"a skill").unwrap();
     pc.core.scan("").unwrap();
     let fs = MemFs::new();
-    let store = || Box::new(trs_sync::store_redb::RedbStore::open(&path, 5).unwrap());
+    let store = || Box::new(seedwell_sync::store_redb::RedbStore::open(&path, 5).unwrap());
     let mut mac = dev_with(2, store(), fs.clone(), true, &[]);
     send(&pc, &mut mac);
     assert_eq!(mac.core.need_totals().unwrap().0, 9, "all of it, without rules");
@@ -366,7 +366,7 @@ fn newly_ignored_files_stay_on_disk_and_are_no_longer_offered() {
 fn files_an_earlier_build_indexed_are_no_longer_offered_once_the_folder_opens() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("index.redb");
-    let store = || Box::new(trs_sync::store_redb::RedbStore::open(&path, 5).unwrap());
+    let store = || Box::new(seedwell_sync::store_redb::RedbStore::open(&path, 5).unwrap());
     let fs = MemFs::new();
     let mut pc = dev_with(1, store(), fs.clone(), false, &[]);
     write_all(&fs, ".seedwellignore", RULES).unwrap();
@@ -394,7 +394,7 @@ fn files_an_earlier_build_indexed_are_no_longer_offered_once_the_folder_opens() 
 fn a_changed_built_in_list_is_applied_to_an_index_an_earlier_build_left() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("index.redb");
-    let store = || Box::new(trs_sync::store_redb::RedbStore::open(&path, 5).unwrap());
+    let store = || Box::new(seedwell_sync::store_redb::RedbStore::open(&path, 5).unwrap());
     let earlier = || Ignore::from_identity("");
     assert!(!earlier().is_ignored("Thumbs.db", false));
     let fs = MemFs::new();
@@ -439,7 +439,7 @@ fn archived(fs: &MemFs) -> Vec<String> {
         let Ok(l) = fs.read_dir(&d) else { continue };
         for e in l.entries {
             let p = format!("{d}/{}", e.name);
-            if fs.lstat(&p).unwrap().is_some_and(|m| m.kind == trs_sync_proto::model::FileKind::Dir) {
+            if fs.lstat(&p).unwrap().is_some_and(|m| m.kind == seedwell_sync_proto::model::FileKind::Dir) {
                 stack.push(p);
             } else {
                 out.push(p);

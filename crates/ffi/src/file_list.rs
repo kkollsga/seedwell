@@ -13,7 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use trs_platform::file_manager;
+use seedwell_platform::file_manager;
 
 use crate::files::{priority_label, FileCheck, FileRefresh, FileRow, Tree};
 use crate::host::HostWindow;

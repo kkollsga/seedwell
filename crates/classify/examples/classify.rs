@@ -2,7 +2,7 @@
 //!
 //! Handy for debugging a misclassified release name.
 
-use trs_classify::{FileEntry, Input, classify};
+use seedwell_classify::{FileEntry, Input, classify};
 
 fn main() {
     let mut args = std::env::args().skip(1);

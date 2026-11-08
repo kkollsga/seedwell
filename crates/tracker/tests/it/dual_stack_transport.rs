@@ -23,12 +23,12 @@ use std::time::{Duration, Instant};
 use common::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use trs_tracker::gate::{GateConfig, GatedRequest, HostGate};
-use trs_tracker::http::{HttpConfig, HttpTransport};
-use trs_tracker::machine::SendKind;
-use trs_tracker::policy::DestinationPolicy;
-use trs_tracker::response::{AnnounceError, TransportError};
-use trs_tracker::*;
+use seedwell_tracker::gate::{GateConfig, GatedRequest, HostGate};
+use seedwell_tracker::http::{HttpConfig, HttpTransport};
+use seedwell_tracker::machine::SendKind;
+use seedwell_tracker::policy::DestinationPolicy;
+use seedwell_tracker::response::{AnnounceError, TransportError};
+use seedwell_tracker::*;
 
 const OK: u8 = 0;
 /// Accept, read the request, close without answering.
@@ -243,7 +243,7 @@ fn gated_url(url: &str, event: Option<Event>) -> GatedRequest {
         let first = gate.poll(now).remove(0);
         gate.finish(
             first.ticket(),
-            trs_tracker::gate::Outcome::Success {
+            seedwell_tracker::gate::Outcome::Success {
                 timing: clamp_timing(Some(900), None),
             },
             now,
@@ -704,7 +704,7 @@ fn v6_blackhole_with_interval_300_min_120_follows_the_300_s_interval() {
 // ---------------------------------------------------------------- UDP
 
 use tokio::net::UdpSocket;
-use trs_tracker::udp::{UdpConfig, UdpTransport};
+use seedwell_tracker::udp::{UdpConfig, UdpTransport};
 
 /// A BEP 15 mock. `answer_connect` / `answer_announce` select what it answers;
 /// every packet's action is logged.

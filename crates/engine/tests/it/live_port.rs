@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use common::*;
-use trs_engine::*;
+use seedwell_engine::*;
 
 fn at(port: u16) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], port))
@@ -93,7 +93,7 @@ async fn a_live_port_change_moves_tcp_and_utp_closes_the_old_port_and_waits_for_
         tokio::net::TcpStream::connect(at(old)).await.is_err().then_some(())
     })
     .await;
-    let probe = trs_utp::UtpSocket::bind("127.0.0.1:0".parse().unwrap(), trs_utp::Config::default()).await.unwrap();
+    let probe = seedwell_utp::UtpSocket::bind("127.0.0.1:0".parse().unwrap(), seedwell_utp::Config::default()).await.unwrap();
     let r = tokio::time::timeout(Duration::from_secs(4), probe.connect(at(old))).await;
     assert!(!matches!(r, Ok(Ok(_))), "nothing accepts uTP on the old port");
 
@@ -198,7 +198,7 @@ async fn the_dht_is_lent_for_public_topics() {
     let b = node(dht(router_addr)).await;
     move_to_free(&a).await;
     let topic = [0x5a; 20];
-    let topic = trs_dht::PublicInfoHash::new(topic, false).unwrap();
+    let topic = seedwell_dht::PublicInfoHash::new(topic, false).unwrap();
     let found = wait_for("the announced port is found", 60, || async {
         let dht_a = a.h.public_dht().await?;
         if let Ok(Ok(mut s)) = dht_a.announce(topic, 4242).await {
@@ -208,7 +208,7 @@ async fn the_dht_is_lent_for_public_topics() {
         let Ok(Ok(mut s)) = dht_b.get_peers(topic).await else { return None };
         let mut peers = Vec::new();
         while let Some(u) = s.next().await {
-            if let trs_dht::LookupUpdate::Peers(v) = u {
+            if let seedwell_dht::LookupUpdate::Peers(v) = u {
                 peers.extend(v);
             }
         }

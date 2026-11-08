@@ -1,7 +1,7 @@
 //! What the UI and the agent interface see: one snapshot of every folder and device.
 
-use trs_sync_proto::keys::Access;
-use trs_sync_proto::members::Role;
+use seedwell_sync_proto::keys::Access;
+use seedwell_sync_proto::members::Role;
 
 /// What a folder is doing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +37,21 @@ pub struct ReadOnlyState {
     pub held: bool,
 }
 
+/// What a Share dialog needs of one folder or channel ([`crate::SyncHandle::share_brief`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShareBrief {
+    /// Its name on this device.
+    pub name: String,
+    /// This device's role (`None`: not a member, or not yet).
+    pub role: Option<Role>,
+    /// The end of its sharing period (Unix seconds).
+    pub share_until: Option<u64>,
+    /// A channel, not a folder.
+    pub channel: bool,
+    /// A folder's chat, when it has one on this device.
+    pub channel_id: Option<String>,
+}
+
 /// One folder.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FolderStatus {
@@ -64,6 +79,9 @@ pub struct FolderStatus {
     pub need_bytes: u64,
     /// Bytes per second fetched (moving average).
     pub rate_in: u64,
+    /// While it syncs: the time left to fetch what it needs, seconds, from a steady rate ([`crate::eta`]). `None`
+    /// before the rate is measured, while nothing arrives, under ten seconds left, and when it does not sync.
+    pub eta_secs: Option<u64>,
     /// Bytes per second served.
     pub rate_out: u64,
     /// Devices connected for this folder.
@@ -109,7 +127,7 @@ pub struct FolderStatus {
     /// devices or change roles any more): it may be shared again from this device ([`crate::SyncHandle::reshare`]).
     pub reshare: bool,
     /// While it scans (`state` is `Scanning`): the phase and how far it is, for the app's words and ring (SPEC §7G.2).
-    pub scan: Option<trs_sync::scan::ScanProgress>,
+    pub scan: Option<seedwell_sync::scan::ScanProgress>,
 }
 
 /// A member of a folder or channel that has not been connected for a day or more (or never here).

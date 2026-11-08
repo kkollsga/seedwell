@@ -1,4 +1,4 @@
-# trs-engine
+# seedwell-engine
 
 The BitTorrent session engine of Seedwell: torrents, peers, picker, choker, rate limits, queue,
 power tiers, tracker/DHT/PEX/magnet integration, a persistence boundary and the control API.
@@ -21,22 +21,22 @@ EngineHandle ──Cmd──▶ Session (1 task) ──TrackerCmd──▶ track
 | `api` | Public data: `TorrentRow`, `Snapshot`, `TorrentDetail`, `EngineEvent`, options, errors |
 | `config` | `EngineConfig` (updatable at runtime), `TierTimings`, dev-build detection |
 | `persist` | `Store` trait, records, `Batch`, `MemStore`, the writer thread |
-| `state_store` | `StateStore`: the `Store` over `trs-state` (redb + `torrents/`, `placement/`, `downloads/`) |
+| `state_store` | `StateStore`: the `Store` over `seedwell-state` (redb + `torrents/`, `placement/`, `downloads/`) |
 | `host` | `Host`: the whole stack from a state directory (settings files, hot reload, engine) |
-| `config_map` | `trs_state::Config` to `EngineConfig`, and which settings need a restart |
+| `config_map` | `seedwell_state::Config` to `EngineConfig`, and which settings need a restart |
 | `policy` | `PolicyData` (rules + tracker profiles), the id table, `resolve` |
 | `organize` | Content detection, location planning (flat), Trash/archive chores |
 | `status` / `session/status.rs` | Organize by seed status: the four folders and the hourly check (SPEC 7A.3) |
 | `watch` | Watch folders: one task, one `stat` per folder per 2 s; baseline + backlog |
 | `choice` | Smart add (SPEC 7A.6): structure, preselection, library presence, reasons to ask |
 | `moveplan`, `session/moves` | Moving files after a location changed (SPEC 7A.5): planning, queue, exec task, crash recovery |
-| `portmap` | `trs-portmap` runner for the listen port |
+| `portmap` | `seedwell-portmap` runner for the listen port |
 | `session` | The session actor; `cold.rs` is the Cold-tier record (196 B); `add`, `policy_apply`, `settings`, `direct` are its parts |
 | `torrent` | The torrent actor: `startup` (load, resume check, recheck), `events`, `maintenance`, `magnet` (BEP 9), `pex` (BEP 11) |
 | `peer` | One connection: handshake, BEP 6/10 messages, direct storage reads/writes, buffer pool |
 | `net` | `PeerIo` (TCP or uTP behind one type), `Dial` (how an outgoing connection is tried), the set of peers known to speak uTP |
 | `picker`, `choker`, `queue`, `tier`, `ratelimit`, `budget`, `counters` | Pure logic with unit tests |
-| `tracker_driver` | One task for every torrent's trackers, exactly per the `trs-tracker` README |
+| `tracker_driver` | One task for every torrent's trackers, exactly per the `seedwell-tracker` README |
 | `chan` | Small bounded queue: an idle inbox owns no heap (tokio's mpsc allocates 64 slots eagerly), plain wakers instead of `Notify`, pollable by hand |
 
 ## Deviations from ENGINE.md
@@ -45,33 +45,33 @@ EngineHandle ──Cmd──▶ Session (1 task) ──TrackerCmd──▶ track
   sockets. What differs between the tiers is residency. A complete torrent's Hot state is a label
   that raises the peer cap; it holds the same data as Warm because a seeder needs no hashes or
   bitfield. An incomplete torrent is always Hot.
-* **Partial pieces are not persisted.** `trs-storage` keeps unverified blocks in memory, so resume
+* **Partial pieces are not persisted.** `seedwell-storage` keeps unverified blocks in memory, so resume
   data is the verified bitfield only.
 * The write path copies a block into the encoder instead of a vectored write.
 
 ## uTP and the shared UDP port
 
 `network.utp` (`EngineConfig::utp`, default on) binds one UDP socket on the listen port's number; it is a
-`trs_utp::UtpSocket`, so it speaks uTP (BEP 29, LEDBAT: seeding yields to the user's other traffic) and hands every
-datagram that is not uTP to the DHT (`trs_dht::spawn_shared`, driven from the socket's foreign-datagram channel, answers go out of
+`seedwell_utp::UtpSocket`, so it speaks uTP (BEP 29, LEDBAT: seeding yields to the user's other traffic) and hands every
+datagram that is not uTP to the DHT (`seedwell_dht::spawn_shared`, driven from the socket's foreign-datagram channel, answers go out of
 the same socket). Port mapping already maps TCP and UDP for that port. The DHT keeps its own socket only when `dht_bind` names
 another port, or when the UDP port could not be bound (then the engine runs TCP-only and says so on stderr).
 
 * **Incoming** uTP connections go through the same path as TCP ones: connection budget, handshake deadline, `PeerIo::Utp`.
   A handshake that is not BitTorrent (an encrypted one) is answered with a RESET on uTP and a FIN after draining on TCP.
-  `trs-utp`'s per-IP cap is raised to 256: a seeder of hundreds of torrents has one connection per torrent from a remote client.
+  `seedwell-utp`'s per-IP cap is raised to 256: a seeder of hundreds of torrents has one connection per torrent from a remote client.
 * **Outgoing** (`net::Dial`, libtorrent-style): a peer that is known to speak uTP (it connected to us over uTP, `ut_pex` flagged it
   `0x04`, or a uTP dial worked before; at most 2,048 remembered) is dialled uTP-first with a 5 s probe, TCP as the fallback; any other
   peer TCP-first, uTP as the fallback when TCP does not connect. `EngineConfig::outgoing_tcp = false` makes every dial uTP (uTP-only
   swarms, tests). Our own `ut_pex` messages carry the flag for uTP peers.
 * `PeerInfo::utp`, `Diagnostics::{utp_accepted, utp_dialed}` show what runs over uTP. Private torrents may use uTP (it is transport,
-  not discovery); the DHT guarantees of `trs-dht` are unchanged.
-* **Not shared: the UDP tracker transport.** `trs-tracker`'s `UdpTransport` binds its own ephemeral sockets and matches replies by
+  not discovery); the DHT guarantees of `seedwell-dht` are unchanged.
+* **Not shared: the UDP tracker transport.** `seedwell-tracker`'s `UdpTransport` binds its own ephemeral sockets and matches replies by
   transaction id. Nothing needs a well-known port there: the reply returns to the port the request left from, through the NAT mapping
   that request created. Sharing would save one socket and one task at the price of changing the tracker crate's transport API.
 * **Encryption (MSE)** is implemented (`network.encryption`, `EncryptionPolicy`): Transmission, qBittorrent and most clients prefer encrypted
   connections and try them first, over uTP first; against an engine that answers only plain handshakes every first contact failed
-  and fell back to TCP after a back-off of 20 s or more. `trs_wire::mse` has the primitives (768-bit Diffie-Hellman with a Montgomery
+  and fell back to TCP after a back-off of 20 s or more. `seedwell_wire::mse` has the primitives (768-bit Diffie-Hellman with a Montgomery
   multiplier, RC4 with the 1,024-byte discard); `mse.rs` runs the handshake on a socket, as responder and as initiator; `net::Rc4Io`
   puts RC4 on a TCP or uTP stream. `Prefer` (the default) answers an encrypted handshake, selects *plain* after it when the peer offers
   it (the stream is then as cheap as before) and dials encrypted first with a plain redial for peers that do not answer
@@ -114,7 +114,7 @@ Measured, same machine and hour (18:36 to 18:59), three Transmission 4.1.3 leech
 | Seeder | Upload mean | Upload peak (1 s) | CPU while serving | RSS peak while serving |
 |---|---|---|---|---|
 | Seedwell `bench_client`, defaults (uTP and encryption on; the leechers connect over uTP) | 97 MB/s | 132 MB/s | 93 % | 173 MB |
-| Seedwell, TCP only (`BENCH_TRS_NO_UTP=1`) | 122 MB/s | 249 MB/s | 14 % | 108 MB |
+| Seedwell, TCP only (`BENCH_SEEDWELL_NO_UTP=1`) | 122 MB/s | 249 MB/s | 14 % | 108 MB |
 | Transmission 4.1.3 | 152 MB/s | 482 MB/s | 38 % | 624 MB |
 | qBittorrent 5.2.3 | 113 MB/s (45 to 113 in three runs) | 246 MB/s | 43 % | 265 MB |
 
@@ -137,11 +137,11 @@ run reached 70 to 78 MB/s: the uTP driver sent 64 datagrams and read 64 datagram
 * **Idle torrent**: live heap is about 2.2 to 2.5 KiB per extra Cold torrent (`ColdTorrent` 216 B, `Entry` 224 B, one table slot 249 B at
   full load and up to twice that with slack, tracker hub 257 B per (torrent, tracker), counters 64 B, the rest small strings and the
   driver/hub tables). The footprint was several times that because of the allocator, and this is what was found (measured with
-  `TRS_BENCH_DIAG`, `heap -addresses`, `vmmap`; macOS 26, fast tier timers, add scenario = the harness, restart scenario = the same state
+  `SEEDWELL_BENCH_DIAG`, `heap -addresses`, `vmmap`; macOS 26, fast tier timers, add scenario = the harness, restart scenario = the same state
   directory started again, so the torrents load from the store instead of being added):
   * Start-up churn is what the allocator keeps: 100 MB of the 130 MB allocated while 200 torrents start are 256 KiB hash scratch
     buffers, then 4 KiB redb page buffers (every add commits), then grown tables. Peak live heap is 3.9 MB, footprint was 8 to 12 MB.
-  * **Kept: `trs_storage::MappedAlloc`** (global allocator of `trs-ffi` and the `seedwell` daemon): blocks of 128 KiB and more are
+  * **Kept: `seedwell_storage::MappedAlloc`** (global allocator of `seedwell-ffi` and the `seedwell` daemon): blocks of 128 KiB and more are
     an `mmap`, unmapped when freed. No new dependency. 3 MB less footprint at every N, and the footprint no longer depends on luck.
   * **Kept: follow-up trims.** `malloc_zone_pressure_relief` releases only memory that has been free for about 3 minutes (called
     every 10 s it released nothing for 150 s, then 3.4 of 10.9 MB). The session now trims 20 s after a burst and again 2.5, 5 and 7.5
@@ -185,7 +185,7 @@ run reached 70 to 78 MB/s: the uTP driver sent 64 datagrams and read 64 datagram
   edits) again. `TorrentRow::seed_goal_user` says which one a row has, `TorrentRow::seeded_secs` is the total seeding time
   (all stretches), `SeedGoal::describe()` / `then_phrase()` and `ChoicePreview::summary()` are the words every front end shows.
 * **Display title.** `ColdTorrent::title` / `TorrentRecord::title` hold the clean title ("Sintel (2010)") next to the category.
-  It is computed by `trs_classify::torrent_title` (file-aware; a single-file torrent takes its file's name when that says more)
+  It is computed by `seedwell_classify::torrent_title` (file-aware; a single-file torrent takes its file's name when that says more)
   when a torrent is planned (add, magnet metadata), again when its category changes (`titles.rs`: stored `.torrent` read off the
   actor), and once, a moment after start, for torrents stored without one. `TorrentRow::title` is empty until then;
   `TorrentRow::display_title()` falls back to the cleaned raw name.
@@ -216,12 +216,12 @@ call `TrackerHub::set_role` (wired).
 ## Placement: flat, optional status folders (SPEC 7A.3)
 
 `organize::plan` runs off the session actor (`spawn_blocking`) when a `.torrent` is added and when magnet metadata
-arrives. It classifies with `trs-classify` (info-dict `source` as the tracker hint), decides the category in effect
+arrives. It classifies with `seedwell-classify` (info-dict `source` as the tracker hint), decides the category in effect
 (`Other` while unsure), resolves the rule and picks the finished location (rule `finished_dir` > category override >
 app default). The category drives smart add, titles, icons and rules, **never a file name**: the torrent keeps its own
 layout (`organize::source_path`: `<save>/<torrent name>/<path>`, or `<save>/<name>` for one file) inside that
 location. Junk files get priority 0 when "skip junk" is on. Unfinished data is staged in `<incomplete_dir>/<info-hash>/`
-(or `<save>/.incomplete` without `incomplete_dir`) and moved with trs-storage's journaled `finalize`; the finished
+(or `<save>/.incomplete` without `incomplete_dir`) and moved with seedwell-storage's journaled `finalize`; the finished
 location never sees a half file. A name that is already taken by another file stops the finalize with "destination
 already exists" and touches nothing.
 
@@ -253,10 +253,10 @@ Two locations per download: **incomplete** (staging, `<root>/<info-hash>/`) and 
 (`EngineConfig::category_locations[Category::index()]`: `CategoryLocation { incomplete, finished: Option<PathBuf> }`,
 built from `[folders.categories.<name>]`). The finished precedence is rule `finished_dir` > category override > the
 download folder, all plain folders with the torrent's own layout below them. `Plan::stage_root` is decided at add time and **stored per torrent** (`ColdTorrent::stage_root`,
-`TorrentRecord::stage_path`, `trs-state` record v2), so changing the incomplete setting never silently changes where a
+`TorrentRecord::stage_path`, `seedwell-state` record v2), so changing the incomplete setting never silently changes where a
 running download's partial files are expected. Records from before keep following the configured folder.
 
-`engine::same_volume`, `volume_id`, `cross_volume_pairs(&Config) -> Vec<CrossVolume>` (re-exports of `trs_state::volume`)
+`engine::same_volume`, `volume_id`, `cross_volume_pairs(&Config) -> Vec<CrossVolume>` (re-exports of `seedwell_state::volume`)
 drive the Settings warning; they are a few `stat` calls, so the app can re-run them on every mount/unmount.
 
 ## Moving files (SPEC 7A.5)
@@ -284,7 +284,7 @@ dozen bytes each). Up to 3 jobs plan/run at once, but **at most one cross-volume
 
 | Case | What happens |
 |---|---|
-| Seeding, same volume | `trs-storage::relocate_prepare` renames file by file (`renamex_np(RENAME_EXCL)`, directories first, never overwriting) on the **torrent's own storage handle**; reads that meet a file in transit wait for the switch (ms). Then the session persists the record and the actor switches its layout. |
+| Seeding, same volume | `seedwell-storage::relocate_prepare` renames file by file (`renamex_np(RENAME_EXCL)`, directories first, never overwriting) on the **torrent's own storage handle**; reads that meet a file in transit wait for the switch (ms). Then the session persists the record and the actor switches its layout. |
 | Seeding, other volume | A temporary handle copies with `F_NOCACHE`, 4 MiB buffers, hashing **every piece against the torrent's hashes while copying**, `fsync`, rate-limited (`advanced.move_limit_mib`, default unlimited, `0`). **The actor keeps serving from the source (reads only)**; when everything verified, the session persists a record pointing at the copy, the actor switches its layout (`SwitchLocation`, ms), and only then the sources are deleted (`relocate_commit`). |
 | Downloading, incomplete location changes | The actor is stopped (peers dropped, resume data flushed), the partial files are relocated (`have` = verified pieces; holes stay holes), the record gets the new `stage_root`, and the torrent restarts and carries on. |
 | Downloading, only the finished location changes (`Retarget`) | Nothing is copied: the record and the placement change, a running actor switches layout, and `finalize` later moves into the new place. A staged torrent keeps the file names of its staged copies. |
@@ -295,7 +295,7 @@ destinations), refuses when the destination lacks `size + 1 GB` (`move_reserve_b
 torrent seeding from where it was (`MoveFailed`). Removing a moving torrent cancels the copy first. Under `cargo test` a
 destination inside the real home is refused (`guard::check_path`).
 
-Crash safety: every relocation is journaled in `<state dir>/moves/<info-hash>.journal` (the trs-storage relocate journal; see its
+Crash safety: every relocation is journaled in `<state dir>/moves/<info-hash>.journal` (the seedwell-storage relocate journal; see its
 README for the recovery matrix). At start-up torrents with a journal stay stopped until it is resolved: the journal's plan is compared
 with the record: record at the destination -> finish (delete sources), otherwise roll back. Empty folders left by an interrupted
 *finish* are not pruned (no old root is known after a crash).
@@ -337,7 +337,7 @@ engine's own default is **Never** so existing callers are unchanged, `config_map
 
 Triggers (`ChoiceReason`): `SeveralItems` (season pack, collection, discography, bundle of >= 3 books), `InLibrary`, `PlatformVariants`,
 `VeryLarge`, `NotEnoughSpace` (preselection larger than the free space at the destination or the incomplete location), `Unsure`
-(confidence below the threshold and `detection.ask_when_unsure`), `FolderAsk`, `Always`. Items come from `trs_classify::structure`;
+(confidence below the threshold and `detection.ask_when_unsure`), `FolderAsk`, `Always`. Items come from `seedwell_classify::structure`;
 `ChoicePreview { needs_choice, awaiting, reasons, structure, groups: Vec<ChoiceGroup{label, kind, items: Vec<ChoiceItem{label, identity,
 bytes, files, selected, library: LibraryState, quality, this_mac, platform}>}>, files: Vec<bool> (per torrent file index; BEP 47
 padding is `true`), selected_bytes, selected_files, total_bytes, free_bytes, destination, category, confidence, library_checked, rule_name, goal }`.
@@ -348,7 +348,7 @@ Groups end with "Other files" (kept whenever something is chosen) and "Extras" (
 **Library presence** (`choice.rs`, only for torrents with several items or platform variants; filesystem work off the actor, capped at
 400 folders, 512 entries each, 1.5 s): an item is *in the library* when every primary file (>= a tenth of its largest) exists at its
 place in the torrent's own layout below the save folder with the same size; *at another quality* when
-a file in that destination folder yields the same identity key (`trs_classify::library_identities`: same show+season+episode, same title
+a file in that destination folder yields the same identity key (`seedwell_classify::library_identities`: same show+season+episode, same title
 and year, same book) or, for albums, the folder holds at least half as many audio files. Software is matched by destination only.
 Preselection: everything the library does not have; software: only `this_mac_items()`; Extras unticked.
 
@@ -381,16 +381,16 @@ Vec<PathBuf>` lists it (sorted, at most 1,000) so the app can offer "Add 5 exist
 `add_torrent_path` for the accepted ones. Without a persisted value (an engine used without `Host`) the baseline is the moment the folder
 first appears in the process. Per folder: mode `auto` (add; ask when the confidence is below the threshold and `ask_when_unsure`) or `ask`
 (`EngineEvent::AddRequest` with an `AddPreview`; the app answers with `add_torrent_path`), a forced category and rule,
-and the after-add action (Trash = the system's Trash through `trs_platform::fs::move_to_trash`: on macOS the system's own
+and the after-add action (Trash = the system's Trash through `seedwell_platform::fs::move_to_trash`: on macOS the system's own
 Trash call, which keeps a file in its own volume's Trash with Put Back, the Recycle Bin on Windows; Archive, Leave, Delete). Invalid files are
 reported once (`WatchError`) and left alone; duplicates give a `Duplicate` event.
 
 ## Direct downloads (SPEC 7D)
 
-`EngineHandle::add_download` creates a `trs-http` task. They share the "active downloads" slots with torrents (one queue
+`EngineHandle::add_download` creates a `seedwell-http` task. They share the "active downloads" slots with torrents (one queue
 order), the global download limiter (`DownGate: RateGate` over the same `RateLimiter`) and the control API. Rows have
 `kind: RowKind::Direct`, state `Completed` when done, never count as Sharing and have no tier. A record per download is
-kept in `downloads/<id>.rec` (the resumable bytes are trs-http's `.part` and sidecar); progress is written every 10 s while
+kept in `downloads/<id>.rec` (the resumable bytes are seedwell-http's `.part` and sidecar); progress is written every 10 s while
 running and at shutdown, which pauses every transfer losslessly. A finished file goes to its category's finished folder when the category has one; a link that serves a `.torrent` becomes a torrent. The finished list keeps the latest 50.
 
 ## Listen port taken
@@ -410,7 +410,7 @@ mapping is redone and every tracker hears the new port with its next regular ann
 `EngineHandle::reachability()` = `Reachability { port, mapping_enabled, portmap, incoming, last_incoming_at }`: whether peers on
 the Internet can reach the port, without an outside service. `incoming` counts TCP connections from public IPv4 addresses since
 the port was opened (refused ones too; a port change starts over); `portmap` is the router's last answer, `None` while it is
-asked and with mapping off. `trs_control::reachability_dto` turns it into a state and a sentence.
+asked and with mapping off. `seedwell_control::reachability_dto` turns it into a state and a sentence.
 
 ## Settings at runtime
 
@@ -429,7 +429,7 @@ random first-launch port back to `config.toml`, and runs one `spawn_watcher` pol
 
 `EngineHandle::network_path_changed(satisfied)`, `system_will_sleep()` and `system_did_wake()` (the app feeds them from
 `NWPathMonitor` and the workspace notifications; a wall-clock jump the monotonic clock did not see counts as a wake, which
-covers the headless daemon) reach the tracker driver, which owns the decision (`trs_tracker::outage`, SPEC 7C.4c). Its
+covers the headless daemon) reach the tracker driver, which owns the decision (`seedwell_tracker::outage`, SPEC 7C.4c). Its
 verdict is published to the rest of the engine in `netstate::NetFlags` (relaxed atomics): torrent actors stop dialling while
 `held()`, the DHT is paused (`DhtHandle::set_paused`) and, at recovery, resumed with a fresh bootstrap backoff
 (`network_restored`), torrents with nobody connected forget their dial backoff (`TorrentMsg::NetRestored`) and the port mapper
@@ -439,13 +439,13 @@ one relaxed store while online, a debounced probe request while an outage is dec
 
 ## Port mapping
 
-With `network.upnp` / `network.natpmp` the listen port is mapped TCP + UDP by `trs-portmap` (PCP and NAT-PMP, UPnP).
+With `network.upnp` / `network.natpmp` the listen port is mapped TCP + UDP by `seedwell-portmap` (PCP and NAT-PMP, UPnP).
 `network_changed()` is forwarded; at shutdown the mappings are deleted concurrently with the tracker `stopped` wait
 (bounded by the portmap crate's own 3 s). `EngineEvent::PortMap(PortMapStatus)` reports the method, external address,
 CGNAT and the external ports. Trackers are told the **external TCP port** when the router granted another one than the listen port:
 the tracker driver holds its commands (at most 5 s) while a mapper is starting, so the torrents loaded at start-up are registered
 with the mapped port; torrents added later use it too. A mapping that changes while torrents already announced is not re-announced
-(the tracker hub has no per-torrent port setter; a `TrackerHub::set_port` in `trs-tracker` would close that gap).
+(the tracker hub has no per-torrent port setter; a `TrackerHub::set_port` in `seedwell-tracker` would close that gap).
 
 ## Counters and the tracker
 
@@ -464,13 +464,13 @@ generated once per process.
   real min-interval gate. `remove(ids, delete_files)` replies when the torrents are stopped and the files are deleted.
 * `set_file_priorities` updates `wanted_bytes`; a Cold torrent's `torrent_detail` shows its real file priorities.
 * Pausing remembers the connected peers (bounded) so that resume redials them at once.
-* **Real-home guard** (`guard.rs`): in a cargo test binary (or with `TRS_FORBID_REAL_HOME=1`, which a test must set on child
+* **Real-home guard** (`guard.rs`): in a cargo test binary (or with `SEEDWELL_FORBID_REAL_HOME=1`, which a test must set on child
   processes it starts) the engine refuses to start with, or hot-reload into, a download/incomplete/watch/archive/Trash/library
-  folder inside `$HOME`. Set `HOME` to a temp dir or use explicit folders; `TRS_ALLOW_REAL_HOME=1` disables it.
+  folder inside `$HOME`. Set `HOME` to a temp dir or use explicit folders; `SEEDWELL_ALLOW_REAL_HOME=1` disables it.
 
 ## Known limits and open items
 
-* `StateStore` cannot keep per-file Low/High priorities (trs-state stores only the skipped-files bitset), the queue position
+* `StateStore` cannot keep per-file Low/High priorities (seedwell-state stores only the skipped-files bitset), the queue position
   (a side file `torrent-extra.bin`, which also holds last activity and error start), or partial pieces; see `state_store.rs` for the field-by-field mapping.
 * Direct downloads left in `.incomplete` without a record (the record was lost) are not adopted.
 * "On battery" handling needs power status from the app and is not implemented here.
@@ -478,14 +478,14 @@ generated once per process.
 
 ## Dependencies
 
-`trs-*` workspace crates (`trs-state` for the store adapter and settings types, `trs-classify`, `trs-http`, `trs-portmap`);
-`trs-utp` (uTP on the shared UDP socket); `tokio` (rt, net, time, sync, macros, io-util, fs) for sockets and actors;
-`bytes` for the zero-copy receive buffers `trs-wire` slices; `getrandom` for the tracker `key` and
+`seedwell-*` workspace crates (`seedwell-state` for the store adapter and settings types, `seedwell-classify`, `seedwell-http`, `seedwell-portmap`);
+`seedwell-utp` (uTP on the shared UDP socket); `tokio` (rt, net, time, sync, macros, io-util, fs) for sockets and actors;
+`bytes` for the zero-copy receive buffers `seedwell-wire` slices; `getrandom` for the tracker `key` and
 RNG seeds. Dev: `tempfile`, `libc` (peak RSS in the network test), tokio `signal` (the `bench_client` example).
 
 ## Tests
 
-`cargo test -p trs-engine` runs unit tests (picker, choker, rate limiter, tiers, queue, counters,
+`cargo test -p seedwell-engine` runs unit tests (picker, choker, rate limiter, tiers, queue, counters,
 store, PEX log, chan, config mapping, schedule, policy, organizer helpers, watch scanner) and integration tests on
 loopback (`tests/`): swarm, skipped files, pause/resume with limits, restart and resume, missing files, a corrupt peer,
 magnets, private torrents, PEX, tier transitions, queue, staging, tracker audit, scale, `seeding` (raw-wire leechers in the manner of Transmission:
@@ -505,6 +505,6 @@ at every journal step on both methods, category change, incomplete/finished loca
 queue of 60 torrents, remove and cancel during a copy). `watch` also covers the baseline and the backlog.
 Tracker tests use `DestinationPolicy::LOCAL` (the production default refuses loopback trackers).
 
-`cargo build --release -p trs-engine --example bench_client` builds the headless client of the comparison harness
+`cargo build --release -p seedwell-engine --example bench_client` builds the headless client of the comparison harness
 (`bench/README.md`, "Seedwell adapter binary"). The Debian download is
-`#[ignore]`: `cargo test -p trs-engine --test network --release -- --ignored --nocapture`.
+`#[ignore]`: `cargo test -p seedwell-engine --test network --release -- --ignored --nocapture`.

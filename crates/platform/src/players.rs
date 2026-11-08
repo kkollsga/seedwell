@@ -1,6 +1,6 @@
 //! Video players on this computer (SPEC §7F.3): which known players are installed, whether each can run here, and how
 //! one is handed a stream URL or a file. Which one Play uses (Automatic's order, the setting) and every word about it
-//! are trs-ffi's; this module only finds the apps and says how each is started.
+//! are seedwell-ffi's; this module only finds the apps and says how each is started.
 //!
 //! - [`known`]: this system's players, in the order of "Automatic".
 //! - [`installed`]: those found (the Mac: LaunchServices, then the Applications folders; Windows: App Paths, the

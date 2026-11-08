@@ -5,11 +5,11 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use trs_sync_net::config::Settings;
-use trs_sync_net::secrets::FileSecrets;
-use trs_sync_net::{Options, SyncHandle};
-use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::members::Role;
+use seedwell_sync_net::config::Settings;
+use seedwell_sync_net::secrets::FileSecrets;
+use seedwell_sync_net::{Options, SyncHandle};
+use seedwell_sync_proto::ids::FolderId;
+use seedwell_sync_proto::members::Role;
 
 fn opts(state: &Path, forbidden_root: Option<PathBuf>) -> Options {
     let secrets = Arc::new(FileSecrets::new(state.join("secrets")));

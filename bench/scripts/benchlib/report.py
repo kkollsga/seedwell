@@ -56,12 +56,12 @@ def write_report(campaign):
     hot = [r for r in ok if r["kind"] == "hot"]
     net = [r for r in res if r["kind"] == "netcheck"]
     bad = [r for r in res if r.get("status") not in ("ok", None) and r["kind"] != "netcheck"]
-    clients = sorted({r["client"] for r in ok}, key=lambda c: ["transmission", "qbittorrent", "torrentrs"].index(c) if c in ("transmission", "qbittorrent", "torrentrs") else 9)
+    clients = sorted({r["client"] for r in ok}, key=lambda c: ["transmission", "qbittorrent", "seedwell"].index(c) if c in ("transmission", "qbittorrent", "seedwell") else 9)
     versions = {r["client"]: r["version"] for r in ok}
     mi = machine_info()
     L = []
     w = L.append
-    w(f"# TorrentRS baseline benchmark, campaign {campaign}\n")
+    w(f"# Seedwell baseline benchmark, campaign {campaign}\n")
     w("Median of runs with (min–max) in parentheses. All numbers are produced by `bench/scripts/bench.py`; "
       "raw per-second samples are in `bench/runs/csv/` (gitignored), run records in `bench/runs/results.jsonl`.\n")
     w("## Machine and conditions\n")
@@ -237,8 +237,8 @@ def write_report(campaign):
         if c and c not in cmds:
             cmds.append(c)
     w("```sh\n" + "\n".join(cmds) + "\n```\n")
-    trs = [r for r in ok if r["client"] == "torrentrs"]
-    w(f"Environment: TorrentRS = `$TRS_BENCH_BIN` ({trs[0]['version'] if trs else 'not run'}); qBittorrent binary "
+    seedwell = [r for r in ok if r["client"] == "seedwell"]
+    w(f"Environment: Seedwell = `$SEEDWELL_BENCH_BIN` ({seedwell[0]['version'] if seedwell else 'not run'}); qBittorrent binary "
       "`$QBT` (qBittorrent 5.2.3); Transmission from Homebrew `transmission-cli`.\n")
     notes = BENCH / "reports" / f"notes-{campaign}.md"
     if notes.exists():

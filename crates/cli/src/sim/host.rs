@@ -234,7 +234,7 @@ pub async fn run_host(dir: &Path, app_socket: &Path) -> i32 {
             return 1;
         }
     };
-    let mut listener = match trs_control::transport::bind_in_private_dir(&sock_path).await {
+    let mut listener = match seedwell_control::transport::bind_in_private_dir(&sock_path).await {
         Ok(b) => b.listener,
         Err(e) => {
             eprintln!("sim host: cannot bind {}: {e}", sock_path.display());
@@ -250,7 +250,7 @@ pub async fn run_host(dir: &Path, app_socket: &Path) -> i32 {
         let mut misses = 0;
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            if trs_control::transport::connect(&app).await.is_ok() {
+            if seedwell_control::transport::connect(&app).await.is_ok() {
                 misses = 0;
             } else {
                 misses += 1;

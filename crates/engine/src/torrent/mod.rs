@@ -4,7 +4,7 @@
 //! * its **peer tasks** through bounded command queues (`try_send`, never awaited) and one shared
 //!   event queue (peers await it, which gives back-pressure),
 //! * the **session** through [`TorrentReport`]s, and
-//! * **storage** through the `trs-storage` handle.
+//! * **storage** through the `seedwell-storage` handle.
 //!
 //! Files: `startup` (load, validate, recheck), `events` (peer events, requests), `maintenance`
 //! (ticks, choking, tiers, resume), `magnet` (BEP 9), `pex` (BEP 11).
@@ -25,8 +25,8 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use tokio::sync::oneshot;
-use trs_storage::{Layout, PieceOutcome};
-use trs_wire::{Bitfield, BlockRequest, Handshake, Reserved};
+use seedwell_storage::{Layout, PieceOutcome};
+use seedwell_wire::{Bitfield, BlockRequest, Handshake, Reserved};
 
 use crate::api::{FileInfo, PeerInfo, Priority, TorrentId};
 use crate::budget::ConnPermit;
@@ -92,7 +92,7 @@ pub(crate) enum TorrentCmd {
     SwitchLocation(Box<Switch>),
     /// The storage handle of the running torrent (a same-volume move uses it, so reads that
     /// meet a file in transit wait for the switch instead of failing).
-    Handle(oneshot::Sender<Option<trs_storage::TorrentHandle>>),
+    Handle(oneshot::Sender<Option<seedwell_storage::TorrentHandle>>),
     /// Open a stream of a file (SPEC 7F): answers with the source the streaming server reads from.
     StreamOpen { file: usize, reply: oneshot::Sender<Result<crate::stream_source::StreamParts, crate::stream_source::OpenError>> },
     /// A stream parked a new picture of the pieces it needs (coalesced; see `StreamBus`).
@@ -308,8 +308,10 @@ impl PeerPool {
         self.known.len()
     }
 
-    /// Add a candidate; returns whether it was new and acceptable.
+    /// Add a candidate; returns whether it was new and acceptable. Kept in its canonical form
+    /// ([`crate::net::canonical`]), the form peers and the in-use set use.
     pub(crate) fn add(&mut self, a: SocketAddr) -> bool {
+        let a = crate::net::canonical(a);
         let ip = a.ip();
         if a.port() == 0 || ip.is_multicast() || ip.is_unspecified() {
             return false;
@@ -480,6 +482,8 @@ pub(crate) struct PeerEntry {
     pub pex_seq: u64,
     pub next_pex: Instant,
     pub no_refill_until: Option<Instant>,
+    /// A change of our `upload_only` is still to be told to this peer (its command queue was full).
+    pub readvertise_owed: bool,
 }
 
 /// Things that exist once the metadata is known.
@@ -596,6 +600,7 @@ impl Torrent {
             version: cfg.client_version.clone(),
             metadata_size: AtomicU32::new(0),
             complete: AtomicBool::new(false),
+            upload_only: AtomicBool::new(false),
             hold_uploads: AtomicBool::new(false),
             connect_timeout: cfg.connect_timeout,
             handshake_timeout: cfg.handshake_timeout,
@@ -946,5 +951,39 @@ mod rate_tests {
             ticks += 1;
             assert!(ticks < 60, "rate never reached zero");
         }
+    }
+}
+
+#[cfg(test)]
+mod pool_tests {
+    use super::PeerPool;
+    use std::collections::HashSet;
+    use std::net::SocketAddr;
+    use std::time::Instant;
+
+    /// An IPv4 peer that reached a dual-stack socket is reported IPv4-mapped (`::ffff:a.b.c.d`), while
+    /// trackers and PEX hand out `a.b.c.d`. Kept in both forms, the pool held one address twice: the
+    /// in-use check missed a connected peer (dialled again, a duplicate one side closes) and a seed marked
+    /// in one form was dialled in the other while upload-only.
+    #[test]
+    fn an_ipv4_mapped_address_is_the_same_candidate_as_its_ipv4_form() {
+        let mapped: SocketAddr = "[::ffff:203.0.113.5]:6881".parse().unwrap();
+        let v4: SocketAddr = "203.0.113.5:6881".parse().unwrap();
+        let now = Instant::now();
+        let mut pool = PeerPool::new();
+        assert!(pool.add(mapped));
+        assert!(!pool.add(v4), "the same address twice");
+        assert_eq!(pool.len(), 1);
+
+        // Connected (the in-use set holds the IPv4 form, as accepted connections report it): not dialled.
+        let in_use: HashSet<SocketAddr> = [v4].into();
+        assert_eq!(pool.next(now, &in_use, &HashSet::new(), false), None);
+
+        // Marked as a seed: not dialled while we are upload-only.
+        pool.mark_seed(v4);
+        assert_eq!(pool.seed_count(), 1);
+        assert_eq!(pool.next(now, &HashSet::new(), &HashSet::new(), true), None);
+        pool.release_seeds();
+        assert_eq!(pool.next(now, &HashSet::new(), &HashSet::new(), false), Some(v4));
     }
 }

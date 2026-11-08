@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use adversarial_support::*;
 use proptest::prelude::*;
-use trs_tracker::gate::*;
-use trs_tracker::machine::SendKind;
-use trs_tracker::{
+use seedwell_tracker::gate::*;
+use seedwell_tracker::machine::SendKind;
+use seedwell_tracker::{
     AnnounceParams, Event, Millis, RequestId, TorrentEvent, TrackerUrl, clamp_timing,
 };
 
@@ -37,7 +37,7 @@ fn params(n: u32, ev: Option<Event>) -> AnnounceParams {
     }
 }
 
-fn timing() -> trs_tracker::Timing {
+fn timing() -> seedwell_tracker::Timing {
     clamp_timing(Some(1800), None)
 }
 
@@ -1012,12 +1012,12 @@ fn unclean_restart_with_many_torrents_waits_for_each_persisted_min_interval() {
 /// the tracker's interval: with `interval = 2 h` a scrape is allowed every 30 min.
 #[test]
 fn bug_scrape_is_allowed_more_often_than_the_announce_interval() {
-    let mut hub = trs_tracker::hub::TrackerHub::new(
+    let mut hub = seedwell_tracker::hub::TrackerHub::new(
         GateConfig {
             initial_tokens: 3,
             ..GateConfig::default()
         },
-        trs_tracker::MemoryStore::new(),
+        seedwell_tracker::MemoryStore::new(),
         1,
     );
     hub.add_torrent(spec(1, &[&["http://s.test/announce?pk=1"]]), Millis(0))

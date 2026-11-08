@@ -1,6 +1,6 @@
 //! Real-network conformance, `#[ignore]`d by default.
 //!
-//! `cargo test -p trs-tracker --test network -- --ignored --nocapture`
+//! `cargo test -p seedwell-tracker --test network -- --ignored --nocapture`
 //!
 //! Announces to Debian's PUBLIC tracker for the current Debian netinst
 //! info-hash: ONE `started` and ONE `stopped`, nothing else (be polite). If the
@@ -14,12 +14,12 @@ use std::time::{Duration, Instant};
 
 use sha1::{Digest, Sha1};
 use tokio::sync::mpsc;
-use trs_tracker::gate::{GateConfig, Ticket};
-use trs_tracker::http::HttpTransport;
-use trs_tracker::hub::{TorrentSpec, TrackerHub};
-use trs_tracker::response::{AnnounceError, AnnounceResponse};
-use trs_tracker::udp::{UdpConfig, UdpTransport};
-use trs_tracker::*;
+use seedwell_tracker::gate::{GateConfig, Ticket};
+use seedwell_tracker::http::HttpTransport;
+use seedwell_tracker::hub::{TorrentSpec, TrackerHub};
+use seedwell_tracker::response::{AnnounceError, AnnounceResponse};
+use seedwell_tracker::udp::{UdpConfig, UdpTransport};
+use seedwell_tracker::*;
 
 const LISTING: &str = "https://cdimage.debian.org/debian-cd/current/amd64/bt-cd/";
 
@@ -56,12 +56,12 @@ fn load_debian_netinst() -> Meta {
         .to_owned();
     println!("torrent: {name}");
     let data = curl(&format!("{LISTING}{name}"));
-    let info = trs_bencode::raw_dict_get(&data, b"info")
+    let info = seedwell_bencode::raw_dict_get(&data, b"info")
         .unwrap()
         .expect("info dict");
     let info_hash: [u8; 20] = Sha1::digest(info).into();
-    let v = trs_bencode::decode(&data).unwrap();
-    let size = trs_bencode::decode(info)
+    let v = seedwell_bencode::decode(&data).unwrap();
+    let size = seedwell_bencode::decode(info)
         .unwrap()
         .get(b"length")
         .and_then(|l| l.as_int())
@@ -89,9 +89,9 @@ fn load_debian_netinst() -> Meta {
                 u.host().ends_with(".debian.org")
                     && matches!(
                         u.scheme(),
-                        trs_tracker::url::Scheme::Http
-                            | trs_tracker::url::Scheme::Https
-                            | trs_tracker::url::Scheme::Udp
+                        seedwell_tracker::url::Scheme::Http
+                            | seedwell_tracker::url::Scheme::Https
+                            | seedwell_tracker::url::Scheme::Udp
                     )
             })
         })
@@ -174,7 +174,7 @@ async fn debian_netinst_started_then_stopped() {
             let (http, udp, tx) = (http.clone(), udp.clone(), tx.clone());
             tokio::spawn(async move {
                 let ticket = req.ticket();
-                if req.url().scheme() == trs_tracker::url::Scheme::Udp {
+                if req.url().scheme() == seedwell_tracker::url::Scheme::Udp {
                     let r = udp.announce(&req).await;
                     let _ = tx.send(Done::Udp(ticket, r));
                 } else {

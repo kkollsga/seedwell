@@ -1,6 +1,6 @@
 //! Decode throughput for `piece` messages (plain harness, no criterion dependency).
 //!
-//! Run: `cargo bench -p trs-wire`. Numbers are wire bytes per second through the
+//! Run: `cargo bench -p seedwell-wire`. Numbers are wire bytes per second through the
 //! decoder; the decoder is zero-copy, so this measures header parsing + framing, not
 //! memcpy. A memcpy and a SHA-1 line are printed for scale: those, not framing, are
 //! what bounds a real download.
@@ -9,7 +9,7 @@ use bytes::BytesMut;
 use sha1::{Digest, Sha1};
 use std::hint::black_box;
 use std::time::{Duration, Instant};
-use trs_wire::{Decoder, Limits, Message, piece_header};
+use seedwell_wire::{Decoder, Limits, Message, piece_header};
 
 const BLOCK: usize = 16 * 1024;
 const FRAMES: usize = 4096; // 64 MiB of blocks
@@ -49,7 +49,7 @@ fn main() {
     let dec = Decoder::new(Limits::default());
 
     println!(
-        "trs-wire decode benchmark: {} frames x {} B blocks = {} MiB",
+        "seedwell-wire decode benchmark: {} frames x {} B blocks = {} MiB",
         FRAMES,
         BLOCK,
         wire >> 20

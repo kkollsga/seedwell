@@ -1,5 +1,5 @@
 [package]
-name = "trs-buildsig"
+name = "seedwell-buildsig"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,6 +1,6 @@
 import Foundation
 
-/// Human-readable text for sizes, rates and times. The wording is the core's (`trs_control::display`, the same in
+/// Human-readable text for sizes, rates and times. The wording is the core's (`seedwell_control::display`, the same in
 /// every host app); this only forwards, and keeps the time of day, which follows the user's own clock style.
 enum Fmt {
     static func bytes(_ n: UInt64) -> String { fmtBytes(n: n) }

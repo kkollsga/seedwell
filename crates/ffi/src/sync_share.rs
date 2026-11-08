@@ -14,24 +14,34 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use trs_platform::computer;
+use seedwell_platform::computer;
 
 use crate::devices_text::FollowLine;
 use crate::read_only_text::ReadOnlyLine;
 use crate::library::{local_day, LocalClock};
-use crate::sync::{SyncChannel, SyncInvite, SyncRole};
+use crate::sync::{SyncInvite, SyncRole};
 use crate::sync_text::{
     role, sync_active_links, sync_can_share, sync_invite_detail, sync_invite_line, sync_link_limits, sync_role_note, sync_share_day_choices,
     sync_share_new_note, sync_share_roles, sync_share_summary, sync_share_use_choices, sync_sharing_countdown, sync_sharing_extend_choices,
-    sync_sharing_line, SyncChoice,
+    sync_sharing_extended, sync_sharing_line, SyncChoice,
 };
 use crate::types::CoreError;
 use crate::Core;
 
+/// The Share dialog's form of folder or channel `id` while it opens: the settings a link starts with, nothing read
+/// (pure). The host shows the dialog as opening with it and reads [`Core::sync_share_form`] off its UI thread
+/// meanwhile.
+#[uniffi::export]
+pub fn sync_share_form_opening(id: String) -> SyncShareForm {
+    form(id, None)
+}
+
 /// "Link copied" stays this long after Copy Link.
 const COPIED_MS: u32 = 3_000;
-/// An open dialog with a sharing period asks again this often (its countdown).
-const COUNTDOWN_MS: u32 = 60_000;
+/// An open dialog of a synced folder or channel asks again this often: its sharing period's countdown, and what changed
+/// on another device or in another window meanwhile (the folder removed, this computer's role, Read only or On all my
+/// devices switched), which nothing in the dialog itself would redraw.
+const REFRESH_MS: u32 = 60_000;
 
 /// What is chosen in the Share dialog. The host keeps it as a value and edits the plain fields itself.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -164,7 +174,9 @@ pub struct SyncShareWindowModel {
     pub copy_help: String,
     pub copied_title: String,
     pub copied_ms: u32,
-    /// Ask for the model again after this long (the countdown); `None`: only after a change.
+    /// Read the links and ask for the model again after this long, while the dialog is open (the countdown, changes made
+    /// elsewhere); `None` (a folder not synced yet, or gone): only after a change in the dialog. Off the UI thread, and
+    /// drawn only when it differs.
     pub refresh_ms: Option<u32>,
 }
 
@@ -176,14 +188,22 @@ pub struct SyncShareCopied {
     pub form: SyncShareForm,
 }
 
-/// What is shared.
-#[derive(Clone)]
-struct Target {
-    name: String,
-    role: SyncRole,
-    share_until_s: Option<u64>,
-    is_channel: bool,
-    channel_id: Option<String>,
+/// What is shared, as the dialog shows it ([`crate::sync::SyncBackend::share_target`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShareTarget {
+    pub(crate) name: String,
+    pub(crate) role: SyncRole,
+    pub(crate) share_until_s: Option<u64>,
+    pub(crate) is_channel: bool,
+    pub(crate) channel_id: Option<String>,
+}
+
+/// A channel a folder's link may join too, as the dialog names it ([`crate::sync::SyncBackend::share_channels`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShareChannel {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) role: SyncRole,
 }
 
 fn form(id: String, new_path: Option<String>) -> SyncShareForm {
@@ -202,12 +222,12 @@ fn form(id: String, new_path: Option<String>) -> SyncShareForm {
 }
 
 /// The channels a folder's link can join (this computer may share them).
-fn chat_choices(channels: &[SyncChannel]) -> Vec<&SyncChannel> {
+fn chat_choices(channels: &[ShareChannel]) -> Vec<&ShareChannel> {
     channels.iter().filter(|c| sync_can_share(c.role)).collect()
 }
 
 /// The channel the next link joins too, by name.
-fn chat_name(f: &SyncShareForm, t: &Target, channels: &[SyncChannel]) -> Option<String> {
+fn chat_name(f: &SyncShareForm, t: &ShareTarget, channels: &[ShareChannel]) -> Option<String> {
     if !f.with_chat || t.is_channel {
         return None;
     }
@@ -221,8 +241,8 @@ fn setting(label: &str, help: &str, on: bool, choices: Vec<SyncChoice>, value: u
 #[allow(clippy::too_many_arguments)]
 fn window(
     f: &SyncShareForm,
-    t: Option<&Target>,
-    channels: &[SyncChannel],
+    t: Option<&ShareTarget>,
+    channels: &[ShareChannel],
     invites: Vec<SyncInvite>,
     now_s: u64,
     clock: &dyn LocalClock,
@@ -259,7 +279,7 @@ fn window(
         title: format!("Share “{}”", t.map_or("Folder", |t| t.name.as_str())),
         gone: t.is_none().then(|| concat!("This is no longer on this ", computer!(), ".").into()),
         refusal: (t.is_some() && !can_share).then(|| "Only the owner and admins can share it. Ask one of them for a link.".into()),
-        new_note: f.new_path.as_deref().map(|p| sync_share_new_note(trs_platform::dirs::shown(Path::new(p)))),
+        new_note: f.new_path.as_deref().map(|p| sync_share_new_note(seedwell_platform::dirs::shown(Path::new(p)))),
         roles: sync_share_roles(t.map_or(SyncRole::ReadOnly, |t| t.role)).into_iter().map(|r| SyncShareRoleChoice { role: r, title: role(r).into() }).collect(),
         role: f.role,
         role_help: sync_role_note(f.role),
@@ -309,23 +329,18 @@ fn window(
         copy_help: "Make a link with these settings and copy it".into(),
         copied_title: "Link copied".into(),
         copied_ms: COPIED_MS,
-        refresh_ms: t.and_then(|t| t.share_until_s).map(|_| COUNTDOWN_MS),
+        refresh_ms: t.filter(|_| !new).map(|_| REFRESH_MS),
     }
 }
 
 impl Core {
-    fn share_target(&self, f: &SyncShareForm) -> Option<Target> {
+    fn share_target(&self, f: &SyncShareForm) -> Option<ShareTarget> {
         if let Some(p) = &f.new_path {
             let name = Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            return Some(Target { name, role: SyncRole::Owner, share_until_s: None, is_channel: false, channel_id: None });
+            return Some(ShareTarget { name, role: SyncRole::Owner, share_until_s: None, is_channel: false, channel_id: None });
         }
-        if let Some(x) = self.sync_snapshot().folders.into_iter().find(|x| x.id == f.id) {
-            return Some(Target { name: x.name, role: x.role, share_until_s: x.share_until_s, is_channel: false, channel_id: x.channel_id });
-        }
-        self.chat_channels()
-            .into_iter()
-            .find(|c| c.id == f.id)
-            .map(|c| Target { name: c.name, role: c.role, share_until_s: c.share_until_s, is_channel: true, channel_id: None })
+        // That one folder or channel alone: never the status of every folder (the dialog is drawn on the UI thread).
+        self.backend.sync().share_target(&f.id)
     }
 }
 
@@ -339,7 +354,7 @@ impl Core {
         if !sync_can_share(t.role) {
             return Err(CoreError::Failed { message: "Only the owner and admins can share it. Ask one of them for a link.".into() });
         }
-        let channels = self.chat_channels();
+        let channels = self.backend.sync().share_channels();
         let name = chat_name(&form, &t, &channels);
         let mut form = form;
         if let Some(path) = form.new_path.take() {
@@ -359,6 +374,14 @@ impl Core {
         }
         let invite = self.sync_create_invite(form.id.clone(), form.role, limits.uses, limits.link_days, channel)?;
         Ok(SyncShareCopied { invite, form })
+    }
+
+    /// The Share dialog's Extend: the sharing period of folder or channel `id` ends `days` later than it does now (or
+    /// `days` from now once it ended; without a period, one of `days` starts now). Owners only; applies at once, for
+    /// every device. Slow (it saves): off the main thread.
+    pub fn sync_share_extend(&self, id: String, days: u32, now_unix_s: u64) -> Result<(), CoreError> {
+        let until = self.backend.sync().share_target(&id).and_then(|t| t.share_until_s);
+        self.sync_set_share_until(id, sync_sharing_extended(until, days, now_unix_s))
     }
 
     /// The Share dialog's "On all my devices" switched (`on`): applied at once. Slow: off the main thread. On failure
@@ -401,7 +424,7 @@ impl Core {
         }
         if let Some(t) = self.share_target(&f)
             && let Some(c) = t.channel_id
-            && chat_choices(&self.chat_channels()).iter().any(|x| x.id == c)
+            && chat_choices(&self.backend.sync().share_channels()).iter().any(|x| x.id == c)
         {
             f.with_chat = true;
             f.chat = c;
@@ -415,13 +438,16 @@ impl Core {
         form(String::new(), Some(path))
     }
 
-    /// The Share dialog drawn from `form`, with the links the host read (`Core::sync_invites`). Cheap: it reads the
-    /// folders and channels, nothing slow.
+    /// The Share dialog drawn from `form`, with the links the host read (`Core::sync_invites`). Cheap: it reads that
+    /// folder or channel alone, its two switches and the channels' names (each lock held only to copy a field), never
+    /// the status of every folder or a channel's messages; [`crate::ui_wait_tests`] times it while a big folder is
+    /// added. A host still draws it after a change only (its form, its links, a switch, the countdown's
+    /// `refresh_ms`), never once per frame of its UI.
     pub fn sync_share_window(&self, form: SyncShareForm, invites: Vec<SyncInvite>, now_unix_s: u64, clock: Arc<dyn LocalClock>) -> SyncShareWindowModel {
         let synced = form.new_path.is_none() && !form.id.is_empty();
         let follow = synced.then(|| self.sync_follow_line(form.id.clone()));
         let read_only = synced.then(|| crate::read_only_text::read_only_line_for(self.backend.as_ref(), &form.id)).flatten();
-        window(&form, self.share_target(&form).as_ref(), &self.chat_channels(), invites, now_unix_s, clock.as_ref(), follow, read_only)
+        window(&form, self.share_target(&form).as_ref(), &self.backend.sync().share_channels(), invites, now_unix_s, clock.as_ref(), follow, read_only)
     }
 
 }
@@ -456,7 +482,7 @@ mod tests {
         assert_eq!((start.label.as_str(), start.on, start.value), ("Stop sharing after", false, 7));
         assert_eq!(start.choices, sync_share_day_choices(), "its days show with the switch off");
         assert_eq!(sharing.line, sync_sharing_line(None, true));
-        assert_eq!((w.close_title.as_str(), w.copy_title.as_deref(), w.refresh_ms), ("Done", Some("Copy Link"), None));
+        assert_eq!((w.close_title.as_str(), w.copy_title.as_deref(), w.refresh_ms), ("Done", Some("Copy Link"), Some(REFRESH_MS)));
         // With a chat: the summary says so.
         let with_chat = SyncShareForm { with_chat: true, single_use: false, uses: 0, link_expires: false, ..form.clone() };
         let w = core.sync_share_window(with_chat.clone(), Vec::new(), NOW_S, Arc::new(Clock));
@@ -482,7 +508,7 @@ mod tests {
         assert_eq!(s.countdown.as_deref(), Some("Sharing ends in 1 day, 0 hours"));
         assert_eq!((s.extend_title.as_deref(), s.start), (Some("Extend"), None));
         assert_eq!(s.line, sync_sharing_line(Some(format!("D{}", NOW_S + 86_400 + 60)), true));
-        assert_eq!(w.refresh_ms, Some(COUNTDOWN_MS));
+        assert_eq!(w.refresh_ms, Some(REFRESH_MS));
     }
 
     /// The Share dialog's "On all my devices" (while paired) and "Read only" (on its own: also on a computer paired with
@@ -493,8 +519,8 @@ mod tests {
     fn the_share_dialog_shows_the_devices_switches_as_they_are() {
         let line = FollowLine { on: true, ..crate::devices_text::follow_line_new(&["MacBook".into()], false) };
         let ro = crate::read_only_text::read_only_line(true, true);
-        let folder = Target { name: "Films".into(), role: SyncRole::Owner, share_until_s: None, is_channel: false, channel_id: None };
-        let w = |f: &SyncShareForm, t: &Target, l: &FollowLine| window(f, Some(t), &[], Vec::new(), NOW_S, &Clock, Some(l.clone()), Some(ro.clone()));
+        let folder = ShareTarget { name: "Films".into(), role: SyncRole::Owner, share_until_s: None, is_channel: false, channel_id: None };
+        let w = |f: &SyncShareForm, t: &ShareTarget, l: &FollowLine| window(f, Some(t), &[], Vec::new(), NOW_S, &Clock, Some(l.clone()), Some(ro.clone()));
         let f = form("x".into(), None);
         let d = w(&f, &folder, &line);
         let (devices, r) = (d.devices.expect("a folder's dialog has it"), d.read_only.expect("and Read only"));
@@ -502,7 +528,7 @@ mod tests {
         // Paired with nothing: no "On all my devices", Read only still.
         let alone = w(&f, &folder, &crate::devices_text::follow_line_new(&[], false));
         assert!(alone.devices.is_none() && alone.read_only.is_some(), "Read only went with On all my devices");
-        for (t, why) in [(Target { is_channel: true, ..folder.clone() }, "a channel"), (Target { role: SyncRole::ReadOnly, ..folder.clone() }, "may not share")] {
+        for (t, why) in [(ShareTarget { is_channel: true, ..folder.clone() }, "a channel"), (ShareTarget { role: SyncRole::ReadOnly, ..folder.clone() }, "may not share")] {
             let x = w(&f, &t, &line);
             assert!(x.devices.is_none() && x.read_only.is_none(), "shown for {why}");
         }
@@ -559,5 +585,31 @@ mod tests {
         assert!(core.sync_share_copy_link(form).is_err());
         let gone = core.sync_share_window(core.sync_share_form("nothing".into()), Vec::new(), NOW_S, Arc::new(Clock));
         assert_eq!((gone.title.as_str(), gone.gone), ("Share “Folder”", Some(format!("This is no longer on this {}.", computer!()))));
+    }
+
+    /// The failure this targets: **an open Share dialog keeps a stale drawing** when its folder changes elsewhere (removed
+    /// on another device, this computer demoted, Read only switched in another window): nothing in the dialog changes, so
+    /// a host that draws after a change only never asks again. Every synced folder's dialog asks for a refresh, with or
+    /// without a sharing period, and the next drawing shows the change; a folder not synced yet, or gone, has nothing to
+    /// wait for.
+    #[test]
+    fn an_open_share_dialog_is_asked_again_so_changes_made_elsewhere_reach_it() {
+        let (core, _d) = mock();
+        let f = core.sync_add_folder("/tmp/seedwell-mock/Letters".into()).unwrap();
+        let form = core.sync_share_form(f.id.clone());
+        let draw = |form: &SyncShareForm| core.sync_share_window(form.clone(), core.sync_invites(form.id.clone()), NOW_S, Arc::new(Clock));
+        let open = draw(&form);
+        assert!(open.sharing.as_ref().is_some_and(|s| s.countdown.is_none()), "no sharing period: {open:?}");
+        assert_eq!(open.refresh_ms, Some(REFRESH_MS), "a dialog with no countdown is never asked again");
+        assert!(open.read_only.as_ref().is_some_and(|r| !r.on));
+        // Read only switched elsewhere (another window, or the owner's other device): the next drawing has it.
+        core.sync_share_set_read_only(form.clone(), true).unwrap();
+        assert!(draw(&form).read_only.is_some_and(|r| r.on), "the refresh missed Read only");
+        // The folder removed: the same form now draws it gone, and stops asking.
+        core.sync_remove(f.id.clone(), false).unwrap();
+        let gone = draw(&form);
+        assert!(gone.gone.is_some() && gone.copy_title.is_none() && gone.refresh_ms.is_none(), "{gone:?}");
+        let new = core.sync_share_window(core.sync_share_form_new("/tmp/seedwell-mock/Novel".into()), Vec::new(), NOW_S, Arc::new(Clock));
+        assert_eq!(new.refresh_ms, None, "nothing elsewhere changes a folder not synced yet");
     }
 }

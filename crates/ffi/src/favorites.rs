@@ -4,7 +4,7 @@
 
 use crate::settings::{ProfileRecord, profile_to};
 use crate::{Core, CoreError};
-use trs_state::trackers::UrlPattern;
+use seedwell_state::trackers::UrlPattern;
 
 /// What the editor learns about a line the user typed or pasted.
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]

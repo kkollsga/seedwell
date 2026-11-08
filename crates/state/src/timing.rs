@@ -12,8 +12,8 @@
 use std::sync::Weak;
 
 use redb::ReadableDatabase;
-use trs_tracker::store::{StoreError, TimingKey, TimingRecord, TimingStore};
-use trs_tracker::time::Millis;
+use seedwell_tracker::store::{StoreError, TimingKey, TimingRecord, TimingStore};
+use seedwell_tracker::time::Millis;
 
 use crate::codec::{Reader, Writer};
 use crate::error::DecodeError;

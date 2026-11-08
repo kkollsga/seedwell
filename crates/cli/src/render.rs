@@ -3,8 +3,8 @@
 
 use std::fmt::Write as _;
 
-use trs_control::human;
-use trs_control::types::*;
+use seedwell_control::human;
+use seedwell_control::types::*;
 
 fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
@@ -248,7 +248,7 @@ pub fn added(a: &AddedDto) -> String {
 pub fn cancelled(v: &serde_json::Value) -> String {
     let name = v["transfers"][0]["name"].as_str().unwrap_or("torrent");
     match v["torrent_file"].as_str() {
-        Some("trashed") => format!(concat!("cancelled: {}; its .torrent file ({}) is in the ", trs_platform::trash!()), name, v["trashed_file"].as_str().unwrap_or("?")),
+        Some("trashed") => format!(concat!("cancelled: {}; its .torrent file ({}) is in the ", seedwell_platform::trash!()), name, v["trashed_file"].as_str().unwrap_or("?")),
         Some("kept") => format!("cancelled: {name}; the .torrent file was kept"),
         _ => format!("cancelled: {name}"),
     }
@@ -314,7 +314,7 @@ pub fn choice(c: &ChoiceDto) -> String {
                 _ => "",
             };
             let q = i.quality.as_deref().map(|q| format!("  {q}")).unwrap_or_default();
-            let mac = if i.this_mac { concat!("  <- this ", trs_platform::computer!()) } else { "" };
+            let mac = if i.this_mac { concat!("  <- this ", seedwell_platform::computer!()) } else { "" };
             let first = i.files.first().map(|f| format!("#{f}")).unwrap_or_default();
             let _ = writeln!(o, "  {mark} {:<40} {:>9}  files {first}{}{q}{lib}{mac}", trunc(&i.label, 40), human::bytes(i.bytes), if i.files.len() > 1 { format!("+{}", i.files.len() - 1) } else { String::new() });
         }
@@ -523,7 +523,7 @@ pub fn tracker_log(v: &serde_json::Value) -> String {
     entries
         .iter()
         .map(|e| {
-            let r = trs_devlog::view::Row::from_value(e);
+            let r = seedwell_devlog::view::Row::from_value(e);
             let t = r.ts_ms / 1000;
             format!(
                 "{:02}:{:02}:{:02}Z  {}  {}  {}{}",

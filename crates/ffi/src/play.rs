@@ -1,7 +1,7 @@
 //! Play while downloading (SPEC §7F), the part that needs no engine support: which files are
 //! video, and the checks `stream_url` makes before it can answer.
 
-use trs_stream::mime;
+use seedwell_stream::mime;
 
 use crate::types::{CoreError, FilePriority, TorrentFile};
 

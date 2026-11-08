@@ -10,8 +10,8 @@ use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, HashMap, VecDeque};
 use std::net::SocketAddr;
 
-use trs_utp::rng::Rng;
-use trs_utp::{Config, ConnHandle, ConnStatus, Disposition, Endpoint};
+use seedwell_utp::rng::Rng;
+use seedwell_utp::{Config, ConnHandle, ConnStatus, Disposition, Endpoint};
 
 pub const START: u64 = 1_000_000;
 

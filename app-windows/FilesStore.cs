@@ -1,9 +1,9 @@
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
 /// <summary>
-/// The open file lists of a place, as the core keeps them (<c>FileLists</c>, trs-ffi file_list.rs: which are open, the
+/// The open file lists of a place, as the core keeps them (<c>FileLists</c>, seedwell-ffi file_list.rs: which are open, the
 /// trees, folders, filters, the selection, the edits on their way and when to read again); the Mac's FilesStore. This
 /// only runs what the core asks for, off the UI thread where it reads the engine, and keeps the drawn lists: the
 /// window's (<see cref="App.Files"/>) and the tray's own (<see cref="App.MenuFiles"/>).

@@ -2,10 +2,10 @@
 //! refuses both, revoking it revokes both, a device already in the channel only joins the folder, and a channel the
 //! inviter may not share is refused when the link is made.
 
-use trs_sync_net::status::FolderState;
-use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::keys::FolderSecret;
-use trs_sync_proto::members::{InviteLink, Role, Signer, new_invite};
+use seedwell_sync_net::status::FolderState;
+use seedwell_sync_proto::ids::FolderId;
+use seedwell_sync_proto::keys::FolderSecret;
+use seedwell_sync_proto::members::{InviteLink, Role, Signer, new_invite};
 
 use crate::chat::join as join_channel;
 use crate::utp::{Device, addr, device_with, until};
@@ -24,7 +24,7 @@ async fn owner(dir: &std::path::Path) -> (Device, FolderId, FolderId) {
     (a, folder, channel)
 }
 
-fn folder_of(d: &Device, id: &FolderId) -> Option<trs_sync_net::status::FolderStatus> {
+fn folder_of(d: &Device, id: &FolderId) -> Option<seedwell_sync_net::status::FolderStatus> {
     d.h.snapshot().folders.into_iter().find(|f| f.id == id.to_string())
 }
 
@@ -103,7 +103,7 @@ async fn revoking_a_link_for_both_revokes_both_and_a_member_of_the_channel_only_
     join_both(&b, &inv.link, dir.path(), "B", &folder, &channel, &a).await;
     until(30, "B is in the folder", || folder_of(&b, &folder).is_some_and(|f| f.role == Some(Role::ReadWrite))).await;
     assert_eq!(b.h.chat_channels().len(), 1);
-    let half = trs_sync_proto::members::hex(&InviteLink::parse_bundle(&inv.link).unwrap().1.unwrap().invite.id);
+    let half = seedwell_sync_proto::members::hex(&InviteLink::parse_bundle(&inv.link).unwrap().1.unwrap().invite.id);
     let ch_invites = a.h.invites(&channel).unwrap();
     assert!(ch_invites.iter().any(|i| i.id == half && !i.revoked && i.uses == 0), "the channel's half of the new link is not used: {ch_invites:?}");
     assert!(b.h.set_folder_channel(&folder, Some(&FolderId::of_public_key(&[9; 32]))).is_err(), "not a channel here");

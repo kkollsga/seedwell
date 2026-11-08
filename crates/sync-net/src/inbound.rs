@@ -26,15 +26,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
-use trs_sync_proto::ids::DeviceId;
-use trs_sync_proto::msg::{AddressRecord, FEATURE_REACH, Message, ReachAnswer, ReachAsk, ReachOutcome};
+use seedwell_sync_proto::ids::DeviceId;
+use seedwell_sync_proto::msg::{AddressRecord, FEATURE_REACH, Message, ReachAnswer, ReachAsk, ReachOutcome};
 
 use crate::service::SyncHandle;
 use crate::session::{Via, is_lan};
 use crate::shared::{Ctx, PeerHandle, lock};
 
 /// How long one dial back may take to connect (Windows gives up on a silent address after about 3 s with Seedwell's
-/// SYN settings, `trs_platform::net::connect_tcp`). A silent one is tried twice.
+/// SYN settings, `seedwell_platform::net::connect_tcp`). A silent one is tried twice.
 pub const DIAL_BACK_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long an ask waits for its answer (two dial backs and the way back); after that it says nothing.
 pub const ANSWER_WAIT: Duration = Duration::from_secs(20);
@@ -184,7 +184,7 @@ fn answered(answering: &mut HashMap<DeviceId, (Instant, bool)>, device: DeviceId
 /// silent address is tried once more (a lost SYN is not a firewall). Never longer than twice `timeout`.
 pub async fn dial_back(target: SocketAddr, timeout: Duration) -> ReachOutcome {
     for _ in 0..2 {
-        match tokio::time::timeout(timeout, trs_platform::net::connect_tcp(target)).await {
+        match tokio::time::timeout(timeout, seedwell_platform::net::connect_tcp(target)).await {
             Ok(Ok(_)) => return ReachOutcome::Connected,
             Ok(Err(_)) => return ReachOutcome::Failed,
             Err(_) => {}
@@ -555,7 +555,7 @@ mod tests {
     #[test]
     fn an_ask_whose_session_ended_is_asked_again_at_once() {
         let addr: SocketAddr = "192.168.68.73:51710".parse().unwrap();
-        let agreed = trs_sync_proto::msg::Agreed { protocol: trs_sync_proto::msg::PROTOCOL, features: FEATURE_REACH };
+        let agreed = seedwell_sync_proto::msg::Agreed { protocol: seedwell_sync_proto::msg::PROTOCOL, features: FEATURE_REACH };
         let session = || PeerHandle::new([7; 32], "Mac".into(), "Seedwell".into(), agreed, addr, addr, [0; 32], true, Via::Tcp).0;
         let (gone, live) = (session(), session());
         let now = Instant::now();
@@ -662,15 +662,15 @@ mod tests {
     /// `port` (B's own sync port when `None`).
     async fn pair(work: &std::path::Path, a_features: u64, port: Option<u16>) -> (SyncHandle, SyncHandle) {
         let a = device(&work.join("a"), "Alpha", a_features).await;
-        let b = device(&work.join("b"), "Beta", trs_sync_proto::msg::FEATURES).await;
+        let b = device(&work.join("b"), "Beta", seedwell_sync_proto::msg::FEATURES).await;
         a.test_reach(true, None);
         a.inner.ctx.reach.test_answer_gap(Duration::from_millis(500));
         b.inner.ctx.reach.test_answer_gap(Duration::from_millis(500));
         b.test_reach(true, port);
         let docs = work.join("Docs");
         std::fs::create_dir_all(&docs).unwrap();
-        let id: trs_sync_proto::ids::FolderId = a.add_folder(docs).await.unwrap().id.parse().unwrap();
-        let link = a.create_invite(&id, trs_sync_proto::members::Role::ReadWrite, 1, 7).unwrap().link;
+        let id: seedwell_sync_proto::ids::FolderId = a.add_folder(docs).await.unwrap().id.parse().unwrap();
+        let link = a.create_invite(&id, seedwell_sync_proto::members::Role::ReadWrite, 1, 7).unwrap().link;
         b.join_folder(&link, work.join("B")).await.unwrap();
         b.add_address(&id, SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), a.port())).unwrap();
         let ad = a.device_id();
@@ -679,10 +679,10 @@ mod tests {
     }
 
     /// A loopback port that refuses connections (a firewall's), and nothing else can listen at
-    /// ([`trs_platform::net::closed_tcp_port`]). (Bound to port 0 and let go, as before, another test listened at it, the
+    /// ([`seedwell_platform::net::closed_tcp_port`]). (Bound to port 0 and let go, as before, another test listened at it, the
     /// dial back connected, and B counted as reached.)
     fn closed_port() -> u16 {
-        trs_platform::net::closed_tcp_port(&[IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)])
+        seedwell_platform::net::closed_tcp_port(&[IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)])
     }
 
     /// The failure the user met on Windows: a device whose sync port a firewall blocks syncs with every device it
@@ -693,7 +693,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_device_no_peer_can_dial_back_is_blocked_until_one_can() {
         let work = tempfile::tempdir().unwrap();
-        let (a, b) = pair(work.path(), trs_sync_proto::msg::FEATURES, Some(closed_port())).await;
+        let (a, b) = pair(work.path(), seedwell_sync_proto::msg::FEATURES, Some(closed_port())).await;
         until(30, "B blocked", || matches!(b.inbound(), Inbound::Blocked { .. })).await;
         let Inbound::Blocked { network, by, .. } = b.inbound() else { unreachable!() };
         assert_eq!((network, by.as_str()), (Network::Local, "Alpha"));
@@ -715,7 +715,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn silence_from_a_device_without_the_feature_is_no_evidence() {
         let work = tempfile::tempdir().unwrap();
-        let (a, b) = pair(work.path(), trs_sync_proto::msg::FEATURES & !FEATURE_REACH, Some(closed_port())).await;
+        let (a, b) = pair(work.path(), seedwell_sync_proto::msg::FEATURES & !FEATURE_REACH, Some(closed_port())).await;
         b.check_inbound_again();
         tokio::time::sleep(Duration::from_secs(3)).await;
         assert_eq!(b.inbound(), Inbound::Unknown);

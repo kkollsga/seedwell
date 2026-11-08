@@ -10,15 +10,15 @@
 //! * **Initiator** ([`initiate`]): the same exchange from our side, with our handshake as the
 //!   initial payload.
 //!
-//! The primitives (group arithmetic, RC4) are in `trs_wire::mse`. This module is the byte shuffling
+//! The primitives (group arithmetic, RC4) are in `seedwell_wire::mse`. This module is the byte shuffling
 //! on a socket: every length is bounded, every wait is bounded by the caller's deadline, and a
 //! malformed message is an error, never a panic.
 
 use std::io;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use trs_wire::mse::{self, KEY_LEN, Rc4, SECRET_LEN};
-use trs_wire::{HANDSHAKE_LEN, Handshake};
+use seedwell_wire::mse::{self, KEY_LEN, Rc4, SECRET_LEN};
+use seedwell_wire::{HANDSHAKE_LEN, Handshake};
 
 use crate::config::EncryptionPolicy;
 use crate::net::{PeerIo, Rc4Io};
@@ -287,7 +287,7 @@ mod tests {
     fn handshake(ih: [u8; 20], tag: u8) -> Vec<u8> {
         let mut pid = [b'-'; 20];
         pid[1] = tag;
-        Handshake { reserved: trs_wire::Reserved::ours(false), info_hash: ih, peer_id: pid }.to_bytes().to_vec()
+        Handshake { reserved: seedwell_wire::Reserved::ours(false), info_hash: ih, peer_id: pid }.to_bytes().to_vec()
     }
 
     async fn pair() -> (PeerIo, PeerIo) {

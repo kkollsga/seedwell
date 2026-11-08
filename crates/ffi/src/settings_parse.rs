@@ -7,7 +7,7 @@
 //! A comma or a dot is the decimal mark.
 
 use crate::settings::GoalKind;
-use trs_control::display as d;
+use seedwell_control::display as d;
 
 /// Highest speed limit the core accepts (1 TiB/s).
 pub(crate) const RATE_MAX: u64 = 1 << 40;

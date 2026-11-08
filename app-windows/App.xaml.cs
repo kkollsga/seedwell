@@ -2,7 +2,7 @@ using H.NotifyIcon;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
@@ -32,7 +32,7 @@ public partial class App : Application
     /// <summary>What this host can do beyond its windows (the core's HostFeature): on-demand folders, over Cloud Files.</summary>
     internal static HostFeature[] HostFeatures { get; } = [HostFeature.OnDemandFolders];
 
-    internal static HostWindow[] HostWindows { get; } = [HostWindow.GetInfo, HostWindow.MoveTo, HostWindow.NewChannel, HostWindow.ChatDialogs, HostWindow.AddFolder, HostWindow.FolderEditor, HostWindow.FolderShare, HostWindow.ChannelShare, HostWindow.FileList, HostWindow.Chooser, HostWindow.Player, HostWindow.TrackerInfo, HostWindow.FavoriteEditing, HostWindow.RulesEditor];
+    internal static HostWindow[] HostWindows { get; } = [HostWindow.GetInfo, HostWindow.MoveTo, HostWindow.NewChannel, HostWindow.ChatDialogs, HostWindow.AddFolder, HostWindow.FolderEditor, HostWindow.FolderShare, HostWindow.ChannelShare, HostWindow.FileList, HostWindow.Chooser, HostWindow.Player, HostWindow.TrackerInfo, HostWindow.FavoriteEditing, HostWindow.RulesEditor, HostWindow.ChatGroups];
     /// <summary>Notifications (the core's Notices), the core's questions, and the settings banner.</summary>
     internal Notifier? Notifier { get; private set; }
     /// <summary>Whether other devices can reach this PC (the core's, one per run; Folder Sync's page draws it).</summary>
@@ -60,8 +60,14 @@ public partial class App : Application
     MainWindow? main;
     FlyoutWindow? flyout;
     bool quitting;
-    /// <summary>The core is there (it starts off the UI thread); until then what arrives waits in <see cref="pending"/>.</summary>
+    /// <summary>The core is there (it starts off the UI thread) and all that needs it is made (<see cref="CoreStarted"/>'s turns); until then what arrives waits in <see cref="pending"/>.</summary>
     bool started;
+
+    /// <summary>The core is there and <see cref="CoreStarted"/>'s turns are running: a core event waits for the end of them too (<see cref="Dispatch"/>).</summary>
+    bool startingTurns;
+
+    /// <summary>The full icon is being made or was: its menu may ask the core (the turns after the flyout, before <see cref="started"/>).</summary>
+    bool trayFull;
     bool quitBeforeCore;
     readonly List<Action> pending = [];
     /// <summary>Kept alive for its ColorValuesChanged event (the light/dark taskbar changes the icon's grey).</summary>
@@ -102,7 +108,7 @@ public partial class App : Application
         return s;
     }
 
-    protected override void OnLaunched(LaunchActivatedEventArgs args)
+    protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
         ui = DispatcherQueue.GetForCurrentThread();
         if (Program.Render is { } render)
@@ -114,12 +120,12 @@ public partial class App : Application
         var dir = Program.StateDir ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Seedwell");
         AppLog.Open(dir);
         AppLog.Write($"launch: state {dir}, {Program.Routes.Length} to open");
-        if (GoBackAfterFailedLaunches(dir))
+        // The UI thread is watched from the start; in a QA run a stall of fail_ms fails it (qa/run.ps1 reads the log).
+        _ = new HangWatch(ui, () => Core, Program.QaControl);
+        if (await GoBackAfterFailedLaunches(dir))
         {
             return;
         }
-        // The UI thread is watched from the start; in a QA run a stall of fail_ms fails it (qa/run.ps1 reads the log).
-        _ = new HangWatch(ui, () => started ? Core : null, Program.QaControl);
         // The icon at once, in its plain look; its menu and the flyout come with the core.
         CreateTray();
         StartCore(dir, 0);
@@ -145,6 +151,9 @@ public partial class App : Application
             var core = new Core(new CoreOptions(dir, false, false, forbidden));
             // The first library read may wait for the engine: done here, so the UI thread's reads find it.
             _ = core.Snapshot();
+            // What the start looks up on the disk: here too.
+            startFolds = ReadFolds(dir);
+            startInstaller = Updater.HasInstaller();
             return core;
         }).ContinueWith(t => ui.TryEnqueue(() => CoreStarted(t, dir, waitedSecs, clock.ElapsedMilliseconds)));
     }
@@ -177,68 +186,102 @@ public partial class App : Application
             return;
         }
         Core = t.Result;
-        started = true;
+        startingTurns = true;
         AppLog.Write($"launch: core ready after {ms} ms");
-        // All of this is one turn of the UI thread: each step is named for a stall's line and timed for the log.
-        var steps = new List<string>();
-        void Step(string doing, Action work)
+        // Each step is a turn of the UI thread of its own, so the app answers between them (the app never hangs: all of
+        // them are 270 ms on a quiet PC, 2.3 s under a Rust compile). What arrives meanwhile waits for the last one
+        // (Ready, Dispatch): nothing finds a half-made app. Each is named for a stall's line and timed for the log.
+        var times = new List<string>();
+        // QA only (an isolated run): each step takes at least this long (SEEDWELL_QA_SLOW_START_STEP_MS).
+        var slowStep = Program.StateDir is not null && int.TryParse(Environment.GetEnvironmentVariable("SEEDWELL_QA_SLOW_START_STEP_MS"), out var stepMs) ? stepMs : 0;
+        var steps = new Queue<(string Doing, Action Work)>([
+            ("the core's events", () =>
+            {
+                Notifier = new Notifier(this, Core, ui);
+                Prompts = new Prompts(this);
+                Banner.Changed += () => LibraryWindowIfCreated?.Pane.Refresh();
+                Core.SetListener(new Listener(this));
+                PowerWatch.Start(Core);
+                NetWatch.Start(Core);
+            }),
+            ("the library window", () => CreateLibrary(dir, startFolds)),
+            ("the updater", () =>
+            {
+                Updater = new Updater(this, Core, startInstaller);
+                Updater.Changed += () => flyout?.UpdateChanged();
+            }),
+            // On-demand folders over Cloud Files (item 6); in an isolated run the core hosts only the folders inside its
+            // own state folder.
+            ("the cloud host", () => { Cloud = new CloudHost(this); Cloud.Start(); }),
+            ("the settings", ApplySettings),
+            ("the flyout", () =>
+            {
+                flyout = new FlyoutWindow(this);
+                TaskbarWatch.Start(flyout!.Hwnd, TaskbarCreated);
+            }),
+            ("the tray icon", () =>
+            {
+                // The plain icon of the start gives way to the full one (its menu and flyout): one icon, never two.
+                tray?.Dispose();
+                tray = null;
+                trayFull = true;
+                CreateTray();
+            }),
+            ("the icon", () =>
+            {
+                iconTimer = ui.CreateTimer();
+                iconTimer.IsRepeating = false;
+                iconTimer.Tick += (_, _) => UpdateIcon();
+                UpdateIcon();
+                // A theme change redraws the icon at once (it fires off the UI thread).
+                uiSettings.ColorValuesChanged += (_, _) => ui.TryEnqueue(() =>
+                {
+                    drawn = null;
+                    iconTimer.Stop();
+                    UpdateIcon();
+                });
+            }),
+            ("what waited", () =>
+            {
+                started = true;
+                startingTurns = false;
+                // What arrived while the core started (a second launch's links, QA commands, Show), in order.
+                var waiting = pending.ToArray();
+                pending.Clear();
+                if (waiting.Length > 0) AppLog.Write($"launch: {waiting.Length} waited for the core");
+                foreach (var run in waiting)
+                {
+                    run();
+                }
+                if (Program.Routes.Length > 0)
+                {
+                    Open(Program.Routes);
+                }
+                // Started by a click on a notification while the app was not running: what it opens.
+                if (Program.NoticeClick is string click)
+                {
+                    Notifier!.Clicked(click);
+                }
+                // The files already in the watch folders, offered once ever.
+                Prompts.Backlog();
+            }),
+        ]);
+        void NextStep()
         {
+            // Quit from the full icon's menu between two steps: the core is going, the rest would use it.
+            if (quitting) return;
+            var (doing, work) = steps.Dequeue();
             var c = System.Diagnostics.Stopwatch.StartNew();
             HangWatch.Doing = doing;
+            // (Excused as a capture: a stall made here still fails the run, steps in a row made slow are not a stutter.)
+            if (slowStep > 0) using (RendererCaptures.Shared.Capture()) Thread.Sleep(slowStep);
             work();
             HangWatch.Doing = "";
-            steps.Add($"{doing} {c.ElapsedMilliseconds}");
+            times.Add($"{doing} {c.ElapsedMilliseconds}");
+            if (steps.Count > 0) ui.TryEnqueue(NextStep);
+            else AppLog.Write($"launch: on the UI thread, ms: {string.Join(", ", times)}");
         }
-        Notifier = new Notifier(this, Core, ui);
-        Prompts = new Prompts(this);
-        Banner.Changed += () => LibraryWindowIfCreated?.Pane.Refresh();
-        Core.SetListener(new Listener(this));
-        PowerWatch.Start(Core);
-        NetWatch.Start(Core);
-        Step("the library window", () => CreateLibrary(dir));
-        Updater = new Updater(this, Core);
-        Updater.Changed += () => flyout?.UpdateChanged();
-        // On-demand folders over Cloud Files (item 6); in an isolated run the core hosts only the folders inside its own
-        // state folder.
-        Step("the cloud host", () => { Cloud = new CloudHost(this); Cloud.Start(); });
-        Step("the settings", ApplySettings);
-        Step("the flyout", () => flyout = new FlyoutWindow(this));
-        TaskbarWatch.Start(flyout!.Hwnd, TaskbarCreated);
-        // The plain icon of the start gives way to the full one (its menu and flyout): one icon, never two.
-        tray?.Dispose();
-        tray = null;
-        Step("the tray icon", CreateTray);
-        iconTimer = ui.CreateTimer();
-        iconTimer.IsRepeating = false;
-        iconTimer.Tick += (_, _) => UpdateIcon();
-        Step("the icon", UpdateIcon);
-        // A theme change redraws the icon at once (it fires off the UI thread).
-        uiSettings.ColorValuesChanged += (_, _) => ui.TryEnqueue(() =>
-        {
-            drawn = null;
-            iconTimer.Stop();
-            UpdateIcon();
-        });
-        // What arrived while the core started (a second launch's links, QA commands, Show), in order.
-        var waiting = pending.ToArray();
-        pending.Clear();
-        if (waiting.Length > 0) AppLog.Write($"launch: {waiting.Length} waited for the core");
-        foreach (var run in waiting)
-        {
-            run();
-        }
-        if (Program.Routes.Length > 0)
-        {
-            Open(Program.Routes);
-        }
-        // Started by a click on a notification while the app was not running: what it opens.
-        if (Program.NoticeClick is string click)
-        {
-            Notifier.Clicked(click);
-        }
-        // The files already in the watch folders, offered once ever.
-        Prompts.Backlog();
-        AppLog.Write($"launch: on the UI thread, ms: {string.Join(", ", steps)}");
+        NextStep();
     }
 
     /// <summary>The window on a transfer: its place, the row selected, Get Info on it (a notice's click, the Mac's showMain(nil, id)).</summary>
@@ -260,10 +303,10 @@ public partial class App : Application
     void Fatal(string dir, string error)
     {
         // The window's words need no core (it is what failed).
-        var texts = TrsFfiMethods.StartFailureTexts();
+        var texts = SeedwellFfiMethods.StartFailureTexts();
         AppLog.Write($"launch refused: {error}");
         RecoveryAction[] actions;
-        try { actions = TrsFfiMethods.RecoveryActions(dir, Updater.InstallDir, Updater.Repo, Updater.RelaunchArgs); }
+        try { actions = SeedwellFfiMethods.RecoveryActions(dir, Updater.InstallDir, Updater.Repo, Updater.RelaunchArgs); }
         catch (Exception e) { AppLog.Write($"recovery actions failed: {e.Message}"); actions = []; }
         AppLog.Write($"launch: recovery offered: {(actions.Length == 0 ? "none" : string.Join(", ", actions.Select(a => a.Title)))}");
         if (Program.StateDir is not null)
@@ -287,10 +330,10 @@ public partial class App : Application
             var b = new Button { Content = a.Title, MinWidth = 80 };
             ToolTipService.SetToolTip(b, a.Help);
             var command = a.Command;
-            b.Click += (_, _) =>
+            b.Click += async (_, _) =>
             {
                 AppLog.Write($"launch: recovery chosen: {a.Title}");
-                Updater.Start(command);
+                await Updater.StartDetached(command);
                 Environment.Exit(1);
             };
             buttons.Children.Add(b);
@@ -379,12 +422,13 @@ public partial class App : Application
     /// started detached (it quits nothing: this launch ends instead of starting) and puts the kept app back. A release
     /// passes no version of its own: the guard acts only for a development build.
     /// </summary>
-    static bool GoBackAfterFailedLaunches(string dir)
+    static async Task<bool> GoBackAfterFailedLaunches(string dir)
     {
         InstallCommand? c;
         try
         {
-            c = TrsFfiMethods.LaunchGuard(dir, Updater.DevVersion ?? "", Updater.InstallDir, Updater.RelaunchArgs);
+            // (It reads the launches' record.)
+            c = await Task.Run(() => SeedwellFfiMethods.LaunchGuard(dir, Updater.DevVersion ?? "", Updater.InstallDir, Updater.RelaunchArgs));
         }
         catch (Exception e)
         {
@@ -396,7 +440,7 @@ public partial class App : Application
             return false;
         }
         AppLog.Write("launch: three launches without starting fine; going back to the kept app");
-        if (!Updater.Start(c))
+        if (!await Updater.StartDetached(c))
         {
             return false;
         }
@@ -421,7 +465,7 @@ public partial class App : Application
             bool added = true;
             CoreCalls.InOrder("add", () => Core.AddSource(source),
                 () => { if (added) flyout?.ShowOpen(); },
-                e => { added = false; Alert(TrsFfiMethods.AddFailed(e)); });
+                e => { added = false; Alert(SeedwellFfiMethods.AddFailed(e)); });
         }
     }
 
@@ -437,9 +481,9 @@ public partial class App : Application
         AppLog.Open(dir);
         // A render that hangs fails (the core's fail_ms), as a QA run does.
         _ = new HangWatch(ui, () => Core, testRun: true);
-        CreateLibrary(state);
+        CreateLibrary(state, ReadFolds(state));
         // The menu reads its update row from it; a development build never checks by itself, so nothing goes out.
-        Updater = new Updater(this, Core);
+        Updater = new Updater(this, Core, Updater.HasInstaller());
         flyout = new FlyoutWindow(this);
         ui.TryEnqueue(async () =>
         {
@@ -469,11 +513,20 @@ public partial class App : Application
     /// <summary>
     /// The library with the folds remembered from last time (a convenience: losing the file only unfolds the groups).
     /// </summary>
-    void CreateLibrary(string stateDir)
+    /// <summary>The start's looks at the disk, made off the UI thread with the core (<see cref="StartCore"/>).</summary>
+    string[] startFolds = [];
+    bool startInstaller;
+
+    /// <summary>The groups folded in an earlier run. Reads a file: off the UI thread.</summary>
+    static string[] ReadFolds(string stateDir)
+    {
+        try { return File.ReadAllLines(Path.Combine(stateDir, "app-windows-folds.txt")).Where(l => l.Length > 0).ToArray(); }
+        catch { return []; }
+    }
+
+    void CreateLibrary(string stateDir, string[] folded)
     {
         foldsFile = Path.Combine(stateDir, "app-windows-folds.txt");
-        string[] folded = [];
-        try { folded = File.ReadAllLines(foldsFile).Where(l => l.Length > 0).ToArray(); } catch { }
         Library = new Library(Core, folded, new Clock());
         Library.SetHostWindows(HostWindows);
         ChatDialogs = new ChatDialogs(this);
@@ -658,13 +711,16 @@ public partial class App : Application
                 for (int i = 0; i < 40 && ChooserDialog.Open?.TorrentId != t; i++) await Task.Delay(100);
                 break;
             case ("chooser", "close"): ChooserDialog.Open?.Close(); await Task.Delay(300); break;
+            // focus-first: its first button takes the keyboard. focused: what has it.
+            case ("chooser", "focus-first") when ChooserDialog.Open is ChooserDialog cf: cf.QaFocusFirstButton(); await Quiet.Settle(LibraryWindow.Content); return $"focus \"{cf.QaFocused}\"";
+            case ("chooser", "focused") when ChooserDialog.Open is ChooserDialog cq: await Quiet.Settle(LibraryWindow.Content); return $"focus \"{cq.QaFocused}\"";
             case ("chooser", _) when ChooserDialog.Open is not ChooserDialog: return "no chooser open";
             case ("chooser", "toggle"):
                 var cid = ChooserDialog.Open!.TorrentId;
                 if (Choices.Loaded(cid)?.FindRow(string.Join(' ', w.Skip(2))) is string r) Choices.Edit(cid, c => c.Toggle(r)); else return "no such row";
                 break;
             case ("chooser", "pick") when Enum.TryParse<ChooserPick>(arg(2), out var pick): Choices.Edit(ChooserDialog.Open!.TorrentId, c => c.ApplyPick(pick)); break;
-            case ("chooser", "category") when TrsFfiMethods.CategoryChoices(Category.Other).FirstOrDefault(c => string.Equals(c.Title, arg(2), StringComparison.OrdinalIgnoreCase)) is CategoryChoice cc:
+            case ("chooser", "category") when SeedwellFfiMethods.CategoryChoices(Category.Other).FirstOrDefault(c => string.Equals(c.Title, arg(2), StringComparison.OrdinalIgnoreCase)) is CategoryChoice cc:
                 Choices.ChangeCategory(ChooserDialog.Open!.TorrentId, cc.Category); await Task.Delay(800); break;
             case ("chooser", "start"): Choices.Confirm(ChooserDialog.Open!.TorrentId); await Task.Delay(1000); break;
             case ("chooser", "cancel"): Choices.Cancel(ChooserDialog.Open!.TorrentId, arg(2) == "keep"); await Task.Delay(1000); break;
@@ -724,19 +780,25 @@ public partial class App : Application
             Banner.Notes(notes);
         }
         catch { }
-        var general = Core.SettingsLoad().General;
+        var loaded = Core.SettingsLoad();
+        var general = loaded.General;
         sleep.WhileDownloading = general.PreventSleepWhileDownloading;
         sleep.ForAgents = general.KeepAwakeForAgents;
         if (Program.StateDir is null)
         {
-            try { LoginItem.Apply(general.LaunchAtLogin); } catch { }
+            // The registry: off the UI thread.
+            var atLogin = general.LaunchAtLogin;
+            _ = Task.Run(() => { try { LoginItem.Apply(atLogin); } catch { } });
         }
+        // What was applied, so a change from the CLI can be seen to arrive (QA clisettings); a run on its own state folder
+        // never writes the Run entry, which is the installed app's.
+        AppLog.Write($"settings applied: launch at login {general.LaunchAtLogin}{(Program.StateDir is null ? "" : " (not written: a separate state folder)")}, awake while downloading {general.PreventSleepWhileDownloading}, awake for agents {general.KeepAwakeForAgents}, update checks {loaded.Updates.Check}, automatic install {loaded.Updates.AutoInstall}");
         // The update switches may have changed outside Settings (the CLI, an agent, a hand edit): the next check again.
         Updater?.Schedule();
     }
 
     /// <summary>config.toml changed (the app, an agent, the CLI or a hand edit): apply its settings again.</summary>
-    internal void SettingsChanged() => ui.TryEnqueue(() =>
+    internal void SettingsChanged() => Dispatch(() =>
     {
         ApplySettings();
         // Settings open: read again (an agent, the CLI or a hand edit changed a value).
@@ -751,13 +813,13 @@ public partial class App : Application
         menu.Opening += (_, _) =>
         {
             menu.Items.Clear();
-            if (!started) return;
+            if (!trayFull) return;
             foreach (var item in TrayMenuItems())
             {
                 menu.Items.Add(item);
             }
         };
-        if (started)
+        if (trayFull)
         {
             foreach (var item in TrayMenuItems())
             {
@@ -830,7 +892,7 @@ public partial class App : Application
             }
         }
         MenuModel model;
-        try { model = TrsFfiMethods.MenuModel(TakeSnapshot(), Core.SyncSnapshot(), Arrivals, Now(), Updater?.Updates.AvailableVersion(), HostWindows); }
+        try { model = SeedwellFfiMethods.MenuModel(TakeSnapshot(), Core.SyncSnapshot(), Arrivals, Now(), Updater?.Updates.AvailableVersion(), HostWindows); }
         catch { model = new MenuModel(null, [], null, null, null, "Open Seedwell…", "Quit", 1000, ""); }
         var open = new MenuFlyoutItem { Text = model.OpenTitle };
         open.Click += (_, _) => ShowMainWindow();
@@ -896,7 +958,7 @@ public partial class App : Application
         {
             var snapshot = TakeSnapshot();
             // The icon's refresh is also when the power needs are asked (the Mac's statusMenu.onRefresh).
-            bool downloading = TrsFfiMethods.PowerNeeds(snapshot).Downloading;
+            bool downloading = SeedwellFfiMethods.PowerNeeds(snapshot).Downloading;
             sleep.Update(downloading, Core.AgentsAwake() is not null);
             // Downloads stopped: an update that waited for that may install now (the core decides).
             if (wasDownloading && !downloading)
@@ -1051,10 +1113,15 @@ public partial class App : Application
     /// <summary>The library window drawn again (after a command returned).</summary>
     internal void Refreshed() => LibraryWindowIfCreated?.Pane.Refresh();
 
-    /// <summary>Runs <paramref name="action"/> on the UI thread (now when already there).</summary>
+    /// <summary>Runs <paramref name="action"/> on the UI thread (now when already there), after <see cref="CoreStarted"/>'s turns when those are running.</summary>
     internal void Dispatch(Action action)
     {
-        if (ui.HasThreadAccess) action(); else ui.TryEnqueue(() => action());
+        void Run()
+        {
+            if (startingTurns) pending.Add(action);
+            else action();
+        }
+        if (ui.HasThreadAccess) Run(); else ui.TryEnqueue(Run);
     }
 
     /// <summary>Where to save a file named <paramref name="suggested"/> (Save As…), or null; a QA run takes <see cref="QaSaveFile"/>.</summary>
@@ -1139,14 +1206,14 @@ public partial class App : Application
                 XamlRoot = root,
                 Title = alert.Title,
                 Content = new TextBlock { Text = alert.Text, TextWrapping = TextWrapping.Wrap },
-                CloseButtonText = TrsFfiMethods.AlertOkTitle(),
+                CloseButtonText = SeedwellFfiMethods.AlertOkTitle(),
                 DefaultButton = ContentDialogButton.Close,
             };
             _ = d.ShowAsync();
             return;
         }
         var w = new Window { Title = alert.Title };
-        var ok = new Button { Content = TrsFfiMethods.AlertOkTitle(), HorizontalAlignment = HorizontalAlignment.Right, MinWidth = 80, Style = (Style)Resources["AccentButtonStyle"] };
+        var ok = new Button { Content = SeedwellFfiMethods.AlertOkTitle(), HorizontalAlignment = HorizontalAlignment.Right, MinWidth = 80, Style = (Style)Resources["AccentButtonStyle"] };
         ok.Click += (_, _) => w.Close();
         var panel = new StackPanel { Margin = new Thickness(24), Spacing = 12 };
         panel.Children.Add(new TextBlock { Text = alert.Title, FontSize = 18, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
@@ -1216,13 +1283,33 @@ public partial class App : Application
         }, TaskContinuationOptions.OnlyOnFaulted);
     }
 
+    /// <summary>A sidebar menu's items, those in its submenus too (QA).</summary>
+    static IEnumerable<SidebarMenuEntry.Item> QaMenuItems(IEnumerable<SidebarMenuEntry> entries) => entries.SelectMany(e => e switch
+    {
+        SidebarMenuEntry.Item it => [it],
+        SidebarMenuEntry.Submenu sub => QaMenuItems(sub.Entries),
+        _ => Enumerable.Empty<SidebarMenuEntry.Item>(),
+    });
+
+    /// <summary>A sidebar menu as text: "Title [x] (off) !" for checked, disabled and red; a submenu "Title > [...]" (QA).</summary>
+    static string QaMenuText(IEnumerable<SidebarMenuEntry> entries) => string.Join(" | ", entries.Select(e => e switch
+    {
+        SidebarMenuEntry.Item it => $"{it.Title}{(it.Checked ? " [x]" : "")}{(it.Enabled ? "" : " (off)")}{(it.Destructive ? " !" : "")}",
+        SidebarMenuEntry.Submenu sub => $"{sub.Title} > [{QaMenuText(sub.Entries)}]",
+        _ => "-",
+    }));
+
     /// <summary>"On all my devices" and its "Read only" as a dialog's model draws them (QA).</summary>
     static string QaFollow(FollowLine? f, ReadOnlyLine? r) => $"all devices {(f is null ? "none" : $"{f.On} enabled {f.Enabled}")}, read only {(r is null ? "none" : $"{r.On} enabled {r.Enabled} line \"{r.Line}\"")}";
 
     /// <summary>A QA command as the log may say it: never what a credential field is given (qa\run.ps1's Qa says the same).</summary>
     static string QaSaid(string[] w) => w is ["proxy-window", "fill" or "custom" or "copied" or "last", ..] ? $"proxy-window {w[1]} ***" : string.Join(' ', w);
 
-    async Task QaRun(string[] w)
+    /// <summary>
+    /// Runs a QA command and comes to what it answered: its own answer, so the interactive cycle sees a command of its own
+    /// that failed (a field of the last answer was overwritten by a `done` poll in between).
+    /// </summary>
+    async Task<string> QaRun(string[] w)
     {
         string verb = w.Length > 0 ? w[0] : "";
         HangWatch.LastAction = $"qa {QaSaid(w)}";
@@ -1337,13 +1424,14 @@ public partial class App : Application
                 case "menu-line": ShowPlace(Arg(1) == "sharing" ? new LibraryPlace.Sharing() : new LibraryPlace.Downloads()); break;
                 // A channel's sidebar menu entry (Mute, Unmute, ...), or its Agents choice (agents <channel> yes|no).
                 // A channel's sidebar menu entry, by its command's name (Mute, Unmute, NewTopic, RenameChannel,
-                // LeaveChannel, ChannelAgents, SetFollow), as its click runs it.
+                // LeaveChannel, ChannelAgents, SetFollow, MoveToGroup, RemoveFromGroup, NewGroup), as its click runs it; in a
+                // submenu too, and with a title after the name the entry of that title (MoveToGroup Agents).
                 case "sidebar":
                     var channel = Core.ChatChannels().FirstOrDefault(c => c.Name.Contains(Arg(1), StringComparison.OrdinalIgnoreCase));
                     if (channel is null) { result = "no such channel"; break; }
                     var chatPlace = new LibraryPlace.Chat(channel.Id, null);
-                    var menuItems = Library.SidebarMenu(chatPlace).OfType<SidebarMenuEntry.Item>().ToArray();
-                    if (menuItems.FirstOrDefault(i => i.Command.GetType().Name.Equals(Arg(2), StringComparison.OrdinalIgnoreCase)) is SidebarMenuEntry.Item entry)
+                    var menuItems = QaMenuItems(Library.SidebarMenu(chatPlace)).ToArray();
+                    if (menuItems.FirstOrDefault(i => i.Command.GetType().Name.Equals(Arg(2), StringComparison.OrdinalIgnoreCase) && (Arg(3).Length == 0 || i.Title.Equals(string.Join(' ', w.Skip(3)), StringComparison.OrdinalIgnoreCase))) is SidebarMenuEntry.Item entry)
                     {
                         pane.RunSidebarCommand(entry.Command, chatPlace);
                         // Mute and the like are queued: what they did shows once they returned.
@@ -1353,6 +1441,43 @@ public partial class App : Application
                     var now = Core.ChatChannels().FirstOrDefault(c => c.Id == channel.Id);
                     pane.Refresh();
                     result = now is null ? "channel gone" : $"channel muted {now.Muted}, agents {now.Agents}, drawn muted {pane.SidebarDrawn.Contains(nameof(SidebarIcon.MutedChannel))}";
+                    break;
+                // A sidebar group's menu entry by its command's name (RenameGroup, SetGroupIcon <title>, MoveGroupUp,
+                // MoveGroupDown, DeleteGroup), as its click runs it: group <name> <command> [title].
+                case "group":
+                    if (Core.ChatGroups().FirstOrDefault(g => g.Name.Equals(Arg(1), StringComparison.OrdinalIgnoreCase)) is not SyncChatGroup qaGroup) { result = "no such group"; break; }
+                    var groupItems = QaMenuItems(Library.SidebarGroupMenu(qaGroup.Id)).ToArray();
+                    if (groupItems.FirstOrDefault(i => i.Command.GetType().Name.Equals(Arg(2), StringComparison.OrdinalIgnoreCase) && (Arg(3).Length == 0 || i.Title.Equals(string.Join(' ', w.Skip(3)), StringComparison.OrdinalIgnoreCase))) is not SidebarMenuEntry.Item groupEntry)
+                    {
+                        result = $"no such entry (the menu has {string.Join(", ", groupItems.Select(i => $"{i.Command.GetType().Name} {i.Title}"))})";
+                        break;
+                    }
+                    pane.RunSidebarCommand(groupEntry.Command, null, qaGroup.Id);
+                    await CoreCalls.Idle();
+                    pane.Refresh();
+                    await Quiet.Settle(LibraryWindow.Content);
+                    result = $"rows {pane.QaSidebarRows()}";
+                    break;
+                // A group opened or closed as its row's click does (group-open <name> true|false), and the sidebar as drawn.
+                case "group-open":
+                    if (Core.ChatGroups().FirstOrDefault(g => g.Name.Equals(Arg(1), StringComparison.OrdinalIgnoreCase)) is not SyncChatGroup toggled) { result = "no such group"; break; }
+                    Library.SetGroupOpen(toggled.Id, Arg(2) == "true");
+                    pane.Refresh();
+                    await Quiet.Settle(LibraryWindow.Content);
+                    result = $"rows {pane.QaSidebarRows()}";
+                    break;
+                // The sidebar as drawn, row by row.
+                case "sidebar-rows":
+                    pane.Refresh();
+                    await Quiet.Settle(LibraryWindow.Content);
+                    result = $"rows {pane.QaSidebarRows()}";
+                    break;
+                // The menu of a channel (menu-of channel <name>) or of a group (menu-of group <name>), as text.
+                case "menu-of":
+                    SidebarMenuEntry[] menuOf = Arg(1) == "group"
+                        ? Core.ChatGroups().FirstOrDefault(g => g.Name.Equals(Arg(2), StringComparison.OrdinalIgnoreCase)) is SyncChatGroup mg ? Library.SidebarGroupMenu(mg.Id) : []
+                        : Core.ChatChannels().FirstOrDefault(c => c.Name.Equals(Arg(2), StringComparison.OrdinalIgnoreCase)) is SyncChannel mc ? Library.SidebarMenu(new LibraryPlace.Chat(mc.Id, null)) : [];
+                    result = $"menu {QaMenuText(menuOf)}";
                     break;
                 // The open chat dialog: type <text> | confirm | cancel | status.
                 case "dialog":
@@ -1368,13 +1493,13 @@ public partial class App : Application
                 case "delete-conversation":
                     var direct = Core.ChatDirects().FirstOrDefault(d => d.Name.Contains(Arg(1), StringComparison.OrdinalIgnoreCase));
                     if (direct is null) { result = "no such conversation"; break; }
-                    ChatDialogs.Show(TrsFfiMethods.ChatDeleteConversationDialog(direct.Name), null, direct.DeviceId);
+                    ChatDialogs.Show(SeedwellFfiMethods.ChatDeleteConversationDialog(direct.Name), null, direct.DeviceId);
                     break;
                 // A channel's Wake Command… (in the conversation page's ⋯ menu on the Mac; no menu on Windows yet).
                 case "wake-command":
                     var wakeChannel = Core.ChatChannels().FirstOrDefault(c => c.Name.Contains(Arg(1), StringComparison.OrdinalIgnoreCase));
                     if (wakeChannel is null) { result = "no such channel"; break; }
-                    ChatDialogs.Show(TrsFfiMethods.ChatWakeCommandDialog(wakeChannel), wakeChannel);
+                    ChatDialogs.Show(SeedwellFfiMethods.ChatWakeCommandDialog(wakeChannel), wakeChannel);
                     break;
                 // The New Channel window: open [link] | mode new|join | name <text> | link <text> | agents yes|no |
                 // start | cancel | status.
@@ -1386,13 +1511,26 @@ public partial class App : Application
                         case "mode": nc.QaMode(Arg(2) == "join" ? ChatNewMode.Join : ChatNewMode.New); break;
                         case "name": nc.QaName(string.Join(' ', w.Skip(2))); break;
                         case "link": nc.QaLink(string.Join(' ', w.Skip(2))); break;
+                        case "typing-link":
+                            nc.QaTypeLink(string.Join(' ', w.Skip(3)), int.Parse(Arg(2)));
+                            await Quiet.Settle(LibraryWindow.Content);
+                            for (var waited = 0; nc.Form.Link != string.Join(' ', w.Skip(3)) && waited < 150; waited++) await Task.Delay(20);
+                            await Quiet.Settle(LibraryWindow.Content);
+                            break;
+                        // typing <caret> <text>: the name typed, the caret there.
+                        case "typing":
+                            nc.QaTypeName(string.Join(' ', w.Skip(3)), int.Parse(Arg(2)));
+                            await Quiet.Settle(LibraryWindow.Content);
+                            for (var waited = 0; nc.Form.Name != string.Join(' ', w.Skip(3)) && waited < 150; waited++) await Task.Delay(20);
+                            await Quiet.Settle(LibraryWindow.Content);
+                            break;
                         case "agents": nc.QaAgents(Arg(2) == "yes"); break;
                         case "start": result = await nc.QaStart() ? "started" : "not started"; break;
                         case "cancel": nc.QaCancel(); break;
                     }
                     if (NewChannelDialog.Open is NewChannelDialog open)
                     {
-                        result += $"; new channel {open.Form.Mode}, can start {open.Model.CanStart}, link line \"{open.Model.LinkLine}\"";
+                        result += $"; new channel {open.Form.Mode}, can start {open.Model.CanStart}, link line \"{open.Model.LinkLine}\", focus \"{open.QaFocused}\"";
                     }
                     break;
                 // Settings: tab <General|Transfers|Folders|Network|FolderSync|Devices|Agents|Advanced> | rows | row <id> |
@@ -1402,8 +1540,12 @@ public partial class App : Application
                     if (pane.SettingsPageShown is not SettingsPage sp2) { result = "no settings page"; break; }
                     switch (Arg(1))
                     {
+                        // dropdown open|close: this tab's first drop-down. redraw: as its refresh does. Either says whether one is open.
+                        case "dropdown": sp2.QaDropDown(Arg(2) == "open"); await Quiet.Settle(LibraryWindow.Content); result = $"dropdown open {sp2.QaDropDownOpen}; "; break;
+                        case "redraw": for (int i = 0, times = int.TryParse(Arg(2), out var redraws) ? redraws : 1; i < times; i++) { sp2.QaDraw(); await Quiet.Settle(LibraryWindow.Content); } result = $"dropdown open {sp2.QaDropDownOpen}; "; break;
                         case "tab": if (Enum.TryParse<SettingsTab>(Arg(2), true, out var st)) sp2.Show(st); else result = "no such tab; "; break;
                         case "rows": result = sp2.QaRows() + "; "; break;
+                        case "made": result = $"made {SettingsPage.Made}; "; break;
                         case "row": result = sp2.QaRow(Arg(2)) + "; "; break;
                         case "set": result = sp2.QaSet(Arg(2), w.Skip(3).ToArray()) + "; "; await Task.Delay(700); await CoreCalls.Idle(); break;
                         // The rules editor: rules [status | section rules|trackers | select <title> | add | remove | save | revert |
@@ -1453,6 +1595,88 @@ public partial class App : Application
                     await Task.Delay(1500);
                     result = $"note \"{pane.NoteShown ?? ""}\"";
                     break;
+                // The keyboard's place kept over a redraw, in the surface named (FocusKeeper.QaWalk): settings (every tab) | add | edit |
+                // new-channel | share | chooser | starting | proxy, each of the last open.
+                case "focuswalk":
+                    if (Arg(1) == "settings" && pane.Model?.Page != LibraryPage.Settings) { Library.SelectPlace(new LibraryPlace.Settings()); pane.Refresh(); await Quiet.Settle(LibraryWindow.Content); }
+                    result = Arg(1) switch
+                    {
+                        "settings" when pane.SettingsPageShown is SettingsPage walked => await walked.QaWalk(),
+                        "add" when AddFolderDialog.Open is AddFolderDialog walked => await walked.QaWalk(),
+                        "edit" when EditFolderDialog.Open is EditFolderDialog walked => await walked.QaWalk(),
+                        "new-channel" when NewChannelDialog.Open is NewChannelDialog walked => await walked.QaWalk(),
+                        "share" when ShareDialog.Open is ShareDialog walked => await walked.QaWalk(),
+                        "chooser" when ChooserDialog.Open is ChooserDialog walked => await walked.QaWalk(),
+                        "starting" when StartingNotifier is StartingWindow walked => await walked.QaWalk(),
+                        "proxy" when ProxyWindow.Open is ProxyWindow walked => await walked.QaWalk(),
+                        _ => "nothing to walk",
+                    };
+                    break;
+                // The start's looks at the disk as it found them; shell-start: a program started as a click starts one (Shell).
+                case "start-reads": result = $"folds [{string.Join(", ", startFolds)}], installer {startInstaller}"; break;
+                // update-start ok|bad: a detached start as the installer's, of a program that is there or is not.
+                case "update-start":
+                    var startLog = Path.Combine(Core.StateDir(), "logs", "qa-update-start.log");
+                    result = $"started {await Updater.StartDetached(new InstallCommand(Arg(1) == "ok" ? ["cmd.exe", "/c", "exit"] : [Path.Combine(Core.StateDir(), "no-such-program.exe")], [], startLog))}";
+                    break;
+                case "shell-start":
+                    Shell.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c exit") { UseShellExecute = false, CreateNoWindow = true });
+                    result = "asked";
+                    break;
+                // The watchdog: selftest (the detector's promises); hold <ms> <times> [capture]: the UI thread held again and again, a beat getting through between two.
+                case "hangwatch":
+                    if (Arg(1) == "selftest") result = HangDetectorSelfTest.Run();
+                    if (Arg(1) == "hold")
+                    {
+                        var holdMs = int.Parse(Arg(2));
+                        foreach (var _ in Enumerable.Range(0, int.Parse(Arg(3))))
+                        {
+                            if (Arg(4) == "capture") using (RendererCaptures.Shared.Capture()) Thread.Sleep(holdMs);
+                            else Thread.Sleep(holdMs);
+                            await Quiet.NextTurn();
+                        }
+                        result = "held";
+                    }
+                    break;
+                // How interactive the app stays (InteractiveProbe): start | cycle <seconds> [first=<word,word>] [channel=<name>] [folder=<name>] (answers at once) |
+                // done | report <name> (to <state>\qa\<name>.json, the cycle waited for) | core-delay <ms> (the next core call reported that late).
+                // What is still held once everything unreachable has gone: what a leak cannot hide behind a collection not yet run.
+                case "memory":
+                    for (var collect = 0; collect < 3; collect++) { GC.Collect(); GC.WaitForPendingFinalizers(); await Task.Delay(100); }
+                    using (var self = System.Diagnostics.Process.GetCurrentProcess()) result = $"handles {self.HandleCount} private {self.PrivateMemorySize64 / 1024 / 1024} managed {GC.GetTotalMemory(false) / 1024 / 1024}; ";
+                    break;
+                case "interactive":
+                    switch (Arg(1))
+                    {
+                        case "start": await InteractiveProbe.Start(ui, Core); result = "started"; break;
+                        case "cycle" when InteractiveProbe.Current is InteractiveProbe cycled:
+                            string? Named(string name) => w.Skip(3).FirstOrDefault(a => a.StartsWith(name + "="))?[(name.Length + 1)..];
+                            cycled.Cycle(double.Parse(Arg(2), System.Globalization.CultureInfo.InvariantCulture), Named("first")?.Replace(',', ' '), Named("channel"), Named("folder"), QaRun);
+                            result = "cycling";
+                            break;
+                        case "done": result = InteractiveProbe.Current?.Cycling is { IsCompleted: false } ? "cycling" : "finished"; break;
+                        case "core-delay" when InteractiveProbe.Current is InteractiveProbe delayed: delayed.DelayNextCoreCall(int.Parse(Arg(2))); break;
+                        case "report" when InteractiveProbe.Current is InteractiveProbe reported:
+                            result = Path.Combine(Path.GetDirectoryName(foldsFile) ?? "", "qa", $"{Arg(2)}.json");
+                            await reported.Report(result);
+                            break;
+                        default: result = "no probe"; break;
+                    }
+                    break;
+                // The tray flyout's Folder Sync rows: open | close | hover on|off | shot <name> | status (each row's grey line, and whether it fits).
+                case "sync-flyout":
+                    if (flyout is null) { result = "no flyout"; break; }
+                    if (Arg(1) == "hover") flyout.QaSyncHover = Arg(2) == "on";
+                    if (Arg(1) is "open" or "hover") { flyout.OpenPinned(true); await Quiet.Settle(flyout.RootElement); }
+                    if (Arg(1) == "close") flyout.Hide();
+                    if (Arg(1) == "shot")
+                    {
+                        var syncFlyoutDir = Path.Combine(Path.GetDirectoryName(foldsFile) ?? "", "qa");
+                        Directory.CreateDirectory(syncFlyoutDir);
+                        await SnapshotRenderer.SaveImage(flyout.RootElement, Path.Combine(syncFlyoutDir, $"{Arg(2)}.png"), flyout.RootElement.ActualTheme != ElementTheme.Dark);
+                    }
+                    result = flyout.QaSyncRows();
+                    break;
                 // The on-demand host (item 6): its roots and each file's Cloud Files state; read <folder-relative path> reads a file
                 // (off the UI thread: a placeholder's read is filled by the host's callback).
                 case "ondemand":
@@ -1465,6 +1689,13 @@ public partial class App : Application
                     // write-when-stale <relative path> <text>: armed; the write lands when another device's change reaches the file, before it is let go of.
                     if (Arg(1) == "write-when-stale") { var srel = Arg(2); var stext = string.Join(' ', w.Skip(3)); result = Cloud.QaWriteWhenStale(srel, stext) + "; "; }
                     if (Arg(1) == "wrote-when-stale") result = $"wrote {Cloud.QaWroteWhenStale}; ";
+                    // hold <relative path> <text> | release: another program holds a file with no sharing (the core says Busy) and lets go.
+                    if (Arg(1) == "hold") { var hrel = Arg(2); var htext = string.Join(' ', w.Skip(3)); result = await Task.Run(() => Cloud.QaHold(hrel, htext)) + "; "; }
+                    if (Arg(1) == "hold-overwrite") { var orel = Arg(2); var otext = string.Join(' ', w.Skip(3)); result = await Task.Run(() => Cloud.QaHold(orel, otext, true)) + "; "; }
+                    if (Arg(1) == "release") result = await Task.Run(Cloud.QaRelease) + "; ";
+                    // vanish <relative path>: a new file goes away just before the host asks the core about it (a lasting error).
+                    if (Arg(1) == "vanish") { var vrel = Arg(2); result = await Task.Run(() => Cloud.QaVanish(vrel)) + "; "; }
+                    if (Arg(1) == "busy-status") result = CloudHost.QaBusyStatus() + "; ";
                     result += Cloud.QaStatus();
                     break;
                 // The Cloud Files plumbing's own check (item 6): a sync root in this run's temp state, no core involved.
@@ -1589,6 +1820,14 @@ public partial class App : Application
                         case "mode": af.QaMode(Arg(2) == "shared" ? SyncAddMode.Shared : SyncAddMode.Local); break;
                         case "folder": af.QaFolder(string.Join(' ', w.Skip(2))); break;
                         case "link": af.QaLink(string.Join(' ', w.Skip(2))); break;
+                        // typing <caret> <text>: the link typed, the caret there; its places arrive while the user types.
+                        case "typing":
+                            var typedLink = string.Join(' ', w.Skip(3));
+                            af.QaType(typedLink, int.Parse(Arg(2)));
+                            await Quiet.Settle(LibraryWindow.Content);
+                            // (Typing's TextChanged comes a moment later.)
+                            for (var waited = 0; af.Form.Key != typedLink && waited < 150; waited++) await Task.Delay(20);
+                            break;
                         case "location": af.QaLocation(string.Join(' ', w.Skip(2))); break;
                         case "parent": af.QaParent(string.Join(' ', w.Skip(2))); break;
                         case "devices": af.QaAllDevices(Arg(2) == "on"); break;
@@ -1599,8 +1838,10 @@ public partial class App : Application
                     }
                     if (AddFolderDialog.Open is AddFolderDialog afOpen)
                     {
+                        // A joinable link's places are read off the UI thread: the line says what they came to.
+                        await afOpen.PlacesRead();
                         var am = afOpen.Model;
-                        result += $"; add folder {afOpen.Form.Mode}, can start {am.CanStart}, folder \"{am.FolderText}\", link line \"{am.LinkLine}\", location \"{am.Location}\", on demand \"{am.OnDemandLabel ?? "none"}\" {afOpen.Form.OnDemand} note \"{am.OnDemandNote ?? ""}\", {QaFollow(am.Follow, am.ReadOnly)}, drawn [{afOpen.Switches}], failure \"{afOpen.Failure}\"";
+                        result += $"; add folder {afOpen.Form.Mode}, can start {am.CanStart}, folder \"{am.FolderText}\", link line \"{am.LinkLine}\", location \"{am.Location}\", on demand \"{am.OnDemandLabel ?? "none"}\" {afOpen.Form.OnDemand} note \"{am.OnDemandNote ?? ""}\", {QaFollow(am.Follow, am.ReadOnly)}, drawn [{afOpen.Switches}], failure \"{afOpen.Failure}\", pending {afOpen.Form.PlacesPending} reading {afOpen.PlacesReading}, focus \"{afOpen.QaFocused}\"";
                     }
                     if (ShareDialog.Open is not null) result += "; share open";
                     break;
@@ -1621,11 +1862,18 @@ public partial class App : Application
                         case "parent": ef.QaParent(string.Join(' ', w.Skip(2))); break;
                         case "share": ef.QaShare(); await Quiet.Settle(LibraryWindow.Content); break;
                         case "save": result = await ef.QaSave() ? "saved" : "not saved"; break;
+                        case "typing":
+                            ef.QaTypeName(string.Join(' ', w.Skip(3)), int.Parse(Arg(2)));
+                            await Quiet.Settle(LibraryWindow.Content);
+                            for (var waited = 0; ef.Form.Name != string.Join(' ', w.Skip(3)) && waited < 150; waited++) await Task.Delay(20);
+                            await Quiet.Settle(LibraryWindow.Content);
+                            break;
                         case "cancel": ef.QaCancel(); break;
                     }
                     if (EditFolderDialog.Open is EditFolderDialog efOpen)
                     {
                         var em = efOpen.Model;
+                        result += $"; focus \"{efOpen.QaFocused}\"";
                         result += $"; edit {em.Title}, changed {em.Changed}, can save {em.CanSave}, location \"{em.Location}\", share {(em.ShareTitle ?? "none")}, follow {(em.Follow is null ? "none" : em.Follow.On.ToString())}, on demand \"{em.OnDemandLabel ?? "none"}\" {efOpen.Form.OnDemand} note \"{em.OnDemandNote ?? ""}\", {QaFollow(em.Follow, em.ReadOnly)}, drawn [{efOpen.Switches}], failure \"{efOpen.Failure}\"";
                     }
                     if (ShareDialog.Open is not null) result += "; share open";
@@ -1634,7 +1882,15 @@ public partial class App : Application
                 // [days] | chat on|off [channel id] | devices on|off | readonly on|off | scroll-end | copy | revoke (the first link) | for <days> |
                 // noend | cancel | status. The link copied is never printed.
                 case "share":
-                    if (Arg(1) == "open") { ShareDialog.Show(this, FolderId(Arg(2))); await Quiet.Settle(LibraryWindow.Content); }
+                    // What acts on the form waits for it: it is read off the UI thread as the dialog opens.
+                    if (Arg(1) is not ("open" or "status" or "cancel" or "dropdown") && ShareDialog.Open is ShareDialog reading) await reading.Ready;
+                    if (Arg(1) == "open")
+                    {
+                        ShareDialog.Show(this, FolderId(Arg(2)));
+                        await Quiet.Settle(LibraryWindow.Content);
+                        // "nowait": as it opens, with its form still being read.
+                        if (Arg(3) != "nowait" && ShareDialog.Open is ShareDialog opened) { await opened.Ready; await opened.Unfolded; await Quiet.Settle(LibraryWindow.Content); }
+                    }
                     else if (ShareDialog.Open is not ShareDialog sd) { result = "not open"; break; }
                     else switch (Arg(1))
                     {
@@ -1649,12 +1905,19 @@ public partial class App : Application
                         case "revoke": sd.QaRevokeFirst(); await Task.Delay(500); break;
                         case "for": sd.QaShareFor(uint.TryParse(Arg(2), out var forDays) ? forDays : 7); await Task.Delay(500); break;
                         case "noend": sd.QaNoEnd(); await Task.Delay(500); break;
+                        // extend <days>: as Extend's menu does. refresh: the core's refresh_ms ran out. dropdown open|close: the first drop-down, as a click leaves it.
+                        // focus <label>: that control takes the keyboard's focus.
+                        case "focus": result = sd.QaFocus(Arg(2)) ? "focused" : "not focused"; await Quiet.Settle(LibraryWindow.Content); break;
+                        case "tooltip": sd.QaTooltip(Arg(2) == "open"); await Quiet.Settle(LibraryWindow.Content); await Task.Delay(300); break;
+                        case "extend": sd.QaExtend(uint.TryParse(Arg(2), out var extendDays) ? extendDays : 7); await Task.Delay(500); break;
+                        case "refresh": await sd.Refresh(); break;
+                        case "dropdown": sd.QaDropDown(Arg(2) == "open"); await Quiet.Settle(LibraryWindow.Content); break;
                         case "cancel": sd.QaCancel(); break;
                     }
                     if (ShareDialog.Open is ShareDialog sdOpen)
                     {
                         var sm = sdOpen.Model;
-                        result += $"; share {sm.Title}, role {sm.Role}, summary \"{sm.Summary}\", links {sm.Links.Length}, sharing \"{sm.Sharing?.Countdown ?? sm.Sharing?.Line ?? "none"}\", copy {(sm.CopyTitle ?? "none")}, {QaFollow(sm.Devices, sm.ReadOnly)}, drawn [{sdOpen.Switches}], setting devices {sdOpen.SettingDevices}, refusal \"{sm.Gone ?? sm.Refusal ?? ""}\", failure \"{sdOpen.Failure}\"";
+                        result += $"; share {sm.Title}, role {sm.Role}, summary \"{sm.Summary}\", links {sm.Links.Length}, sharing \"{sm.Sharing?.Countdown ?? sm.Sharing?.Line ?? "none"}\", copy {(sm.CopyTitle ?? "none")}, {QaFollow(sm.Devices, sm.ReadOnly)}, drawn [{sdOpen.Switches}], setting devices {sdOpen.SettingDevices}, refusal \"{sm.Gone ?? sm.Refusal ?? ""}\", failure \"{sdOpen.Failure}\", opening {sdOpen.Opening}, draws {sdOpen.Draws}, menu open {sdOpen.MenuOpen}, focus \"{sdOpen.QaFocused}\"";
                     }
                     break;
                 // The tray's right-click menu as drawn (its entries' titles, [x] when checked, (off) when disabled), or one
@@ -1813,20 +2076,39 @@ public partial class App : Application
                 case "shot":
                     pane.Refresh();
                     await Quiet.Settle(LibraryWindow.Content);
-                    var dir = Path.Combine(Path.GetDirectoryName(foldsFile) ?? "", "qa");
-                    Directory.CreateDirectory(dir);
-                    var file = Path.Combine(dir, $"{Arg(1)}.png");
+                    var file = Path.Combine(Path.GetDirectoryName(foldsFile) ?? "", "qa", $"{Arg(1)}.png");
                     // The whole window's content (the Get Info card and the title-bar question are part of it), or with
                     // "rendezvous" the Settings page's Cloudflare section alone (it lies below the window's fold).
                     // With "dialog" the open dialog (it lives in the popup layer, not under the window's content).
-                    var dialogPopup = Arg(2) == "dialog" && LibraryWindow.Content.XamlRoot is XamlRoot xr
-                        ? Microsoft.UI.Xaml.Media.VisualTreeHelper.GetOpenPopupsForXamlRoot(xr).Select(p => p.Child).OfType<UIElement>().FirstOrDefault()
-                        : null;
-                    // With "starting" the starting notifier (a window of its own).
-                    UIElement shown = dialogPopup ?? (Arg(2) == "starting" && StartingNotifier?.RootElement is UIElement notifier ? notifier
-                        : Arg(2) == "rendezvous" && pane.SettingsPageShown?.Rendezvous.Root is UIElement section ? section : LibraryWindow.Content);
-                    await SnapshotRenderer.SaveImage(shown, file, RequestedTheme == ApplicationTheme.Light);
-                    result = file;
+                    // (The biggest open popup that is no tooltip: a popup can be open and empty, and a tooltip the pointer or the
+                    // keyboard's focus opens over the dialog has a size and draws as nothing.)
+                    UIElement ShotOf()
+                    {
+                        var dialogPopup = Arg(2) == "dialog" && LibraryWindow.Content.XamlRoot is XamlRoot xr
+                            ? Microsoft.UI.Xaml.Media.VisualTreeHelper.GetOpenPopupsForXamlRoot(xr).Where(p => p.IsOpen).Select(p => p.Child).OfType<FrameworkElement>().Where(c => c is not ToolTip && c.ActualWidth > 0 && c.ActualHeight > 0).OrderByDescending(c => c.ActualWidth * c.ActualHeight).FirstOrDefault()
+                            : null;
+                        // With "starting" the starting notifier (a window of its own).
+                        return dialogPopup ?? (Arg(2) == "starting" && StartingNotifier?.RootElement is UIElement notifier ? notifier
+                            : Arg(2) == "rendezvous" && pane.SettingsPageShown?.Rendezvous.Root is UIElement section ? section : LibraryWindow.Content);
+                    }
+                    var shown = ShotOf();
+                    // Below the fold nothing draws it: in view first.
+                    if (Arg(2) == "rendezvous" && shown is FrameworkElement below && shown != LibraryWindow.Content)
+                    {
+                        below.StartBringIntoView();
+                        await Quiet.Settle(LibraryWindow.Content);
+                    }
+                    // A shot asked for is a picture, or says why not. Drawn again after the next frame, and said: not hidden.
+                    var why = await SnapshotRenderer.SaveImage(shown, file, RequestedTheme == ApplicationTheme.Light);
+                    var again = 0;
+                    while (why is not null && again < 3)
+                    {
+                        again++;
+                        await Quiet.Settle(LibraryWindow.Content);
+                        why = await SnapshotRenderer.SaveImage(ShotOf(), file, RequestedTheme == ApplicationTheme.Light);
+                    }
+                    if (why is not null) throw new InvalidOperationException($"{Arg(1)}: no picture: {why}");
+                    result = again == 0 ? file : $"{file}, drawn only at try {again + 1}";
                     break;
                 default: result = "unknown"; break;
             }
@@ -1838,6 +2120,7 @@ public partial class App : Application
         pane.Refresh();
         var m = pane.Model;
         AppLog.Write($"qa {QaSaid(w)}: {result}; place {m?.Place}, selection [{string.Join(", ", m?.Selection ?? [])}], removal {(m?.Removal is PendingRemoval pr ? $"{pr.RowId ?? "(title bar)"}: {pr.Question.Message}" : "none")}");
+        return result;
     }
 
     /// <summary>Quit, asked from another thread (a second launch with --quit).</summary>

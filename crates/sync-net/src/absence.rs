@@ -10,8 +10,8 @@
 use std::io;
 use std::net::SocketAddr;
 
-use trs_sync_proto::ids::DeviceId;
-use trs_sync_proto::members::Role;
+use seedwell_sync_proto::ids::DeviceId;
+use seedwell_sync_proto::members::Role;
 
 use crate::status::GoneDevice;
 
@@ -122,7 +122,7 @@ pub(crate) fn waiting(absent: &[Absent], now: u64) -> Option<String> {
         [one] => {
             let seen = match one.last_seen_s {
                 Some(t) => format!("last seen {}", ago(now, t)),
-                None => concat!("never connected to this ", trs_platform::computer!()).to_string(),
+                None => concat!("never connected to this ", seedwell_platform::computer!()).to_string(),
             };
             let why = one.problem.as_deref().map(|p| format!(": {p}")).unwrap_or_default();
             Some(format!("Waiting for {} ({seen}{why})", one.shown()))
@@ -155,7 +155,7 @@ pub(crate) fn reach_problem(addr: SocketAddr, e: &io::Error) -> String {
         io::ErrorKind::TimedOut => format!("no answer at {addr}"),
         io::ErrorKind::PermissionDenied => format!("another device answers at {addr} now"),
         io::ErrorKind::HostUnreachable | io::ErrorKind::NetworkUnreachable | io::ErrorKind::AddrNotAvailable => {
-            format!(concat!("{addr} is not reachable from this ", trs_platform::computer!(), "'s network"), addr = addr)
+            format!(concat!("{addr} is not reachable from this ", seedwell_platform::computer!(), "'s network"), addr = addr)
         }
         _ => format!("{addr}: {e}"),
     }
@@ -180,11 +180,11 @@ mod tests {
         let never = Absent { last_seen_s: None, ..mini.clone() };
         assert_eq!(
             waiting(std::slice::from_ref(&never), NOW).unwrap(),
-            concat!("Waiting for Kristian's Mac mini (never connected to this ", trs_platform::computer!(), ": nothing answers at 192.168.68.57:55799)")
+            concat!("Waiting for Kristian's Mac mini (never connected to this ", seedwell_platform::computer!(), ": nothing answers at 192.168.68.57:55799)")
         );
         let nameless = Absent { name: " ".into(), problem: None, ..never };
         let first = nameless.id.to_string().split('-').next().unwrap().to_string();
-        assert_eq!(waiting(&[nameless], NOW).unwrap(), format!(concat!("Waiting for device {} (never connected to this ", trs_platform::computer!(), ")"), first));
+        assert_eq!(waiting(&[nameless], NOW).unwrap(), format!(concat!("Waiting for device {} (never connected to this ", seedwell_platform::computer!(), ")"), first));
         assert_eq!(waiting(&[], NOW), None, "nobody away");
     }
 

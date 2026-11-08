@@ -9,6 +9,9 @@ Seedwell installer for Windows: downloads a release from GitHub, checks its SHA-
   & ([scriptblock]::Create((irm <that url>))) -Uninstall         remove it (asks before deleting your data)
   install.ps1 -Zip Seedwell-X-windows-x64.zip [-Sha256 HEX]      install a zip you already have (a test build)
   install.ps1 -Rollback -StateDir DIR                            put back the app kept in DIR\previous (see below)
+  install.ps1 -Restart -AppPid PID                               quit the installed app running as process PID and start
+                                                                 it again as it was started, replacing nothing and
+                                                                 ending nothing else (seedwell restart)
 
 With a state folder (-StateDir, or SEEDWELL_INSTALL_STATE_DIR from the app's updater) an install keeps the app it
 replaces in DIR\previous (a zip, its own installer, its version), when DIR\launch-ok says that app started fine; then
@@ -33,7 +36,9 @@ param(
     [string]$Zip,
     [string]$Sha256,
     [switch]$Rollback,
-    [string]$StateDir
+    [string]$StateDir,
+    [switch]$Restart,
+    [int]$AppPid
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # Windows PowerShell's progress bar makes downloads many times slower
@@ -71,13 +76,14 @@ function Ask($question) {
 # started, to reopen it the same way. -Force (an app that did not start fine, going back): one that does not quit within
 # 30 s is ended instead. The app is Seedwell.exe in the folder itself, never the CLI (cli\seedwell.exe: Windows matches
 # names without case). Anything else running from the folder (the CLI: a command, an agent's watch) would keep the
-# folder from being replaced: it is ended once the apps have quit, and whoever ran it starts it again.
-function Stop-Running($dir, [switch]$Force) {
+# folder from being replaced: it is ended once the apps have quit, and whoever ran it starts it again. -Only <pid>
+# (a restart): only that app is quit, and nothing else is ended (nothing is replaced; the CLI that asked waits).
+function Stop-Running($dir, [switch]$Force, [int]$Only = 0) {
     $app = Join-Path $dir 'Seedwell.exe'
     $inside = $dir.TrimEnd('\') + '\'
     $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($inside, [StringComparison]::OrdinalIgnoreCase) })
-    $running = @($all | Where-Object { $_.ExecutablePath -ieq $app })
-    $others = @($all | Where-Object { $_.ExecutablePath -ine $app })
+    $running = @($all | Where-Object { $_.ExecutablePath -ieq $app -and ($Only -eq 0 -or $_.ProcessId -eq $Only) })
+    $others = @(if ($Only -eq 0) { $all | Where-Object { $_.ExecutablePath -ine $app } })
     $started = @()
     if ($running.Count -gt 0) { Say "Quitting the running $AppName (trackers are told 'stopped', up to two minutes)" }
     foreach ($r in $running) {
@@ -235,6 +241,20 @@ if ($Rollback) {
     Set-Location ([IO.Path]::GetTempPath())
     Restore-Previous
     Say 'Done.'
+    return
+}
+
+# seedwell restart: the app's own updater starts this; the app quits and starts again, nothing is replaced.
+if ($Restart) {
+    if ($AppPid -le 0) { Die '-Restart needs -AppPid with the app''s process id' }
+    Set-Location ([IO.Path]::GetTempPath())
+    # The app answers the agent before it is asked to quit.
+    Start-Sleep -Seconds 1
+    Say "Restarting $AppName (process $AppPid)"
+    $found = @(Stop-Running $Dest -Only $AppPid)
+    if ($found.Count -eq 0) { Die "process $AppPid is not $(Join-Path $Dest 'Seedwell.exe')" }
+    $null = Open-App (Reopen-Lines $found)
+    Say "Started $AppName again"
     return
 }
 

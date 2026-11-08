@@ -18,7 +18,7 @@
 //! | `need` | path | need kind, holders, the current version's wire entry |
 //! | `chunks` | (hash, path, offset) | `()`: where a valid local file holds a chunk |
 //!
-//! Records use the wire encoding of `trs-sync-proto` (varints, capped lengths), so the decoder that
+//! Records use the wire encoding of `seedwell-sync-proto` (varints, capped lengths), so the decoder that
 //! checks what peers send also checks what comes off the disk. A record that does not decode is an
 //! [`io::ErrorKind::InvalidData`] error naming its table and key; nothing panics on a damaged file
 //! (redb's own panics on broken pages are caught and returned as errors too).
@@ -57,7 +57,7 @@
 //! # Schema
 //!
 //! [`SCHEMA`] is version 1. An older file is copied to `<file>.v<N>.<n>.bak` and migrated in one
-//! transaction ([`Migration`], the `trs-state` pattern); a file from a newer schema is refused and
+//! transaction ([`Migration`], the `seedwell-state` pattern); a file from a newer schema is refused and
 //! left untouched.
 
 use std::collections::BTreeSet;
@@ -72,11 +72,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use redb::{
     Database, ReadTransaction, ReadableDatabase, ReadableTable, Table, TableDefinition, WriteTransaction,
 };
-use trs_sync_proto::codec::{DecodeError, Reader, put_ivarint, put_varint};
-use trs_sync_proto::ids::ShortId;
-use trs_sync_proto::model::{FileInfo, IndexEntry, MAX_CHUNK, MAX_COUNTERS, MAX_PATH, SignedFile};
-use trs_sync_proto::msg::{MAX_CHUNKS, decode_entry, encode_entry, encode_index_entry};
-use trs_sync_proto::sign::Writer;
+use seedwell_sync_proto::codec::{DecodeError, Reader, put_ivarint, put_varint};
+use seedwell_sync_proto::ids::ShortId;
+use seedwell_sync_proto::model::{FileInfo, IndexEntry, MAX_CHUNK, MAX_COUNTERS, MAX_PATH, SignedFile};
+use seedwell_sync_proto::msg::{MAX_CHUNKS, decode_entry, encode_entry, encode_index_entry};
+use seedwell_sync_proto::sign::Writer;
 
 use crate::global::Need;
 use crate::index::{IndexStore, LocalRecord, Meta, NeedRecord, Op, PeerState, Stamp, TierMemo, counted, offsets};
@@ -233,6 +233,17 @@ impl std::ops::Deref for Rtx {
             Rtx::Pinned(t) => t,
         }
     }
+}
+
+/// **Tests only:** milliseconds every read through a [`RedbReader`]'s view waits before it reads ([`test_slow_view_reads`]).
+static VIEW_READ_WAIT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// **Tests only:** every read through a [`RedbReader`]'s view (a view, a snapshot) waits `wait` first, as a read of the
+/// index file waits for the disk: on Windows a read of a file waits for a flush of it in progress, and the index's
+/// commits flush it. For the whole process. A call that must never wait for the disk is timed with it on.
+#[doc(hidden)]
+pub fn test_slow_view_reads(wait: std::time::Duration) {
+    VIEW_READ_WAIT_MS.store(wait.as_millis() as u64, Ordering::SeqCst);
 }
 
 /// A read-only handle on an open index, for reads that must not wait for whoever holds the store: a device
@@ -448,6 +459,12 @@ impl RedbStore {
     }
 
     fn rtx(&self) -> io::Result<Rtx> {
+        if self.read_only {
+            let wait = VIEW_READ_WAIT_MS.load(Ordering::Relaxed);
+            if wait > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(wait));
+            }
+        }
         match &self.pinned {
             Some(t) => Ok(Rtx::Pinned(t.clone())),
             None => self.db.begin_read().map(Rtx::Own).map_err(dbe),
@@ -482,10 +499,10 @@ fn create_atomically(dir: &Path, path: &Path, index_id: u64, opts: &OpenOptions)
     {
         prepare(open_database(&tmp, &OpenOptions { verify: false, ..*opts })?, &tmp, index_id, opts)?;
     }
-    trs_platform::fs::sync_file(&tmp)?;
+    seedwell_platform::fs::sync_file(&tmp)?;
     fs::rename(&tmp, path)?;
     // Make the rename durable.
-    trs_platform::fs::sync_dir(dir)
+    seedwell_platform::fs::sync_dir(dir)
 }
 
 fn stored_version(rtx: &ReadTransaction) -> io::Result<Option<u32>> {
@@ -639,7 +656,7 @@ fn back_up(path: &Path, version: u32) -> io::Result<PathBuf> {
         .find(|p| !p.exists())
         .unwrap_or_else(|| PathBuf::from(format!("{base}.v{version}.bak")));
     fs::copy(path, &backup)?;
-    trs_platform::fs::sync_file(&backup)?;
+    seedwell_platform::fs::sync_file(&backup)?;
     Ok(backup)
 }
 

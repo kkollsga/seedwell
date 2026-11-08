@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import SeedwellApp
 
-// Settings › Devices (SPEC §7G.1 "Your devices"): the words and states are the core's (trs-ffi `devices_text.rs`,
+// Settings › Devices (SPEC §7G.1 "Your devices"): the words and states are the core's (seedwell-ffi `devices_text.rs`,
 // tested there); these check the tab's model: which sheet shows what, the removal's ticks, and the paste field. A mock
 // core over a temporary folder (no service runs, so nothing is paired).
 

@@ -1,4 +1,4 @@
-//! Integration tests of trs-sync (one binary; temp folders only).
+//! Integration tests of seedwell-sync (one binary; temp folders only).
 
 mod flow;
 mod ignored;

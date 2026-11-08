@@ -5,10 +5,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use trs_sync_net::secrets::FileSecrets;
-use trs_sync_net::session::Via;
-use trs_sync_net::{Options, SyncHandle};
-use trs_sync_proto::ids::FolderId;
+use seedwell_sync_net::secrets::FileSecrets;
+use seedwell_sync_net::session::Via;
+use seedwell_sync_net::{Options, SyncHandle};
+use seedwell_sync_proto::ids::FolderId;
 
 pub(crate) struct Device {
     pub(crate) h: SyncHandle,
@@ -89,7 +89,7 @@ async fn two_devices_sync_over_utp_only() {
 
     let st = a.h.add_folder(fa.path().to_path_buf()).await.unwrap();
     let id: FolderId = st.id.parse().unwrap();
-    let key = a.h.create_invite(&id, trs_sync_proto::members::Role::ReadWrite, 1, 1).unwrap().link;
+    let key = a.h.create_invite(&id, seedwell_sync_proto::members::Role::ReadWrite, 1, 1).unwrap().link;
     let dest = fb.path().join("Shared");
     b.h.join_folder(&key, dest.clone()).await.unwrap();
     b.h.add_address(&id, addr(&a)).unwrap();

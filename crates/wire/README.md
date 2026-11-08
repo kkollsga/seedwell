@@ -1,13 +1,14 @@
-# trs-wire
+# seedwell-wire
 
 BitTorrent peer wire protocol for Seedwell. Sans-I/O: bytes in, messages out, no sockets, no clock, no async runtime.
-`#![forbid(unsafe_code)]`. Depends on `trs-*` crates: none (info hash and peer id are plain `[u8; 20]`).
+`#![forbid(unsafe_code)]`. Depends on `seedwell-*` crates: none (info hash and peer id are plain `[u8; 20]`).
 
 | BEP | What | Where |
 |---|---|---|
 | 3 | handshake, choke/unchoke/interested/not interested/have/bitfield/request/piece/cancel/port | `handshake`, `message`, `codec` |
 | 6 | Fast: suggest, have all, have none, reject request, allowed fast + allowed-fast set generation | `message`, `fast` |
 | 10 | extension protocol, extended handshake (`m`, `v`, `reqq`, `p`, `yourip`, `metadata_size`, `upload_only`), unknown-extension passthrough | `extended` |
+| 21 | `upload_only` in the handshake; libtorrent's `upload_only` message (one byte, always listed in our `m`), the only way libtorrent clears it | `extended` |
 | 9 | `ut_metadata` request/data/reject, 16 KiB pieces, assembly + SHA-1 verification, 16 MiB cap | `metadata` |
 | 11 | `ut_pex` added/added.f/dropped, v4 + v6, send/receive caps | `pex` |
 | 27 | PEX never advertised or parsed for private torrents; no DHT bit in the handshake | `ExtPolicy`, `Reserved::ours` |
@@ -15,7 +16,7 @@ BitTorrent peer wire protocol for Seedwell. Sans-I/O: bytes in, messages out, no
 ## Usage sketch
 
 ```rust
-use trs_wire::*;
+use seedwell_wire::*;
 use bytes::BytesMut;
 
 let private = false;
@@ -42,7 +43,7 @@ For the hottest path use `Decoder::decode_ref(&[u8])`, which returns `MessageRef
 The primitives of the obfuscated handshake that Transmission, libtorrent and others open connections with: 768-bit Diffie-Hellman in the
 fixed MSE group (`public_key`, `shared_secret`; a Montgomery multiplier over twelve 64-bit limbs, checked against Python's `pow`;
 degenerate public values 0, 1, p-1 and above p are refused), RC4 with the 1,024-byte discard (`Rc4`), and the SHA-1 helper (`hash`).
-The protocol on a socket is in `trs-engine` (`mse.rs`). Not constant-time: the exponents are fresh per connection and the scheme
+The protocol on a socket is in `seedwell-engine` (`mse.rs`). Not constant-time: the exponents are fresh per connection and the scheme
 offers obfuscation, not authentication.
 
 `Reserved::ours_with(private, dht)` sets the DHT bit of the handshake only when a DHT node runs (and never for a private torrent).
@@ -59,7 +60,7 @@ offers obfuscation, not authentication.
 
 ## Per-connection memory
 
-Target: <= 2 KiB of protocol state per idle peer, socket buffers excluded. Measured with `cargo run -p trs-wire --example peer_sizes`:
+Target: <= 2 KiB of protocol state per idle peer, socket buffers excluded. Measured with `cargo run -p seedwell-wire --example peer_sizes`:
 
 | Item | Bytes | Notes |
 |---|---|---|
@@ -79,11 +80,11 @@ Transient: `MetadataAssembler` (64 B + metadata size, only while fetching a magn
 - `sha1` (no default features): `ut_metadata` verification and the allowed-fast set; uses the ARMv8 SHA extensions on Apple silicon.
 - dev only: `proptest`.
 
-Not used: `trs-bencode`. The extension dictionaries are tiny, flat and attacker-controlled, and `ut_metadata` data messages append raw bytes after the dictionary, so `src/bencode.rs` is a ~150-line allocation-free borrowed walker with the same strict integer rules and a depth limit of 8. This also keeps the crate free of a cross-crate API dependency. If the engine wants one bencode implementation, swapping it in is local to that file.
+Not used: `seedwell-bencode`. The extension dictionaries are tiny, flat and attacker-controlled, and `ut_metadata` data messages append raw bytes after the dictionary, so `src/bencode.rs` is a ~150-line allocation-free borrowed walker with the same strict integer rules and a depth limit of 8. This also keeps the crate free of a cross-crate API dependency. If the engine wants one bencode implementation, swapping it in is local to that file.
 
 ## Tests and tools
 
-- `cargo test -p trs-wire`: unit tests next to the code (byte-exact vectors for every message, handshake edge cases, partial reads at every split point, oversized/garbage input, PEX caps, ut_metadata with a corrupt piece, BEP 6 example vectors), `tests/proptests.rs`, `tests/flow.rs` (two in-memory peers).
-- `cargo bench -p trs-wire`: decode throughput (`benches/decode.rs`, plain harness).
+- `cargo test -p seedwell-wire`: unit tests next to the code (byte-exact vectors for every message, handshake edge cases, partial reads at every split point, oversized/garbage input, PEX caps, ut_metadata with a corrupt piece, BEP 6 example vectors), `tests/proptests.rs`, `tests/flow.rs` (two in-memory peers).
+- `cargo bench -p seedwell-wire`: decode throughput (`benches/decode.rs`, plain harness).
 - `cargo +nightly fuzz run decoder` / `extensions` from `crates/wire` (targets in `fuzz/`).
-- `cargo test -p trs-wire --test network -- --ignored --nocapture`: live handshake + extended handshake + `ut_metadata` fetch against the Debian netinst swarm (one `started` and one `stopped` announce, at most 12 short connections, no payload data).
+- `cargo test -p seedwell-wire --test network -- --ignored --nocapture`: live handshake + extended handshake + `ut_metadata` fetch against the Debian netinst swarm (one `started` and one `stopped` announce, at most 12 short connections, no payload data).

@@ -11,7 +11,7 @@
 # folder (only once its build.json is signed: with a throwaway test key, which this isolated copy is told to trust by
 # SEEDWELL_TEST_BUILD_KEY; the user's app never reads that variable); and the switch turned off, which installs the
 # (loopback) release although it is older than the build.
-# Needs a built app (bash app/build.sh); builds the signer (trs-buildsig) itself.
+# Needs a built app (bash app/build.sh); builds the signer (seedwell-buildsig) itself.
 set -euo pipefail
 export QA_ROOT=/private/tmp/claude-501/seedwell-qa-update
 source "$(dirname "$0")/env.sh"
@@ -139,7 +139,7 @@ build_zip() {
 cli() { "$CLI" --socket "$STATE/control.sock" "$@"; }
 status_says() { cli update | grep -q "$1"; }
 # A throwaway build key for the watched folder (never the user's: that one is in the Keychain and not used here).
-(cd "$REPO" && cargo build --release --locked --quiet -p trs-buildsig --bin seedwell-build-sign)
+(cd "$REPO" && cargo build --release --locked --quiet -p seedwell-buildsig --bin seedwell-build-sign)
 SIGNER="$REPO/target/release/seedwell-build-sign"
 TEST_SEED=$("$SIGNER" keygen 2>/dev/null)
 TEST_KEY=$(printf '%s' "$TEST_SEED" | "$SIGNER" public)

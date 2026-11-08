@@ -1,4 +1,4 @@
-# trs-utp
+# seedwell-utp
 
 uTP (BEP 29, "Micro Transport Protocol") with LEDBAT congestion control (RFC 6817) for Seedwell.
 Lets the engine talk to the many peers that prefer uTP, and makes background seeding yield to the
@@ -80,8 +80,8 @@ replies with `0x00`, NAT-PMP with `0x00`, so none can match. Everything else is 
 `Disposition::Foreign`; the driver forwards it into the `mpsc::Sender<ForeignDatagram>` given at
 bind time (bounded 1024-ish by the caller; dropped and counted in `foreign_dropped` when full) and
 `send_foreign` / `try_send_foreign` (never waits) send replies from the same socket. A uTP-shaped but
-malformed datagram is consumed and dropped, never forwarded. `trs-engine` uses exactly this: its UDP
-socket on the listen port is a `UtpSocket`, and `trs_dht::spawn_shared` drives `DhtCore` from the foreign
+malformed datagram is consumed and dropped, never forwarded. `seedwell-engine` uses exactly this: its UDP
+socket on the listen port is a `UtpSocket`, and `seedwell_dht::spawn_shared` drives `DhtCore` from the foreign
 channel (see the engine README, "uTP and the shared UDP port").
 
 ## Protocol details (libutp-compatible)
@@ -185,7 +185,7 @@ build past 400 B):
 Buffers (`send`, `recv`, in-flight metadata, reorder list) are empty `Vec`s at creation, grow on
 demand, and are freed one second after a connection goes idle (`buffered_heap_bytes() == 0`).
 
-Measured RSS (`cargo run --release -p trs-utp --example idle_mem -- N`, two sockets in one process,
+Measured RSS (`cargo run --release -p seedwell-utp --example idle_mem -- N`, two sockets in one process,
 each connection exchanged 20 bytes, then idle, N = 500 / 1000 / 3000): **1065 / 999 / 816 bytes of
 RSS per connection end**, including tokio's per-task bookkeeping and hash-table slack, with the
 buffer heap back to 0 B. With 1000 idle connections the driver task woke **0 times in 20 s**
@@ -194,7 +194,7 @@ buffer heap back to 0 B. With 1000 idle connections the driver task woke **0 tim
 ## Test results
 
 All simulator numbers are deterministic (virtual time, seeded) and reproduce with
-`cargo test -p trs-utp --test sim_basic --test sim_ledbat --release -- --nocapture`.
+`cargo test -p seedwell-utp --test sim_basic --test sim_ledbat --release -- --nocapture`.
 Simulated path: 10 Mbit/s each way, 40 ms RTT, 200-300 KB drop-tail queue, 1400 B payload.
 
 | Scenario | Result |
@@ -226,7 +226,7 @@ LEDBAT window response and delay filter, buffers, idle release, struct sizes).
 
 ### Loopback through tokio (macOS, Apple Silicon, release build, 4 worker threads)
 
-`cargo run --release -p trs-utp --example loopback_bench -- <payload> <MiB> <streams>`, CPU from
+`cargo run --release -p seedwell-utp --example loopback_bench -- <payload> <MiB> <streams>`, CPU from
 `/usr/bin/time -l` (user + sys; sys is the UDP syscalls, one per datagram):
 
 | Payload | Streams | Data | Wall | Throughput | CPU (user + sys) |
@@ -241,7 +241,7 @@ failure, the shared port with DHT-style traffic, and byte-exact 128 MiB / 256 Mi
 
 ## Interop (Transmission 4.1.3, libutp)
 
-`crates/utp/interop/transmission.sh` (also `cargo test -p trs-utp --test interop_transmission -- --ignored`)
+`crates/utp/interop/transmission.sh` (also `cargo test -p seedwell-utp --test interop_transmission -- --ignored`)
 runs two throw-away `transmission-daemon`s with their own `-g` config dirs under
 `bench/runs/utp-interop/` (git-ignored; DHT, LPD, PEX, port-mapping off; never touches
 Transmission.app preferences) on a generated 16 MiB torrent:
@@ -270,9 +270,9 @@ the example speaks no MSE.
   connection ids), no `bytes` (a `Vec` with a head offset gives contiguous slices for packetizing),
   no `socket2` (default OS UDP buffers are sufficient so far, see gaps).
 
-## Diagnostics: `TRS_UTP_TRACE`
+## Diagnostics: `SEEDWELL_UTP_TRACE`
 
-`TRS_UTP_TRACE=1` (any value but `0`, read when a socket is created) makes the library print to stderr, stamped
+`SEEDWELL_UTP_TRACE=1` (any value but `0`, read when a socket is created) makes the library print to stderr, stamped
 with wall-clock milliseconds so it lines up with a `netstat -I lo0 -b` timeline (`bench/scripts/lo0-timeline.py`):
 inbound SYNs, retransmission timeouts (with the full state line), fast-retransmit losses, path-MTU probe results,
 zero-window periods and persist probes, FIN / app drop / lingering / close, plus every 500 ms a state line

@@ -14,8 +14,8 @@ use std::task::{Context, Poll};
 use bytes::BytesMut;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
-use trs_utp::UtpStream;
-use trs_wire::mse::Rc4;
+use seedwell_utp::UtpStream;
+use seedwell_wire::mse::Rc4;
 
 /// A peer connection over either transport.
 // size: the larger of the two handles (about 48 bytes)
@@ -293,6 +293,14 @@ impl AddrSet {
     }
 }
 
+/// The one way an address is written in the engine: an IPv4 peer as IPv4, never IPv4-mapped
+/// (`::ffff:a.b.c.d`, how a dual-stack socket reports it). Trackers and PEX give the IPv4 form; with
+/// two forms of one address the in-use check would dial a connected peer again and a seed marked under
+/// one form would be dialled under the other.
+pub(crate) fn canonical(a: SocketAddr) -> SocketAddr {
+    SocketAddr::new(a.ip().to_canonical(), a.port())
+}
+
 /// A public IPv4 address (also written IPv4-mapped): a peer that connects in from one proves the
 /// port is open to the Internet, as a tracker's "connectable" check would. LAN, CGNAT and loopback
 /// addresses prove nothing.
@@ -301,7 +309,7 @@ pub(crate) fn is_internet_v4(addr: SocketAddr) -> bool {
         std::net::IpAddr::V4(ip) => Some(ip),
         std::net::IpAddr::V6(ip) => ip.to_ipv4_mapped(),
     };
-    v4.is_some_and(trs_portmap::is_public_ipv4)
+    v4.is_some_and(seedwell_portmap::is_public_ipv4)
 }
 
 #[cfg(test)]
@@ -331,6 +339,23 @@ mod tests {
         }
         for a in no {
             assert!(!is_internet_v4(a.parse().unwrap()), "{a}");
+        }
+    }
+
+    /// An accepted IPv4 peer must be known by the address trackers and PEX give for it: a mapped form
+    /// left as it is missed the in-use check and the seed marks. Real IPv6 stays IPv6 (`::1` is not
+    /// IPv4-mapped, and an IPv4-compatible `::a.b.c.d` is not unmapped either).
+    #[test]
+    fn canonical_unmaps_ipv4_only() {
+        for (from, want) in [
+            ("[::ffff:203.0.113.5]:6881", "203.0.113.5:6881"),
+            ("[::ffff:127.0.0.1]:1", "127.0.0.1:1"),
+            ("203.0.113.5:6881", "203.0.113.5:6881"),
+            ("[2001:db8::1]:6881", "[2001:db8::1]:6881"),
+            ("[::1]:6881", "[::1]:6881"),
+            ("[::203.0.113.5]:6881", "[::203.0.113.5]:6881"),
+        ] {
+            assert_eq!(canonical(from.parse().unwrap()), want.parse::<SocketAddr>().unwrap(), "{from}");
         }
     }
 }

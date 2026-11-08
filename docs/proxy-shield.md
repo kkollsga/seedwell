@@ -153,6 +153,5 @@ shield stands out from the window by 2:1.
 - `proxy-shield-rows-<light|dark>.png`: the icon in place, through the SwiftUI view, beside a title at 28 pt and in
   rows of body text at 16 pt.
 
-The renders of the first version (2026-11-05) were handed to the coordinator in
-`/private/tmp/claude-501/-Volumes-EksternalHome-Koding-Rust-TorrentRS/ac1d7bed-0e70-4c3f-9703-a94b88c60b86/scratchpad/proxy-icon/`
-(a session's scratch folder: render them anew with the command above when it is gone).
+The renders of the first version (2026-11-05) went to the coordinator in a session scratch folder that no longer
+exists: render them anew with the command above.

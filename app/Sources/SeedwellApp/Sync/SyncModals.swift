@@ -5,17 +5,43 @@ import SwiftUI
 // with Cancel and the primary action at the bottom right.
 
 /// The add modal's state: what is chosen or pasted, and Start. The form, its rules and every word are the core's
-/// (`Core::sync_add_*`, trs-ffi `sync_dialogs.rs`).
+/// (`Core::sync_add_*`, seedwell-ffi `sync_dialogs.rs`). Its calls on the main thread never look at the disk; a pasted link's
+/// places (its default place, a folder of that name there already) are read off it (`readPlaces`).
 @MainActor @Observable final class SyncAddModel {
     @ObservationIgnored let core: Core
     var form: SyncAddForm
     var error: String?
     var busy = false
+    /// Reads of a pasted link's places on their way.
+    @ObservationIgnored private var reading = 0
 
     /// `prefill`: a pasted link (Shared with me).
     init(core: Core, prefill: String? = nil) {
         self.core = core
         form = core.syncAddForm(prefill: prefill)
+        readPlaces()
+    }
+
+    /// The pasted link's places, read off the main thread: they look at the disk, which may be a network drive that
+    /// does not answer. The core keeps the answer only while the form still has that link and its places are not read.
+    private func readPlaces() {
+        guard form.placesPending else { return }
+        let (core, key) = (core, form.key)
+        reading += 1
+        Task { [weak self] in
+            let read = await core.syncAddPlaces(link: key)
+            guard let self else { return }
+            reading -= 1
+            form = syncAddSetPlaces(form: form, places: read)
+        }
+    }
+
+    /// Once every pasted link's places are read and handed to the form, or after `limit` at most (the renderer, tests).
+    func ready(within limit: Duration = .seconds(5)) async {
+        let end = ContinuousClock.now + limit
+        while (form.placesPending || reading > 0) && ContinuousClock.now < end {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
     }
 
     /// The dialog as the core draws it from the form.
@@ -24,6 +50,7 @@ import SwiftUI
     func setKey(_ text: String) {
         form = core.syncAddSetLink(form: form, text: text)
         error = nil
+        readPlaces()
     }
 
     /// The link field's text. SwiftUI hands the field's text back while it is being edited (in layout passes, and when
@@ -50,6 +77,11 @@ import SwiftUI
 
     func chooseFolder() {
         guard let path = pick(window.folderPicker) else { return }
+        setFolder(path)
+    }
+
+    /// The folder Choose… picked (QA's `sync-add choose` hands it the path the panel would give).
+    func setFolder(_ path: String) {
         form.folder = path
         error = nil
     }
@@ -238,7 +270,7 @@ struct SyncAddView: View {
 }
 
 /// The edit modal's state. Name, location and options apply on Save. The form, its rules and every word are the
-/// core's (`Core::sync_edit_*`, trs-ffi `sync_dialogs.rs`).
+/// core's (`Core::sync_edit_*`, seedwell-ffi `sync_dialogs.rs`).
 @MainActor @Observable final class SyncEditModel {
     @ObservationIgnored let core: Core
     let id: String
@@ -456,7 +488,8 @@ struct ReadOnlyToggle: View {
 
 /// The add and edit windows: one add window, one edit window per folder. The menu closes before they open.
 @MainActor final class SyncWindows: NSObject, NSWindowDelegate {
-    private var add: (NSWindow, SyncAddModel)?
+    /// The add window, its model and what its Start does when done (the view's, which QA's `sync-add start` uses too).
+    private var add: (NSWindow, SyncAddModel, (SyncFolder, Bool) -> Void)?
     private var edits: [String: NSWindow] = [:]
     private var finder: NSWindow?
     private var fileProvider: NSWindow?
@@ -465,22 +498,33 @@ struct ReadOnlyToggle: View {
     var qaAddModel: SyncAddModel? { add?.1 }
     var qaWindow: NSWindow? { add?.0 ?? edits.values.first }
 
+    /// The add window's Start button, as the view presses it (QA's `sync-add start`).
+    func qaStartAdd() -> Bool {
+        guard let (_, model, done) = add else { return false }
+        model.start(done: done)
+        return true
+    }
+
+    /// The open edit and share windows' folder ids (QA's `sync-add state`).
+    var qaOpen: (edits: [String], shares: [String]) { (edits.keys.sorted(), shares.keys.sorted()) }
+
     func showAdd(prefill: String?, actions: SyncActions) {
-        if let (w, m) = add {
+        if let (w, m, _) = add {
             if let prefill { m.form.mode = .shared; m.setKey(prefill) }
             NSApp.activate(); w.makeKeyAndOrderFront(nil)
             return
         }
         let model = SyncAddModel(core: actions.core, prefill: prefill ?? actions.pastedKey())
-        let view = SyncAddView(model: model, cancel: { [weak self] in self?.closeAdd() }, done: { [weak self] f, share in
+        let done: (SyncFolder, Bool) -> Void = { [weak self] f, share in
             self?.closeAdd()
             // On demand: its domain now, and the window that asks the user to allow it when macOS keeps it off.
             if f.onDemand, let fp = actions.fileProvider { Task { await fp.added(f) } }
             // A folder shared from this Mac: the next step is sharing it.
             if share { self?.showShare(id: f.id, actions: actions) }
-        })
+        }
+        let view = SyncAddView(model: model, cancel: { [weak self] in self?.closeAdd() }, done: done)
         let w = makeWindow(NSHostingController(rootView: view), id: "sync-add")
-        add = (w, model)
+        add = (w, model, done)
         NSApp.activate()
         w.makeKeyAndOrderFront(nil)
     }
@@ -499,11 +543,47 @@ struct ReadOnlyToggle: View {
     /// The Share dialog of a folder (one per folder).
     func showShare(id: String, actions: SyncActions) {
         if let w = shares[id] { NSApp.activate(); w.makeKeyAndOrderFront(nil); return }
-        let view = SyncShareView(model: SyncShareModel(core: actions.core, id: id), actions: actions, done: { [weak self] in self?.closeShare(id) })
+        let model = SyncShareModel(core: actions.core, id: id)
+        let view = SyncShareView(model: model, actions: actions, done: { [weak self] in self?.closeShare(id) })
         let w = makeWindow(NSHostingController(rootView: view), id: "sync-share-\(id)")
         shares[id] = w
-        NSApp.activate()
-        w.makeKeyAndOrderFront(nil)
+        showOnceDrawn(w, model)
+    }
+
+    /// Shows a Share dialog once the core has drawn it (a moment: its reads are off the main thread), or after a quarter
+    /// second as it is, saying it is opening. A window shown before its content (or before SwiftUI sized it to that)
+    /// grows from its top-left corner and would end up below centre: it is centred again once, when its first real
+    /// content is drawn, unless the user has moved it.
+    private func showOnceDrawn(_ w: NSWindow, _ model: SyncShareModel) {
+        let placed = Placed()
+        model.onFirstContent = { [weak self, weak w] in
+            // SwiftUI sizes the window to the content as it lays it out: after this turn.
+            Task { @MainActor [weak self, weak w] in
+                guard let self, let w, shares.values.contains(where: { $0 === w }), let at = placed.frame else { return }
+                w.layoutIfNeeded()
+                if Self.unmoved(w.frame, placed: at) { w.center() }
+            }
+        }
+        Task { [weak self] in
+            await model.ready(within: .milliseconds(250))
+            guard let self, shares.values.contains(where: { $0 === w }), !w.isVisible else { return }
+            w.layoutIfNeeded()
+            w.center()
+            placed.frame = w.frame
+            NSApp.activate()
+            w.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    /// Where a Share window was put as it showed (`nil` until then: centring it as it shows is enough).
+    @MainActor private final class Placed {
+        var frame: NSRect?
+    }
+
+    /// A window put at `placed` and since only resized (from its top-left corner, or its bottom-left): the user has not
+    /// moved it.
+    nonisolated static func unmoved(_ frame: NSRect, placed: NSRect) -> Bool {
+        frame.minX == placed.minX && (frame.maxY == placed.maxY || frame.minY == placed.minY)
     }
 
     /// The Share dialog of a folder not synced yet (Share ▸ Seedwell): add and share in one. Once Copy Link has
@@ -519,8 +599,7 @@ struct ReadOnlyToggle: View {
             self.shares[id] = w
         }
         shares[key] = w
-        NSApp.activate()
-        w.makeKeyAndOrderFront(nil)
+        showOnceDrawn(w, model)
     }
 
     func closeShare(_ id: String) {
@@ -581,7 +660,7 @@ struct ReadOnlyToggle: View {
     }
 
     func closeAdd() {
-        guard let (w, _) = add else { return }
+        guard let (w, _, _) = add else { return }
         add = nil
         w.delegate = nil
         w.contentViewController = nil

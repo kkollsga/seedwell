@@ -121,7 +121,7 @@ pub struct TrackerLog {
 /// "14:32:07" of a Unix time in milliseconds, in this computer's time zone.
 fn clock(ts_ms: u64) -> String {
     let s = i64::try_from(ts_ms / 1000).unwrap_or(i64::MAX);
-    let day = (s + i64::from(trs_engine::util::local_utc_offset(s))).rem_euclid(86_400);
+    let day = (s + i64::from(seedwell_engine::util::local_utc_offset(s))).rem_euclid(86_400);
     format!("{:02}:{:02}:{:02}", day / 3600, day / 60 % 60, day % 60)
 }
 
@@ -241,8 +241,8 @@ impl TrackerLog {
             }),
             count_line: format!("{count} {}", if count == 1 { "entry" } else { "entries" }),
             dropped_line: (st.dropped > 0).then(|| format!("{} dropped: the log could not keep up", st.dropped)),
-            reveal_title: format!("Show in {}", trs_platform::file_manager!()),
-            reveal_help: format!("Reveal the tracker log files in {}", trs_platform::file_manager!()),
+            reveal_title: format!("Show in {}", seedwell_platform::file_manager!()),
+            reveal_help: format!("Reveal the tracker log files in {}", seedwell_platform::file_manager!()),
             clear_title: "Clear Log".into(),
             clear_help: "Delete all recorded tracker log entries".into(),
             refresh_ms: REFRESH_MS,
@@ -336,7 +336,7 @@ mod tests {
         assert_eq!((v.count_line.as_str(), v.refresh_ms, v.reads, v.live), ("0 entries", 1000, true, true));
         let events: Vec<_> = v.events.iter().map(|e| (e.value.as_str(), e.title.as_str(), e.separator_after)).collect();
         assert_eq!(events[..2], [("", "All events", true), ("started", "Started", false)]);
-        assert_eq!(v.reveal_title, format!("Show in {}", trs_platform::file_manager!()));
+        assert_eq!(v.reveal_title, format!("Show in {}", seedwell_platform::file_manager!()));
     }
 
     #[test]

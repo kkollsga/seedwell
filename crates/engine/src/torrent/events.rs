@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use crate::net::{Dial, PeerIo};
-use trs_wire::{Bitfield, BlockRequest, Handshake, allowed_fast_set};
+use seedwell_wire::{Bitfield, BlockRequest, Handshake, allowed_fast_set};
 
 use super::{PeerEntry, PeerHave, Rate, Torrent, TorrentMsg, TorrentReport};
 use crate::api::EngineEvent;
@@ -148,6 +148,7 @@ impl Torrent {
                 pex_seq: 0,
                 next_pex: now + Duration::from_secs(2),
                 no_refill_until: None,
+                readvertise_owed: false,
             },
         );
         self.addrs_in_use.insert(addr);
@@ -164,7 +165,7 @@ impl Torrent {
             permit,
             half_open,
         }));
-        if std::env::var_os("TRS_SIZES").is_some() {
+        if std::env::var_os("SEEDWELL_SIZES").is_some() {
             eprintln!(
                 "sizes: peer future {} B, TorrentMsg {} B, PeerCmd {} B, PeerEvent {} B, PeerEntry {} B, Torrent {} B, Torrent::run future n/a",
                 std::mem::size_of_val(&fut),
@@ -219,6 +220,27 @@ impl Torrent {
         }
     }
 
+    /// Close once what is queued for the peer has gone out ([`PeerCmd::Leave`]).
+    fn leave(&self, key: PeerKey) {
+        if let Some(p) = self.peers.get(&key) {
+            let _ = p.tx.try_send(PeerCmd::Leave);
+        }
+    }
+
+    /// Keep the `upload_only` our extended handshakes say (BEP 21) in step with [`Self::upload_only_now`], and
+    /// tell the connected peers when it changes. A peer that drops us as redundant learns from it that we
+    /// want nothing more: without it a partial seed looks like a downloader, and the seed dials it right back.
+    /// The connected peers alone are told: one still opening reads the new value when it sends its handshake.
+    /// A peer whose command queue was full is told on a later call (each tick): the peer task compares with
+    /// what it last said, so one told twice sends nothing more.
+    pub(super) fn advertise_upload_only(&mut self) {
+        let now = self.upload_only_now();
+        let changed = self.ctx.upload_only.swap(now, Ordering::Relaxed) != now;
+        for p in self.peers.values_mut().filter(|p| p.connected && (changed || p.readvertise_owed)) {
+            p.readvertise_owed = p.tx.try_send(PeerCmd::ReadvertiseExt).is_err();
+        }
+    }
+
     pub(super) async fn on_peer_event(&mut self, key: PeerKey, ev: PeerEvent) {
         if !self.peers.contains_key(&key) {
             return;
@@ -264,6 +286,12 @@ impl Torrent {
             PeerEvent::Block { piece, begin, len, ack } => self.on_block(key, piece, begin, len, ack),
             PeerEvent::Rejected(r) => self.on_rejected(key, r),
             PeerEvent::Pex(addrs) => self.on_pex(addrs),
+            PeerEvent::UploadOnly(v) => {
+                if let Some(p) = self.peers.get_mut(&key) {
+                    p.upload_only = v;
+                }
+                self.drop_if_redundant(key);
+            }
             PeerEvent::MetaRequest(p) => self.on_meta_request(key, p),
             PeerEvent::MetaData { piece, total, data } => self.on_meta_data(key, piece, total, &data),
             PeerEvent::MetaReject(p) => self.on_meta_reject(key, p),
@@ -274,7 +302,7 @@ impl Torrent {
         }
     }
 
-    fn on_connected(&mut self, key: PeerKey, peer_id: [u8; 20], reserved: trs_wire::Reserved, utp: bool) {
+    fn on_connected(&mut self, key: PeerKey, peer_id: [u8; 20], reserved: seedwell_wire::Reserved, utp: bool) {
         self.sh.net.alive();
         if self.banned.ids.contains(&peer_id) {
             self.disconnect(key);
@@ -347,6 +375,7 @@ impl Torrent {
     fn on_ext(&mut self, key: PeerKey, info: ExtInfo) {
         let upload_only = info.upload_only;
         let mut learned: Option<SocketAddr> = None;
+        let mut replaced: Option<SocketAddr> = None;
         let utp = self.peers.get(&key).is_some_and(|p| p.utp);
         if let Some(p) = self.peers.get_mut(&key) {
             p.client = info.client.map(String::into_boxed_str);
@@ -358,7 +387,7 @@ impl Torrent {
             if let Some(port) = info.listen_port.filter(|&p| p != 0) {
                 let a = SocketAddr::new(p.addr.ip(), port);
                 if p.listen_addr != Some(a) {
-                    p.listen_addr = Some(a);
+                    replaced = p.listen_addr.replace(a);
                     learned = Some(a);
                 }
                 if p.utp && p.incoming {
@@ -368,6 +397,12 @@ impl Torrent {
             }
         }
         if let Some(a) = learned {
+            // The peer is here: its listen address is not dialled while it is (a peer that dialled us
+            // would otherwise get a second connection from us, which one side then closes as a duplicate).
+            self.addrs_in_use.insert(a);
+            if let Some(old) = replaced {
+                self.release_addr(old);
+            }
             self.pex_note_connected(a, upload_only, utp);
         }
         if self.meta_fetch.is_some() {
@@ -587,7 +622,9 @@ impl Torrent {
         if let Some(a) = p.listen_addr {
             self.pool.mark_seed(a);
         }
-        self.disconnect(key);
+        // What we queued last goes out first: the handshake saying we are upload-only tells the peer that
+        // we are redundant to it too, so that it does not dial us back.
+        self.leave(key);
         true
     }
 
@@ -833,7 +870,10 @@ impl Torrent {
 
     pub(super) fn on_peer_closed(&mut self, key: PeerKey, why: Close, connected: bool) {
         let Some(p) = self.peers.remove(&key) else { return };
-        self.addrs_in_use.remove(&p.addr);
+        self.release_addr(p.addr);
+        if let Some(a) = p.listen_addr {
+            self.release_addr(a);
+        }
         if self.peers.is_empty() {
             // No peer left, so the actor stops ticking (`next_wait`): a last sampled rate would
             // otherwise stay published (and the menu bar arrow stay coloured) until the next tick.
@@ -878,6 +918,14 @@ impl Torrent {
         self.connect_more(now);
     }
 
+    /// An address a peer used goes back to the dialable ones unless another connection still uses it
+    /// (as its address, or as the listen address it told us).
+    fn release_addr(&mut self, a: SocketAddr) {
+        if !self.peers.values().any(|q| q.addr == a || q.listen_addr == Some(a)) {
+            self.addrs_in_use.remove(&a);
+        }
+    }
+
     /// Dial candidates while there is room under the caps.
     pub(super) fn connect_more(&mut self, now: Instant) {
         if self.shutting_down || self.checking || self.meta.is_none() && self.meta_fetch.is_none() {
@@ -892,6 +940,8 @@ impl Torrent {
         if self.sh.proxy.held() {
             return;
         }
+        // A change not told on its edge is told here (this runs on every tick), before a dial says it.
+        self.advertise_upload_only();
         // A complete torrent only needs a few peers; leechers find us through the tracker. Every
         // address a tracker or the DHT hands a seeder is mostly another seed, a NAT'd leecher or a
         // dead host, and dialling them all keeps a connection slot and a task busy for nothing

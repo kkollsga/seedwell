@@ -4,13 +4,13 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
 /// <summary>
 /// The library window's Settings page (the Mac's SettingsRenderer): one generic renderer for the core's
-/// <c>settings_view_model</c> (trs-ffi settings_view.rs). The tab bar, then the tab's blocks: titled groups of rows (or two
+/// <c>settings_view_model</c> (seedwell-ffi settings_view.rs). The tab bar, then the tab's blocks: titled groups of rows (or two
 /// side by side), each row drawn by its style and its controls (switches, menus, segmented choices, fields with units,
 /// folders, buttons, links, labels, checklists, chips); Folder Sync's Cloudflare section and the Devices tab are their
 /// own sections. What is there and every word is the core's. Every change goes through <c>settings_apply</c>, whose
@@ -22,11 +22,29 @@ sealed partial class SettingsPage
 {
     readonly App app;
     readonly StackPanel tabs = new() { Orientation = Orientation.Horizontal, Spacing = 2, Padding = new Thickness(24, 4, 24, 8) };
-    readonly StackPanel content = new() { Padding = new Thickness(28, 4, 28, 28), Spacing = 18, MaxWidth = 860, HorizontalAlignment = HorizontalAlignment.Left };
+    /// <summary>The tab shown's controls.</summary>
+    StackPanel content = NewPanel();
+    /// <summary>
+    /// Each tab's controls as last drawn, with what they were drawn from. Controls made anew are what holds the UI thread: a
+    /// whole tab's tree, and the full collections its garbage brings, 100-500 ms for each tab shown and each refresh (the check
+    /// interactive). So a tab or a refresh that would draw the same shows what is there.
+    /// </summary>
+    readonly Dictionary<SettingsTab, (StackPanel Panel, string Signature)> drawn = [];
+    /// <summary>A draw that must make its controls anew waits out a field being typed in or an open drop-down: it stays owed.</summary>
+    bool anewOwed;
+    readonly List<(SettingsTab Tab, Button Button, FrameworkElement Title)> tabButtons = [];
+    string tabsSignature = "";
     readonly ScrollViewer scroll = new();
     readonly Microsoft.UI.Dispatching.DispatcherQueueTimer refresh;
     readonly Microsoft.UI.Dispatching.DispatcherQueueTimer saveSettings;
     readonly Microsoft.UI.Dispatching.DispatcherQueueTimer saveSync;
+    /// <summary>
+    /// The field last typed in sends 600 ms after its last key. One timer for the page, not one for each field of each draw: a
+    /// DispatcherQueueTimer holds its Tick handler in native code, out of the collector's sight, so one whose handler reaches
+    /// the timer is never let go, with the draw's controls: 0.1.20 grew to 15.8 GB and 232,000 handles in 22 hours (check leaks).
+    /// </summary>
+    readonly Microsoft.UI.Dispatching.DispatcherQueueTimer typed;
+    Action? typedSend;
     SettingsTab tab = SettingsTab.General;
     SettingsState state;
     SettingsPageModel? model;
@@ -35,7 +53,10 @@ sealed partial class SettingsPage
     AgentActivity[] activity = [];
     ushort? syncPortMovingTo;
 
-    public UIElement Root { get; }
+    public FrameworkElement Root { get; }
+
+    /// <summary>How many pages this run made: one (the check interactive; each more would stay alive for good).</summary>
+    internal static int Made { get; private set; }
 
     /// <summary>The Cloudflare rendezvous section (QA presses its buttons).</summary>
     internal RendezvousSection Rendezvous { get; }
@@ -55,7 +76,7 @@ sealed partial class SettingsPage
         var q = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
         refresh = q.CreateTimer();
         refresh.IsRepeating = false;
-        refresh.Tick += (_, _) => Draw();
+        refresh.Tick += (_, _) => Refreshed();
         // Settings and folder sync are written a moment after the last change (the core's 450 ms).
         saveSettings = q.CreateTimer();
         saveSettings.IsRepeating = false;
@@ -65,6 +86,10 @@ sealed partial class SettingsPage
         saveSync.IsRepeating = false;
         saveSync.Interval = TimeSpan.FromMilliseconds(450);
         saveSync.Tick += (_, _) => SaveSync();
+        typed = q.CreateTimer();
+        typed.IsRepeating = false;
+        typed.Interval = TimeSpan.FromMilliseconds(600);
+        typed.Tick += (_, _) => { var send = typedSend; typedSend = null; send?.Invoke(); };
         var g = new Grid();
         g.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         g.RowDefinitions.Add(new RowDefinition());
@@ -73,8 +98,11 @@ sealed partial class SettingsPage
         Grid.SetRow(scroll, 1);
         g.Children.Add(scroll);
         Root = g;
-        app.Updater.Changed += () => Draw();
-        app.Banner.Changed += () => Draw();
+        Made++;
+        g.Loaded += (_, _) => Render();
+        g.Unloaded += (_, _) => refresh.Stop();
+        app.Updater.Changed += Refreshed;
+        app.Banner.Changed += Refreshed;
         RefreshCli();
         ReadVolumeWarnings();
         Draw();
@@ -84,7 +112,7 @@ sealed partial class SettingsPage
     {
         SyncSettings? sync = null;
         try { sync = app.Core.SyncSettings(); } catch { }
-        return new SettingsState(app.Core.SettingsLoad(), app.Core.RulesLoad(), sync, TrsFfiMethods.SettingsViewState());
+        return new SettingsState(app.Core.SettingsLoad(), app.Core.RulesLoad(), sync, SeedwellFfiMethods.SettingsViewState());
     }
 
     /// <summary>The settings changed on disk (an agent, the CLI, a hand edit): read again, the window's own state kept.</summary>
@@ -100,7 +128,7 @@ sealed partial class SettingsPage
     {
         _ = Task.Run(() => app.Core.VolumeWarnings()).ContinueWith(t => app.Dispatch(() =>
         {
-            if (t.IsCompletedSuccessfully) { volumeWarnings = t.Result; Draw(); }
+            if (t.IsCompletedSuccessfully) { volumeWarnings = t.Result; Refreshed(); }
         }));
     }
 
@@ -110,7 +138,7 @@ sealed partial class SettingsPage
     /// </summary>
     void RefreshCli()
     {
-        _ = Task.Run(() => app.Core.RefreshSettingsHostFacts()).ContinueWith(t => app.Dispatch(() => { if (t.IsCompletedSuccessfully) Draw(); }));
+        _ = Task.Run(() => app.Core.RefreshSettingsHostFacts()).ContinueWith(t => app.Dispatch(() => { if (t.IsCompletedSuccessfully) Refreshed(); }));
     }
 
     static string Bundled => Path.Combine(Updater.InstallDir, "cli", "seedwell.exe");
@@ -150,46 +178,108 @@ sealed partial class SettingsPage
 
     static Brush Res(string key) => (Brush)Application.Current.Resources[key];
 
-    /// <summary>Draws the tab, unless a field is being typed in (its text stays until it is sent).</summary>
+    /// <summary>
+    /// Draws the tab, unless a field is being typed in (its text stays until it is sent) or a drop-down is open (drawing makes
+    /// the controls anew, which would close it). The keyboard stays on the control it was on. The controls are made anew,
+    /// here and, once shown, in every other tab: what the user or an agent changed may be in them without being in the model
+    /// (a field's refused text, the rules).
+    /// </summary>
     void Draw()
     {
+        anewOwed = true;
+        Render();
+    }
+
+    /// <summary>
+    /// What the page's timer and the app's changes ask: nothing while the page is not shown. It stays for the pane's life, with
+    /// its timer and its place in the app's events: a page made for each visit never left them, and each went on drawing a tree
+    /// nobody saw, every collection's pause growing with the visits (83 to 242 ms in a minute of the check interactive).
+    /// </summary>
+    void Refreshed()
+    {
+        if (model is null || Root.IsLoaded) Render();
+    }
+
+    /// <summary>The page opens again, as it did when each visit made one: at its first tab, at the top. What it had drawn stays.</summary>
+    internal void Opened()
+    {
+        tab = SettingsTab.General;
+        Render();
+        scroll.ChangeView(null, 0, null, true);
+    }
+
+    /// <summary>
+    /// Draws, for what only reads: the same model keeps the controls it was drawn with (<see cref="Draw"/> makes them anew). No walk over the tree
+    /// here or in the focus keeper for that: each element a walk looks at gets a wrapper with memory pressure of its own, and
+    /// a few walks of a tab brought the app a full collection every second, 60-380 ms of every thread (the check interactive).
+    /// </summary>
+    void Render()
+    {
         refresh.Stop();
-        // Not yet in the window (no XamlRoot): nothing can have focus.
-        if (Root.XamlRoot is XamlRoot xr && FocusManager.GetFocusedElement(xr) is TextBox { } focused && IsInside(focused, content))
+        // Not yet in the window (no XamlRoot): nothing can have focus. Over the page: a drop-down, a menu, a dialog.
+        if (Root.XamlRoot is XamlRoot xr && (FocusManager.GetFocusedElement(xr) is TextBox or PasswordBox && IsInside((DependencyObject)FocusManager.GetFocusedElement(xr), content) || VisualTreeHelper.GetOpenPopupsForXamlRoot(xr).Any(p => p.IsOpen && p.Child is not ToolTip)))
         {
             refresh.Interval = TimeSpan.FromMilliseconds(500);
             refresh.Start();
             return;
         }
+        SettingsPageModel m;
         try
         {
-            model = TrsFfiMethods.SettingsViewModel(new SettingsViewInput(tab, state, Live()), App.HostWindows, App.HostFeatures, new Clock());
+            m = SeedwellFfiMethods.SettingsViewModel(new SettingsViewInput(tab, state, Live()), App.HostWindows, App.HostFeatures, new Clock());
         }
         catch (Exception e)
         {
             AppLog.Write($"settings page failed: {e.Message}");
             return;
         }
-        tab = model.Tab;
-        DrawTabs(model);
+        model = m;
+        tab = m.Tab;
+        var signature = ModelSignature.Of(m);
+        if (!anewOwed && ModelSignature.Of(m.Tabs) == tabsSignature && drawn.TryGetValue(tab, out var same) && same.Signature == signature)
+        {
+            DrawTabs(m);
+            content = same.Panel;
+            if (!ReferenceEquals(scroll.Content, content)) scroll.Content = content;
+        }
+        else
+        {
+            FocusKeeper.Redraw(Root, Root.XamlRoot, () => DrawAnew(m, signature));
+        }
+        if (m.RefreshMs > 0)
+        {
+            refresh.Interval = TimeSpan.FromMilliseconds(m.RefreshMs);
+            refresh.Start();
+        }
+    }
+
+    void DrawAnew(SettingsPageModel m, string signature)
+    {
+        DrawTabs(m);
+        if (anewOwed)
+        {
+            anewOwed = false;
+            // Out of their panels: a section kept across draws finds no parent left to leave.
+            foreach (var (_, (panel, _)) in drawn) panel.Children.Clear();
+            drawn.Clear();
+        }
+        drawn.TryGetValue(tab, out var was);
+        content = was.Panel ?? NewPanel();
         content.Children.Clear();
-        foreach (var block in model.Blocks)
+        foreach (var block in m.Blocks)
         {
             content.Children.Add(Block(block));
         }
-        if (model.Footer is string footer)
+        if (m.Footer is string footer)
         {
             content.Children.Add(new TextBlock { Text = footer, FontSize = 12, Foreground = Res("TextFillColorSecondaryBrush"), HorizontalAlignment = HorizontalAlignment.Center, IsTextSelectionEnabled = true });
         }
-        if (model.Banner is SettingsBanner banner && SettingsBannerView.Draw(banner, () => { }) is UIElement b)
+        if (m.Banner is SettingsBanner banner && SettingsBannerView.Draw(banner, () => { }) is UIElement b)
         {
             content.Children.Add(b);
         }
-        if (model.RefreshMs > 0)
-        {
-            refresh.Interval = TimeSpan.FromMilliseconds(model.RefreshMs);
-            refresh.Start();
-        }
+        drawn[tab] = (content, signature);
+        if (!ReferenceEquals(scroll.Content, content)) scroll.Content = content;
     }
 
     static bool IsInside(DependencyObject? d, DependencyObject root)
@@ -215,33 +305,70 @@ sealed partial class SettingsPage
         _ => "",
     };
 
+    static StackPanel NewPanel() => new() { Padding = new Thickness(28, 4, 28, 28), Spacing = 18, MaxWidth = 860, HorizontalAlignment = HorizontalAlignment.Left };
+
     void DrawTabs(SettingsPageModel m)
     {
-        tabs.Children.Clear();
-        foreach (var t in m.Tabs)
+        var signature = ModelSignature.Of(m.Tabs);
+        if (signature != tabsSignature)
         {
-            var label = new StackPanel { Spacing = 2, HorizontalAlignment = HorizontalAlignment.Center };
-            label.Children.Add(new FontIcon { Glyph = TabGlyph(t.Tab), FontSize = 16, HorizontalAlignment = HorizontalAlignment.Center });
-            label.Children.Add(new TextBlock { Text = t.Title, FontSize = 11.5, HorizontalAlignment = HorizontalAlignment.Center });
-            var b = new Button { Content = label, MinWidth = 72, Padding = new Thickness(8, 6, 8, 6), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0) };
-            if (t.Tab == m.Tab)
+            tabsSignature = signature;
+            tabs.Children.Clear();
+            tabButtons.Clear();
+            foreach (var t in m.Tabs)
             {
-                b.Background = Res("SubtleFillColorSecondaryBrush");
-                label.Children[1].SetValue(TextBlock.FontWeightProperty, FontWeights.SemiBold);
+                var label = new StackPanel { Spacing = 2, HorizontalAlignment = HorizontalAlignment.Center };
+                label.Children.Add(new FontIcon { Glyph = TabGlyph(t.Tab), FontSize = 16, HorizontalAlignment = HorizontalAlignment.Center });
+                var title = new TextBlock { Text = t.Title, FontSize = 11.5, HorizontalAlignment = HorizontalAlignment.Center };
+                label.Children.Add(title);
+                var b = new Button { Content = label, MinWidth = 72, Padding = new Thickness(8, 6, 8, 6), BorderThickness = new Thickness(0) };
+                if (t.Help.Length > 0) ToolTipService.SetToolTip(b, t.Help);
+                var which = t.Tab;
+                b.Click += (_, _) => Show(which);
+                tabs.Children.Add(b);
+                tabButtons.Add((which, b, title));
             }
-            if (t.Help.Length > 0) ToolTipService.SetToolTip(b, t.Help);
-            var which = t.Tab;
-            b.Click += (_, _) => Show(which);
-            tabs.Children.Add(b);
+        }
+        foreach (var (t, b, title) in tabButtons)
+        {
+            b.Background = t == m.Tab ? Res("SubtleFillColorSecondaryBrush") : transparent;
+            title.SetValue(TextBlock.FontWeightProperty, t == m.Tab ? FontWeights.SemiBold : FontWeights.Normal);
         }
     }
+
+    static readonly SolidColorBrush transparent = new(Microsoft.UI.Colors.Transparent);
+
+    /// <summary>QA: every tab walked (<see cref="FocusKeeper.QaWalk"/>), each redraw as a refresh and the sections' own changes make it.</summary>
+    internal async Task<string> QaWalk()
+    {
+        var said = new List<string>();
+        foreach (var t in Enum.GetValues<SettingsTab>())
+        {
+            if (!(model?.Tabs.Any(x => x.Tab == t) ?? false)) continue;
+            Show(t);
+            await Quiet.Settle(Root);
+            try { said.Add($"{t}: {await FocusKeeper.QaWalk(Root, Root.XamlRoot, () => { Rendezvous.QaRedraw(); Devices.QaRedraw(); Draw(); })}"); }
+            catch (Exception e) { said.Add($"{t}: walk threw {e.GetType().Name}: {e.Message.ReplaceLineEndings(" ")} at {string.Join(" < ", (e.StackTrace ?? "").Split('\n').Where(l => l.Contains("Seedwell.")).Take(4).Select(l => l.Trim()))}"); }
+        }
+        return string.Join("; ", said);
+    }
+
+    /// <summary>QA: this tab's first drop-down opened or closed as a click leaves it; whether it is open.</summary>
+    internal bool QaDropDown(bool open)
+    {
+        if (RowCommands.Tree(content).OfType<ComboBox>().FirstOrDefault() is not ComboBox c) return false;
+        c.IsDropDownOpen = open;
+        return c.IsDropDownOpen;
+    }
+    internal bool QaDropDownOpen => RowCommands.Tree(content).OfType<ComboBox>().Any(c => c.IsDropDownOpen);
+    internal void QaDraw() => Draw();
 
     /// <summary>Shows tab <paramref name="t"/> (the tab bar, and QA).</summary>
     internal void Show(SettingsTab t)
     {
         tab = t;
         if (t is SettingsTab.Transfers or SettingsTab.Folders) ReadVolumeWarnings();
-        Draw();
+        Render();
         scroll.ChangeView(null, 0, null, true);
     }
 
@@ -652,20 +779,17 @@ sealed partial class SettingsPage
             if (text == f.Text && unit == f.Unit) return;
             Deliver(rules, f.Key, f.Units.Length > 0 ? new SettingsValue.Measure(text, unit) : new SettingsValue.Typed(text));
         }
-        var live = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
-        live.IsRepeating = false;
-        live.Interval = TimeSpan.FromMilliseconds(600);
-        live.Tick += (_, _) => Send();
+        Action send = Send;
         box.TextChanged += (_, _) =>
         {
-            box.Foreground = TrsFfiMethods.SettingsFieldValid(f.Kind, box.Text, unit) ? normal : Res("SystemFillColorCriticalBrush");
-            if (f.Live) { live.Stop(); live.Start(); }
+            box.Foreground = SeedwellFfiMethods.SettingsFieldValid(f.Kind, box.Text, unit) ? normal : Res("SystemFillColorCriticalBrush");
+            if (f.Live) Typed(send);
         };
         box.KeyDown += (_, e) =>
         {
-            if (e.Key == Windows.System.VirtualKey.Enter) { e.Handled = true; live.Stop(); Send(); }
+            if (e.Key == Windows.System.VirtualKey.Enter) { e.Handled = true; Untyped(send); Send(); }
         };
-        box.LostFocus += (_, _) => { live.Stop(); Send(); Draw(); };
+        box.LostFocus += (_, _) => { Untyped(send); Send(); Draw(); };
         if (f.Units.Length == 0)
         {
             return box;
@@ -677,7 +801,7 @@ sealed partial class SettingsPage
         {
             if (units.SelectedItem is not string next || next == unit) return;
             // A new unit keeps the value: the number converted (the core's settings_field_convert).
-            box.Text = TrsFfiMethods.SettingsFieldConvert(f.Kind, box.Text, unit, next);
+            box.Text = SeedwellFfiMethods.SettingsFieldConvert(f.Kind, box.Text, unit, next);
             unit = next;
             Send();
         };
@@ -738,6 +862,23 @@ sealed partial class SettingsPage
     void Set(SettingKey key, SettingsValue value, bool redraw = true) => Apply(new SettingsChange.Set(key, value), redraw);
 
     /// <summary>A control's change: the rules editor's own (its controls), else Settings'.</summary>
+    /// <summary>A key in a live field: its send is due in a moment, and another field's that was still waiting goes now.</summary>
+    void Typed(Action send)
+    {
+        if (typedSend is not null && typedSend != send) typedSend();
+        typedSend = send;
+        typed.Stop();
+        typed.Start();
+    }
+
+    /// <summary>The field sends now (Enter, or the focus left it): nothing more is due from it.</summary>
+    void Untyped(Action send)
+    {
+        if (typedSend != send) return;
+        typedSend = null;
+        typed.Stop();
+    }
+
     void Deliver(bool rules, SettingKey key, SettingsValue value, bool redraw = true)
     {
         if (rules) RulesApply(new RulesChange.Set(key, value), redraw); else Set(key, value, redraw);
@@ -747,7 +888,7 @@ sealed partial class SettingsPage
     internal void Apply(SettingsChange change, bool redraw = true)
     {
         SettingsApplied r;
-        try { r = TrsFfiMethods.SettingsApply(state, change); }
+        try { r = SeedwellFfiMethods.SettingsApply(state, change); }
         catch (Exception e) { AppLog.Write($"settings apply failed: {e.Message}"); return; }
         state = r.State;
         AppLog.Write($"settings: {change.GetType().Name}{(r.Refused ? " (refused)" : "")} -> {string.Join(",", r.Saves)}");
@@ -845,12 +986,17 @@ sealed partial class SettingsPage
                 Draw();
                 break;
             case SettingsCommand.ShowInFileManager sm:
-                if (!Quiet.On) System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"/select,\"{sm.Path}\"") { UseShellExecute = true });
+                if (!Quiet.On) Shell.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"/select,\"{sm.Path}\"") { UseShellExecute = true });
                 break;
             case SettingsCommand.ShowTrackerLog:
                 var log = app.Core.TrackerLogPath();
-                var shown = File.Exists(log) ? $"/select,\"{log}\"" : $"\"{(Directory.Exists(Path.GetDirectoryName(log)) ? Path.GetDirectoryName(log) : app.Core.StateDir())}\"";
-                if (!Quiet.On) System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", shown) { UseShellExecute = true });
+                var stateDir = app.Core.StateDir();
+                // (What is there is looked at off the UI thread too.)
+                _ = Task.Run(() =>
+                {
+                var shown = File.Exists(log) ? $"/select,\"{log}\"" : $"\"{(Directory.Exists(Path.GetDirectoryName(log)) ? Path.GetDirectoryName(log) : stateDir)}\"";
+                if (!Quiet.On) Shell.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", shown) { UseShellExecute = true });
+                });
                 break;
             case SettingsCommand.ClearTrackerLog:
                 CoreCalls.InOrder("tracker log clear", app.Core.TrackerLogClear, Draw);
@@ -881,7 +1027,7 @@ sealed partial class SettingsPage
         {
             var psi = new System.Diagnostics.ProcessStartInfo(Bundled) { RedirectStandardError = true, RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true };
             foreach (var a in args) psi.ArgumentList.Add(a);
-            using var p = System.Diagnostics.Process.Start(psi)!;
+            using var p = await Task.Run(() => System.Diagnostics.Process.Start(psi)!);
             var err = await p.StandardError.ReadToEndAsync();
             await p.WaitForExitAsync();
             return (p.ExitCode == 0, err.Trim());

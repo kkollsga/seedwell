@@ -12,7 +12,7 @@
 //!                            `suspicious=2` lists those flagged suspicious.
 
 use std::collections::BTreeMap;
-use trs_classify::{Category, FileEntry, Input, JunkKind, classify};
+use seedwell_classify::{Category, FileEntry, Input, JunkKind, classify};
 
 struct Row {
     line: usize,

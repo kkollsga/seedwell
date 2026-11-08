@@ -289,24 +289,76 @@ struct ModelControls: View {
     }
 
     var body: some View {
-        if controls.count > 2 {
-            // Too wide for the row (a goal in the narrow rules editor): the first control, the rest under it.
-            ViewThatFits(in: .horizontal) {
-                line(controls)
-                VStack(alignment: .leading, spacing: 8) {
-                    ModelControls(controls: Array(controls.prefix(1)), spacing: spacing, act: act)
-                    ModelControls(controls: Array(controls.dropFirst()), spacing: spacing, act: act)
-                }
-            }
-        } else {
-            line(controls)
+        WrappingLine(spacing: spacing ?? (sentence ? 6 : 8)) {
+            // A control is itself while its place and its setting stay: another setting in its place starts afresh.
+            ForEach(Array(controls.enumerated()), id: \.offset) { n, c in ModelControlView(control: c, act: act).id("\(n) \(c.key.map { "\($0)" } ?? "")") }
+        }
+    }
+}
+
+/// A row's controls on one line, or when that is too wide (the narrow rules editor, a Settings tab in a narrow
+/// window), the first ones each on a line of their own and the rest on the last: the fewest lines that fit. A layout,
+/// so each control is one view measured once at its own size. It was a `ViewThatFits` with a candidate per way to
+/// wrap, each holding the row's controls again (text fields, pop-ups, time pickers), nested in each fallback at first:
+/// Settings › Transfers took the main thread 350 ms to lay out each time it was shown, and still 250 ms flat.
+struct WrappingLine: Layout {
+    /// Between the controls of a line; `lineSpacing` between lines.
+    var spacing: CGFloat = 8
+    var lineSpacing: CGFloat = 8
+
+    /// How many controls go on lines of their own before the rest share the last one, for controls of these widths in
+    /// `width` (`nil`: as wide as they like, one line). Two controls or fewer always share one line.
+    static func alone(widths: [CGFloat], spacing: CGFloat, width: CGFloat?) -> Int {
+        guard let width, widths.count > 2 else { return 0 }
+        for k in 0..<(widths.count - 1) {
+            let rest = widths[k...].reduce(0, +) + spacing * CGFloat(widths.count - k - 1)
+            if max(rest, widths[..<k].max() ?? 0) <= width { return k }
+        }
+        return widths.count - 2
+    }
+
+    func makeCache(subviews: Subviews) -> [CGSize] { subviews.map { $0.sizeThatFits(.unspecified) } }
+
+    func updateCache(_ cache: inout [CGSize], subviews: Subviews) { cache = makeCache(subviews: subviews) }
+
+    /// The controls' sizes in `width`: their own, but one wider than the row as narrow as it goes (a long field).
+    private func sizes(_ ideal: [CGSize], _ subviews: Subviews, width: CGFloat?) -> [CGSize] {
+        guard let width else { return ideal }
+        return ideal.indices.map { i in
+            ideal[i].width <= width ? ideal[i] : subviews[i].sizeThatFits(ProposedViewSize(width: width, height: nil))
         }
     }
 
-    private func line(_ controls: [SettingsControl]) -> some View {
-        HStack(spacing: spacing ?? (sentence ? 6 : 8)) {
-            // A control is itself while its place and its setting stay: another setting in its place starts afresh.
-            ForEach(Array(controls.enumerated()), id: \.offset) { n, c in ModelControlView(control: c, act: act).id("\(n) \(c.key.map { "\($0)" } ?? "")") }
+    /// The lines: each a range of the controls.
+    private func lines(_ sizes: [CGSize], width: CGFloat?) -> [Range<Int>] {
+        let k = Self.alone(widths: sizes.map(\.width), spacing: spacing, width: width)
+        return (0..<k).map { $0..<($0 + 1) } + (sizes.isEmpty ? [] : [k..<sizes.count])
+    }
+
+    private func size(of line: Range<Int>, _ sizes: [CGSize]) -> CGSize {
+        CGSize(width: line.map { sizes[$0].width }.reduce(0, +) + spacing * CGFloat(max(line.count - 1, 0)),
+               height: line.map { sizes[$0].height }.max() ?? 0)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout [CGSize]) -> CGSize {
+        let sized = sizes(cache, subviews, width: proposal.width)
+        let all = lines(sized, width: proposal.width).map { size(of: $0, sized) }
+        return CGSize(width: all.map(\.width).max() ?? 0,
+                      height: all.map(\.height).reduce(0, +) + lineSpacing * CGFloat(max(all.count - 1, 0)))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout [CGSize]) {
+        let sized = sizes(cache, subviews, width: bounds.width)
+        var y = bounds.minY
+        for line in lines(sized, width: bounds.width) {
+            let h = size(of: line, sized).height
+            var x = bounds.minX
+            for i in line {
+                // Centred in its line, as an HStack places them.
+                subviews[i].place(at: CGPoint(x: x, y: y + (h - sized[i].height) / 2), proposal: ProposedViewSize(sized[i]))
+                x += sized[i].width + spacing
+            }
+            y += h + lineSpacing
         }
     }
 }
@@ -341,7 +393,10 @@ struct ModelControlView: View {
         case let .folder(key, path, placeholder, width, clearable, choose, help):
             HStack(spacing: 8) {
                 TextField(placeholder, text: Binding(get: { path }, set: { act(.set(key, .typed(text: $0))) }))
-                    .textFieldStyle(.roundedBorder).frame(width: CGFloat(width))
+                    .textFieldStyle(.roundedBorder)
+                    // Its width while there is room, down to 100 in a narrow window (the rules editor at the main window's
+                    // minimum width): fixed, it made the page wider than the window.
+                    .frame(minWidth: min(CGFloat(width), 100), idealWidth: CGFloat(width), maxWidth: CGFloat(width))
                     .help(help)
                 Button(choose.title) { act(choose.command) }.fixedSize().help(choose.help)
                 if clearable, !path.isEmpty {
@@ -533,8 +588,8 @@ struct ModelField: View {
                 .textFieldStyle(.roundedBorder)
                 .multilineTextAlignment(trailing ? .trailing : .leading)
                 .font(kind == .address ? Theme.mono : nil)
-                .frame(width: width > 0 ? width : nil)
-                .frame(maxWidth: width > 0 ? nil : .infinity)
+                // Its width while there is room, down to 100 in a narrow window (a wide field, as the folder's above).
+                .frame(minWidth: width > 0 ? min(width, 100) : nil, idealWidth: width > 0 ? width : nil, maxWidth: width > 0 ? width : .infinity)
                 .modifier(Refused(on: !settingsFieldValid(kind: kind, text: typed, unit: picked)))
                 .monospacedDigit(kind == .syncPort)
                 .focused($focused)

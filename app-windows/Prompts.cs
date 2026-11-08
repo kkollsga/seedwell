@@ -1,11 +1,11 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
 /// <summary>
-/// The questions the core asks (the Mac's alerts; trs-ffi prompts.rs), each a dialog over the library window with the
+/// The questions the core asks (the Mac's alerts; seedwell-ffi prompts.rs), each a dialog over the library window with the
 /// core's words: a watch folder's "Ask first" file (Add / Don't Add), torrents a change of locations leaves elsewhere
 /// (Move / Don't Move, one question at a time), and the backlog offer at start (asked once ever). The first button runs
 /// the core's call, in order, off the UI thread. A QA run shows no dialog: it logs the question and waits for the QA
@@ -62,7 +62,7 @@ sealed class Prompts(App app)
     /// <summary>A watch folder's file that asks first (on_add_request).</summary>
     internal async void AddRequest(AddRequestInfo request)
     {
-        var p = TrsFfiMethods.AddRequestPrompt(request);
+        var p = SeedwellFfiMethods.AddRequestPrompt(request);
         if (await Ask(p.Title, p.Text, p.AddTitle, p.DontAddTitle))
         {
             app.Add([p.Path]);
@@ -85,7 +85,7 @@ sealed class Prompts(App app)
             MoveProposalInfo proposal;
             try { proposal = await app.Core.LocationMoves(); }
             catch (Exception e) { AppLog.Write($"location moves failed: {CoreCalls.Message(e)}"); return; }
-            if (TrsFfiMethods.LocationMovePrompt(proposal) is not LocationMovePrompt p)
+            if (SeedwellFfiMethods.LocationMovePrompt(proposal) is not LocationMovePrompt p)
             {
                 return;
             }
@@ -95,7 +95,7 @@ sealed class Prompts(App app)
             }
             CoreCalls.InOrder("move torrents", () => app.Core.MoveTorrents(p.Ids), r =>
             {
-                if (TrsFfiMethods.LocationMoveResult(r) is SyncAlert alert) app.Alert(alert);
+                if (SeedwellFfiMethods.LocationMoveResult(r) is SyncAlert alert) app.Alert(alert);
                 app.Refreshed();
             }, e => app.Alert(new SyncAlert(e, "")));
         }

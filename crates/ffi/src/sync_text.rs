@@ -2,16 +2,16 @@
 //! manager's badges share (docs/CROSS-PLATFORM.md §1): a folder's grey line and status image, roles and what they may
 //! do, the members' order and lines, pasted links, invitation links and the sharing period, the add and edit modals'
 //! rules, the Share dialog's choices, and the sentences of errors and alerts. A text that names this computer says
-//! what the system calls it ("Mac", "PC": `trs_platform::computer!`).
+//! what the system calls it ("Mac", "PC": `seedwell_platform::computer!`).
 //!
 //! A date in the user's own style ("1 Nov", "1. nov.") stays the host's, like the time of day: the functions that show
 //! one take it already written (`…_day`).
 
 use std::path::{Path, PathBuf};
 
-use trs_control::display as d;
-use trs_platform::fs::TrashError;
-use trs_platform::{computer, file_manager, trash};
+use seedwell_control::display as d;
+use seedwell_platform::fs::TrashError;
+use seedwell_platform::{computer, file_manager, trash};
 
 use crate::devices_text::FollowLine;
 use crate::files::standard_order;
@@ -84,6 +84,11 @@ pub(crate) fn subtitle(f: &SyncFolder) -> String {
             if f.rate_in > 0 {
                 parts.push(d::rate(f.rate_in));
             }
+            // The core's steady estimate, in the words of a downloading torrent's menu row ("4 min left"); nothing
+            // while it is not known (no "calculating…" on a sync that may be over in a second).
+            if let Some(eta) = f.eta_secs {
+                parts.push(d::remaining(Some(eta), true));
+            }
             after_conflicts(parts)
         }
         // Alone (whom it waits for), or connected to devices that have not listed the folder yet: the core says which.
@@ -97,8 +102,9 @@ pub(crate) fn subtitle(f: &SyncFolder) -> String {
     }
 }
 
-/// The grey line under a folder's name: "Up to date · 3 devices", "Syncing · 42% · 12 MB/s", "Waiting for devices",
-/// "Folder missing", "1 conflict · 2 devices"; while it joins, what it does ("Trying Anna's Mac mini at …").
+/// The grey line under a folder's name: "Up to date · 3 devices", "Syncing · 42% · 12 MB/s · 4 min left", "Waiting
+/// for devices", "Folder missing", "1 conflict · 2 devices"; while it joins, what it does ("Trying Anna's Mac mini at
+/// …").
 #[uniffi::export]
 pub fn sync_folder_subtitle(folder: SyncFolder) -> String {
     subtitle(&folder)
@@ -107,7 +113,7 @@ pub fn sync_folder_subtitle(folder: SyncFolder) -> String {
 /// What a joining folder's page says where its members will be: what it does now and, on a line of its own, what
 /// went wrong last; the plain sentence when the core said nothing more.
 pub(crate) fn join_note(f: &SyncFolder) -> String {
-    let mut out = f.progress.clone().unwrap_or_else(|| concat!("Waiting for the folder’s owner or an admin to let this ", trs_platform::computer!(), " in").into());
+    let mut out = f.progress.clone().unwrap_or_else(|| concat!("Waiting for the folder’s owner or an admin to let this ", seedwell_platform::computer!(), " in").into());
     if let Some(p) = &f.problem {
         out.push_str(&format!("\nLast problem: {p}"));
     }
@@ -294,10 +300,10 @@ pub fn sync_member_line(member: SyncMember, device: Option<SyncDevice>, expires_
 }
 
 /// What a member's row says of a removal this computer (an admin) asked the owners for (SPEC §7G.1).
-pub(crate) fn removal_line(asked: &trs_sync_net::removals::Asked) -> String {
+pub(crate) fn removal_line(asked: &seedwell_sync_net::removals::Asked) -> String {
     match asked {
-        trs_sync_net::removals::Asked::Waiting => "Removal asked: waiting for the owner".into(),
-        trs_sync_net::removals::Asked::Refused(why) => format!("The owner did not remove it: {}", sentence(why)),
+        seedwell_sync_net::removals::Asked::Waiting => "Removal asked: waiting for the owner".into(),
+        seedwell_sync_net::removals::Asked::Refused(why) => format!("The owner did not remove it: {}", sentence(why)),
     }
 }
 
@@ -607,6 +613,12 @@ pub struct SyncAddForm {
     /// A folder of that name already in that place and not synced (left over from an earlier join, say): offered
     /// next to the new one, which gets a number (`~/Seedwell/Team 2`).
     pub existing_folder: Option<String>,
+    /// The pasted link's places (`default_location`, `existing_folder`) are still to be read: they look at the disk,
+    /// which may be a network drive that does not answer, so `Core::sync_add_set_link` leaves them out. The host reads
+    /// them off its UI thread (`Core::sync_add_places`) and gives the answer to `sync_add_set_places`.
+    pub places_pending: bool,
+    /// The folder `default_location` goes in was there when the places were read (the location picker opens in it).
+    pub default_parent_there: bool,
     /// "On all my devices" for a folder of this computer as it was when the dialog opened (shown only while this
     /// computer is paired with others), and the choice: off by default.
     pub follow: FollowLine,
@@ -629,6 +641,8 @@ pub fn sync_add_form_new() -> SyncAddForm {
         on_demand: false,
         default_location: None,
         existing_folder: None,
+        places_pending: false,
+        default_parent_there: false,
         follow: crate::devices_text::follow_line_new(&[], false),
         all_devices: false,
         read_only: false,
@@ -695,7 +709,8 @@ fn real_path(p: &str) -> PathBuf {
 
 /// The folder `name` next to `next` (the new place the core picked for a joined folder) when that name was taken by
 /// a folder that exists and is not synced here, so `next` got a number: the one to offer for joining into. `synced`:
-/// the paths of the folders synced here.
+/// the paths of the folders synced here. Looks at the disk (and resolves each synced folder's path): never on a host's
+/// UI thread (`Core::sync_add_places` calls it).
 #[uniffi::export]
 pub fn sync_existing_folder(name: String, next: String, synced: Vec<String>) -> Option<String> {
     let plain = Path::new(&next).parent().unwrap_or(Path::new("")).join(&name).display().to_string();
@@ -729,7 +744,7 @@ pub fn sync_folder_name_problem(name: String) -> Option<String> {
         Some("A folder name cannot contain “/” or “:”.".into())
     } else if n.starts_with('.') {
         Some("A folder name cannot start with a dot.".into())
-    } else if trs_platform::fs::name_problem(n).is_some() {
+    } else if seedwell_platform::fs::name_problem(n).is_some() {
         // What else this system refuses (Windows: more characters, a trailing dot or space, device names).
         Some("A folder name cannot contain \\ * ? \" < > |, end with a dot or a space, or be a device name such as CON.".into())
     } else {
@@ -754,7 +769,7 @@ pub fn sync_edit_share_note(role: SyncRole) -> String {
 /// other device is known to hold (`Core::sync_only_here`, asked when the question opens).
 #[uniffi::export]
 pub fn sync_remove_question(name: String, only_here: u64) -> String {
-    format!(concat!("Stop syncing “{}” on this ", computer!(), "? {}"), name, trs_control::sync::others_after_removal(only_here))
+    format!(concat!("Stop syncing “{}” on this ", computer!(), "? {}"), name, seedwell_control::sync::others_after_removal(only_here))
 }
 
 /// The question of removing `folder` ([`sync_remove_question`]), and, when that removes it from Seedwell on the user's
@@ -1130,6 +1145,7 @@ pub(crate) mod tests {
             can_reshare: false,
             removes_everywhere: false,
             scan: None,
+            eta_secs: None,
         }
     }
 
@@ -1145,6 +1161,24 @@ pub(crate) mod tests {
             f.need_files = if need > 0 { 3 } else { 0 };
             f.rate_in = rate;
         })
+    }
+
+    /// A syncing folder's row says the core's time left last, in the words a downloading torrent's menu row uses for
+    /// it (`display::remaining`, short). Fails if the time is missing, worded differently from torrents' (the same
+    /// label everywhere), shown as "calculating…" while unknown (a sync over in a second would flash it), or shown on
+    /// a folder that does not sync.
+    #[test]
+    fn a_syncing_row_says_the_time_left_like_a_torrent() {
+        let timed = |eta| SyncFolder { eta_secs: eta, ..syncing(580_000_000, 12_000_000) };
+        let line = subtitle(&timed(Some(240)));
+        assert!(line.starts_with("Syncing · 42% · 12 MB/s"), "{line}");
+        assert!(line.ends_with(&format!(" · {}", d::remaining(Some(240), true))), "torrents' words, last: {line}");
+        let unknown = subtitle(&timed(None));
+        assert!(!unknown.contains(&d::remaining(None, true)) && !unknown.contains("left"), "nothing while unknown: {unknown}");
+        let done = SyncFolder { eta_secs: Some(240), ..folder("Photos", SyncState::UpToDate) };
+        assert!(!subtitle(&done).contains("left"), "an up to date folder has no time left: {}", subtitle(&done));
+        let paused = SyncFolder { eta_secs: Some(240), ..folder("Photos", SyncState::Paused) };
+        assert_eq!(subtitle(&paused), "Paused");
     }
 
     /// The failure: a folder that scans for minutes (a big first scan) shows a bare "Scanning…" and an empty ring, so
@@ -1471,9 +1505,9 @@ pub(crate) mod tests {
         let guest = SyncMember { expires_s: Some(NOW), ..off };
         assert_eq!(sync_member_line(guest.clone(), None, Some("1 Nov".into())), "Offline · until 1 Nov", "time-limited access shows its end");
         // A removal this computer (an admin) asked the owner for: waiting, or refused and why.
-        let asked = SyncMember { removal: Some(removal_line(&trs_sync_net::removals::Asked::Waiting)), ..guest.clone() };
+        let asked = SyncMember { removal: Some(removal_line(&seedwell_sync_net::removals::Asked::Waiting)), ..guest.clone() };
         assert_eq!(sync_member_line(asked, None, None), "Offline · Removal asked: waiting for the owner");
-        let refused = removal_line(&trs_sync_net::removals::Asked::Refused("only an admin of the folder can ask its owner to remove a device".into()));
+        let refused = removal_line(&seedwell_sync_net::removals::Asked::Refused("only an admin of the folder can ask its owner to remove a device".into()));
         assert_eq!(refused, "The owner did not remove it: Only an admin of the folder can ask its owner to remove a device");
         let dev = |via: &str, client: &str| SyncDevice {
             id: "X".into(),

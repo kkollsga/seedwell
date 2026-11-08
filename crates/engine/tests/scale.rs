@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering::Relaxed};
 use std::time::Duration;
 
 use common::*;
-use trs_engine::persist::*;
-use trs_engine::*;
+use seedwell_engine::persist::*;
+use seedwell_engine::*;
 
 struct Counting;
 static LIVE: AtomicUsize = AtomicUsize::new(0);
@@ -76,7 +76,7 @@ fn record(t: &TestTorrent, dir: &std::path::Path, announce: Option<String>) -> T
         added_complete: false,
         staged: false,
         complete: false,
-        placed: trs_engine::persist::Placed::No,
+        placed: seedwell_engine::persist::Placed::No,
         last_activity: 0,
         error_since: 0,
         error_tracker: false,
@@ -104,7 +104,7 @@ fn tiny(i: usize, announce: Option<String>) -> TestTorrent {
 
 fn populate(n: usize, announce: Option<String>) -> MemStore {
     let s = MemStore::new();
-    let dir = std::path::Path::new("/nonexistent/trs-scale");
+    let dir = std::path::Path::new("/nonexistent/seedwell-scale");
     for i in 0..n {
         let t = tiny(i, announce.clone());
         let rec = record(&t, dir, announce.clone());
@@ -177,9 +177,9 @@ async fn five_hundred_cold_torrents() {
         eprintln!("[scale] bare HashMap<id, 200-byte entry>: {:.0} B per entry at full load", (b as f64 - a as f64) / 784.0);
     }
 
-    // trs-tracker alone: one TrackerSet + machine + gate registration per torrent.
+    // seedwell-tracker alone: one TrackerSet + machine + gate registration per torrent.
     {
-        use trs_tracker::{TrackerUrl, gate::GateConfig, hub::{TorrentSpec, TrackerHub}, store::MemoryStore, Millis};
+        use seedwell_tracker::{TrackerUrl, gate::GateConfig, hub::{TorrentSpec, TrackerHub}, store::MemoryStore, Millis};
         let mk = |n: usize| {
             let before = live();
             let mut hub = TrackerHub::new(GateConfig::default(), MemoryStore::new(), 1);
@@ -194,7 +194,7 @@ async fn five_hundred_cold_torrents() {
             used
         };
         let (a, b) = (mk(112), mk(896));
-        eprintln!("[scale] trs-tracker hub alone: {:.0} B per (torrent, tracker)", (b as f64 - a as f64) / 784.0);
+        eprintln!("[scale] seedwell-tracker hub alone: {:.0} B per (torrent, tracker)", (b as f64 - a as f64) / 784.0);
     }
 
     // --- idle wake-ups -------------------------------------------------------------------------

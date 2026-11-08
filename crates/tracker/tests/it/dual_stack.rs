@@ -12,9 +12,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use common::*;
-use trs_tracker::gate::{GateConfig, GatedRequest};
-use trs_tracker::response::{AnnounceError, TransportError};
-use trs_tracker::{Event, InfoHash20, Millis};
+use seedwell_tracker::gate::{GateConfig, GatedRequest};
+use seedwell_tracker::response::{AnnounceError, TransportError};
+use seedwell_tracker::{Event, InfoHash20, Millis};
 
 struct DualStack {
     detector: Rc<RefCell<SpamDetector>>,
@@ -96,7 +96,7 @@ fn ipv6_blackholed_500_torrents_24h() {
             spam, 0,
             "tracker flagged announce spam (interval {interval}, min {min:?})"
         );
-        let eff = trs_tracker::clamp_timing(Some(interval as i64), min.map(|m| m as i64))
+        let eff = seedwell_tracker::clamp_timing(Some(interval as i64), min.map(|m| m as i64))
             .interval
             .as_secs();
         let bound = (24u64 * 3600).div_ceil(eff);

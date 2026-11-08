@@ -4,17 +4,18 @@
 //! * Same volume: `rename(2)` — atomic, no journal record needed. After a crash the file is at
 //!   either the source or the destination, and the resume logic just looks.
 //! * Different volume (`EXDEV`, or `force_copy`): a `Started` record is appended and fsynced,
-//!   then the data is copied to `<dst>.trs-part`, fsynced, `rename`d to `<dst>`, the parent dir is
+//!   then the data is copied to `<dst>.seedwell-part`, fsynced, `rename`d to `<dst>`, the parent dir is
 //!   fsynced and the source removed. `<dst>` therefore only ever appears complete; a leftover
-//!   `.trs-part` is discarded on resume. If both source and destination exist and `Started` was
+//!   `.seedwell-part` (or one from before the 2026-11-07 rename) is discarded on resume. If both source and destination exist and `Started` was
 //!   recorded, the copy finished and only the source removal is left.
 //! * Destinations that exist without a `Started` record are foreign: we never overwrite them
 //!   ([`StorageError::DestinationExists`]).
 //!
 //! # Journal
-//! An append-only file: 17-byte header (`TRSJ`, version, file count, layout digest) followed by
+//! An append-only file: 17-byte header (`SWFJ`, version, file count, layout digest) followed by
 //! 5-byte records `(file: u32 LE, state: u8)`; a torn trailing record is ignored. In memory it is
-//! one byte per file. It is deleted when the move completes.
+//! one byte per file. It is deleted when the move completes. A journal begun before the 2026-11-07
+//! rename of the internal names has the magic [`PRE_RENAME_MAGIC`] and is resumed the same.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -27,7 +28,9 @@ use crate::fsutil;
 use crate::layout::Layout;
 use crate::oneshot::Pending;
 
-const MAGIC: &[u8; 4] = b"TRSJ";
+const MAGIC: &[u8; 4] = b"SWFJ";
+/// The magic before the rename of the internal names (2026-11-07): a move cut off before the update resumes.
+const PRE_RENAME_MAGIC: &[u8; 4] = b"TRSJ";
 const VERSION: u8 = 1;
 const HEADER_LEN: usize = 17;
 const RECORD_LEN: usize = 5;
@@ -103,7 +106,7 @@ impl Journal {
 
     /// Parses a journal file, replaying its records. Tolerates a torn trailing record.
     pub fn decode(bytes: &[u8], count: usize, digest: u64) -> Result<Self> {
-        if bytes.len() < HEADER_LEN || bytes[..HEADER_LEN] != header(count, digest) {
+        if !header_matches(bytes, count, digest) {
             return Err(StorageError::CorruptJournal);
         }
         let mut j = Self::new(count, digest);
@@ -126,6 +129,14 @@ fn header(count: usize, digest: u64) -> [u8; HEADER_LEN] {
     h[5..9].copy_from_slice(&(count as u32).to_le_bytes());
     h[9..].copy_from_slice(&digest.to_le_bytes());
     h
+}
+
+/// Whether `bytes` starts with this torrent's header, under the magic or the one before the rename.
+fn header_matches(bytes: &[u8], count: usize, digest: u64) -> bool {
+    let h = header(count, digest);
+    bytes.len() >= HEADER_LEN
+        && bytes[4..HEADER_LEN] == h[4..]
+        && (bytes[..4] == *MAGIC || bytes[..4] == *PRE_RENAME_MAGIC)
 }
 
 struct JournalFile {
@@ -187,7 +198,7 @@ impl JournalFile {
 
 fn sync_parent(path: &Path) -> io::Result<()> {
     match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => trs_platform::fs::sync_dir(p),
+        Some(p) if !p.as_os_str().is_empty() => seedwell_platform::fs::sync_dir(p),
         _ => Ok(()),
     }
 }
@@ -214,12 +225,6 @@ impl Ctx<'_> {
             _ => Ok(()),
         }
     }
-}
-
-fn part_path(dst: &Path) -> PathBuf {
-    let mut s = dst.as_os_str().to_os_string();
-    s.push(".trs-part");
-    PathBuf::from(s)
 }
 
 fn copy_file(src: &Path, part: &Path, ctx: &mut Ctx<'_>) -> Result<()> {
@@ -331,12 +336,8 @@ fn move_one(
     // Cross-volume: copy + fsync + atomic publish + remove.
     ctx.step()?;
     j.record(i as usize, ST_STARTED, true)?;
-    let part = part_path(&dst);
-    match fs::remove_file(&part) {
-        Ok(()) => {}
-        Err(e) if is_not_found(&e) => {}
-        Err(e) => return Err(io(e)),
-    }
+    let part = fsutil::part_path(&dst);
+    fsutil::remove_part(&dst).map_err(io)?;
     copy_file(&src, &part, ctx)?;
     ctx.step()?;
     fs::rename(&part, &dst).map_err(io)?;

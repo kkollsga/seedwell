@@ -79,7 +79,7 @@ struct State {
     /// Limit Speed switched on by the app itself (on battery); the user's toggle ends it.
     alt_by_app: bool,
     /// Agents' requests for access (one sample to start with, for design work).
-    requests: Vec<trs_control::access::Entry>,
+    requests: Vec<seedwell_control::access::Entry>,
 }
 
 /// The mock; clones of the `Arc` are shared with the ticker thread via `Weak`.
@@ -94,12 +94,12 @@ pub struct MockBackend {
 }
 
 /// The mock's request: Claude asks for Full, a few minutes ago.
-fn sample_request() -> trs_control::access::Entry {
-    use trs_control::access::{Entry, State, TTL_MS, Want};
+fn sample_request() -> seedwell_control::access::Entry {
+    use seedwell_control::access::{Entry, State, TTL_MS, Want};
     let at_ms = now().saturating_sub(4 * 60) * 1000;
     Entry {
         id: "5eed0a11".into(),
-        want: Want::Level(trs_control::Permission::Full),
+        want: Want::Level(seedwell_control::Permission::Full),
         agents: vec!["Claude".into()],
         why: Some("to install the latest release with seedwell update now".into()),
         at_ms,
@@ -119,11 +119,11 @@ fn now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// The mock's home folder: the system's ([`trs_platform::dirs::home`]), else a made-up one that is absolute on this
+/// The mock's home folder: the system's ([`seedwell_platform::dirs::home`]), else a made-up one that is absolute on this
 /// system (`/Users/me`; `C:\Users\me` on Windows). Never `$HOME` alone: GitHub's Windows runner sets none, and a
 /// `/Users/me` there has no drive, so it is no absolute path (an on-demand host confined to a folder hosted nothing).
 pub(crate) fn home() -> String {
-    trs_platform::dirs::home().map_or_else(
+    seedwell_platform::dirs::home().map_or_else(
         || {
             let temp = std::env::temp_dir();
             let root = temp.ancestors().last().unwrap_or(std::path::Path::new("/"));
@@ -1309,16 +1309,16 @@ impl Backend for MockBackend {
         None
     }
 
-    fn agent_requests(&self) -> Vec<trs_control::access::Entry> {
-        self.lock().requests.iter().filter(|e| e.state == trs_control::access::State::Pending).cloned().collect()
+    fn agent_requests(&self) -> Vec<seedwell_control::access::Entry> {
+        self.lock().requests.iter().filter(|e| e.state == seedwell_control::access::State::Pending).cloned().collect()
     }
 
     fn agent_request_decide(&self, id: &str, approve: bool) -> Result<String, String> {
-        use trs_control::access::State;
+        use seedwell_control::access::State;
         let mut s = self.lock();
         let e = s.requests.iter_mut().find(|e| e.id == id && e.state == State::Pending).ok_or("It was answered already")?;
         e.state = if approve { State::Granted } else { State::Denied };
-        e.how = Some(trs_control::access::How::App);
+        e.how = Some(seedwell_control::access::How::App);
         Ok(if approve { format!("Approved: {} now", e.want.text()) } else { format!("Denied: {} does not get {}", e.who(), e.want.text()) })
     }
 
@@ -1477,7 +1477,7 @@ impl Backend for MockBackend {
             token: "mock-token".into(),
             complete: false,
             selected: false,
-            content_type: trs_stream::mime::content_type(&f.name).to_owned(),
+            content_type: seedwell_stream::mime::content_type(&f.name).to_owned(),
             is_mp4_family: f.is_mp4_family,
         })
     }

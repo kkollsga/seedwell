@@ -4,15 +4,16 @@
 
 use crate::adversarial_support;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
 use adversarial_support::*;
 use proptest::prelude::*;
-use trs_tracker::response::AnnounceError;
-use trs_tracker::{Event, InfoHash20, Millis, TorrentEvent, clamp_timing};
+use seedwell_tracker::outage::NetEvent;
+use seedwell_tracker::response::AnnounceError;
+use seedwell_tracker::{AnnounceParams, Event, InfoHash20, Millis, TorrentEvent, clamp_timing};
 
 const HOSTS: [&str; 3] = ["a.test", "b.test", "c.test"];
 const SIZE: u64 = 1000;
@@ -31,6 +32,8 @@ enum Op {
     Manual(u8),
     Network,
     Wake,
+    /// A flapping interface: a network change and a wake in turn every 10 s, this many times.
+    Flap(u8),
     Crash,
     Mode(u8, u8),
 }
@@ -55,6 +58,7 @@ fn op_strategy(allow_user_pressure: bool) -> impl Strategy<Value = Op> {
             2 => (0u8..3).prop_map(Op::Manual),
             1 => Just(Op::Network),
             1 => Just(Op::Wake),
+            1 => (1u8..90).prop_map(Op::Flap),
         ]
         .boxed()
     } else {
@@ -148,7 +152,7 @@ fn responder(shared: Rc<RefCell<Shared>>) -> Responder {
             Mode::Garbage => vec![(
                 d(1),
                 Err(AnnounceError::Garbage(
-                    trs_tracker::response::ParseError::NotBencode,
+                    seedwell_tracker::response::ParseError::NotBencode,
                 )),
             )],
             Mode::Hang => {
@@ -206,7 +210,17 @@ struct Outcome {
     lab: Lab,
     shared: Rc<RefCell<Shared>>,
     crash_marks: Vec<usize>,
+    /// The user asked the tracker again at least once (`Op::Manual`).
     relaxed: bool,
+    /// When the user asked the tracker again (ms), and for which torrent: each ask beats that
+    /// torrent's own backoff, 10 s after its failed attempt (SPEC 7C.4).
+    manuals: Vec<(u64, InfoHash20)>,
+    /// When a network change or a wake reached the hub (ms), in order: each may pull a failed
+    /// announce's network-class retry in (SPEC 7C.4, 7C.4b rule 6).
+    net_events: Vec<u64>,
+    /// When the hub declared an outage (ms). Its rollback may forgive a failure series whole,
+    /// so the next failure begins a new series with an early try of its own.
+    outages: Vec<u64>,
 }
 
 fn run_ops(ops: &[Op]) -> Outcome {
@@ -225,6 +239,16 @@ fn run_ops(ops: &[Op]) -> Outcome {
     }
     let mut crash_marks = vec![];
     let mut relaxed = false;
+    let mut manuals = vec![];
+    let mut net_events = vec![];
+    let mut outages = vec![];
+    let mut note_outages = |lab: &mut Lab| {
+        for e in lab.hub().take_net_events() {
+            if let NetEvent::Offline { at, .. } = e {
+                outages.push(at.0);
+            }
+        }
+    };
     let push = |lab: &mut Lab, eng: &Engine, i: usize| {
         lab.stats(i as u32 + 1, eng.up[i], eng.down[i], eng.left[i], SIZE);
         shared
@@ -233,9 +257,14 @@ fn run_ops(ops: &[Op]) -> Outcome {
             .insert(ih(i as u32 + 1), eng.up[i]);
     };
     for op in ops {
+        if matches!(op, Op::Crash) {
+            note_outages(&mut lab);
+        }
         match *op {
             Op::Adv(s) => lab.run_for(Duration::from_secs(u64::from(s))),
             Op::Sleep(s) => {
+                // `Lab::sleep` wakes the hub when the time has jumped.
+                net_events.push((lab.now + Duration::from_secs(u64::from(s))).0);
                 lab.sleep(Duration::from_secs(u64::from(s)));
             }
             Op::Start(i) | Op::Resume(i) => {
@@ -287,14 +316,27 @@ fn run_ops(ops: &[Op]) -> Outcome {
             }
             Op::Manual(i) => {
                 relaxed = true;
+                manuals.push((lab.now.0, ih(u32::from(i) + 1)));
                 lab.manual(u32::from(i) + 1);
             }
             Op::Network => {
-                relaxed = true;
+                net_events.push(lab.now.0);
                 lab.network();
             }
             Op::Wake => {
+                net_events.push(lab.now.0);
                 lab.wake();
+            }
+            Op::Flap(n) => {
+                for k in 0..n {
+                    net_events.push(lab.now.0);
+                    if k % 2 == 0 {
+                        lab.network();
+                    } else {
+                        lab.wake();
+                    }
+                    lab.run_for(Duration::from_secs(10));
+                }
             }
             Op::Crash => {
                 crash_marks.push(lab.sent.len());
@@ -314,14 +356,19 @@ fn run_ops(ops: &[Op]) -> Outcome {
                 shared.borrow_mut().modes[usize::from(h)] = Some(mode_from(m));
             }
         }
+        note_outages(&mut lab);
     }
     // let everything settle, then stop
     lab.run_for(Duration::from_secs(10));
+    note_outages(&mut lab);
     Outcome {
         lab,
         shared,
         crash_marks,
         relaxed,
+        manuals,
+        net_events,
+        outages,
     }
 }
 
@@ -336,6 +383,17 @@ fn check_outcome(o: &Outcome) -> Result<(), String> {
         /// Failure time (ms) of a host-level failure with no server hint: a sibling's success on the
         /// host may pull the retry forward to 30 s after it.
         pullable: Option<u64>,
+        /// Attempt time (ms) of a network-class failure (timeout, hang, no server hint, no HTTP
+        /// status): a network change or wake after it may pull the retry in, but never to within
+        /// 30 s of that attempt (SPEC 7C.4, 7C.4b rule 6; README "Wake/network-change").
+        net_failed_at: Option<u64>,
+        /// When a send of this failure series (failures since the last success) could only
+        /// have come from a network change or wake pulling it in: that happens once per series,
+        /// a second one is a flapping network hammering a dead tracker.
+        net_pulled_at: Option<u64>,
+        /// Attempt time (ms) of a failure without a server hint: a user's ask for this torrent
+        /// after it may bring the retry to 10 s after that attempt.
+        manual_from: Option<u64>,
     }
     let mut keys: HashMap<(InfoHash20, u16), KeyTrace> = HashMap::new();
     let mut succ: HashMap<String, Vec<u64>> = HashMap::new();
@@ -357,6 +415,9 @@ fn check_outcome(o: &Outcome) -> Result<(), String> {
             last_ok: None,
             fail_until: 0,
             pullable: None,
+            net_failed_at: None,
+            net_pulled_at: None,
+            manual_from: None,
         });
         // interval rule
         if x.p.event.is_none() {
@@ -379,7 +440,20 @@ fn check_outcome(o: &Outcome) -> Result<(), String> {
         // backoff rule (rejections are halts, handled by the user-action rule)
         // A success on the host after this failure (delivered before this send) may have pulled it forward.
         let pulled = kt.pullable.is_some_and(|f| succ.get(&x.host).is_some_and(|v| v.iter().any(|t| *t >= f && *t < x.t.0)));
-        let until = if pulled { kt.fail_until.min(kt.pullable.unwrap_or(0) + 30_000) } else { kt.fail_until };
+        let mut until_without_net = if pulled { kt.fail_until.min(kt.pullable.unwrap_or(0) + 30_000) } else { kt.fail_until };
+        // A user's ask for this torrent after the failure beats Seedwell's own backoff.
+        if let Some(f) = kt.manual_from
+            && o.manuals.iter().any(|(t, i)| *i == x.ih && *t >= f && *t <= x.t.0)
+        {
+            until_without_net = until_without_net.min(f + 10_000);
+        }
+        let mut until = until_without_net;
+        // A network change or wake between that failure and this send may have pulled it in.
+        if let Some(f) = kt.net_failed_at
+            && o.net_events.iter().any(|w| *w >= f && *w <= x.t.0)
+        {
+            until = until.min(f + 30_000);
+        }
         if x.p.event != Some(Event::Stopped) && x.t.0 < until {
             return Err(format!(
                 "#{} {:?} sent {} ms before the backoff ended",
@@ -388,12 +462,29 @@ fn check_outcome(o: &Outcome) -> Result<(), String> {
                 until - x.t.0
             ));
         }
+        // Only a network change or wake explains this send: once per failure series (SPEC 7C.4).
+        // An outage declared since the last such pull may have forgiven that series.
+        if x.p.event != Some(Event::Stopped) && x.t.0 < until_without_net {
+            if let Some(p) = kt.net_pulled_at
+                && !o.outages.iter().any(|a| *a > p && *a <= x.t.0)
+            {
+                return Err(format!(
+                    "#{} {:?}: a network change or wake pulled a retry in again {} ms after the last pull of the same failure series",
+                    x.n,
+                    x.p.event,
+                    x.t.0 - p
+                ));
+            }
+            kt.net_pulled_at = Some(x.t.0);
+        }
         if let Some((iv, min)) = info.ok {
             if x.p.event != Some(Event::Stopped) {
                 kt.last_ok = Some((x.t.0 + info.latency.as_millis() as u64, iv, min));
             }
             kt.fail_until = 0;
             kt.pullable = None;
+            kt.net_failed_at = None;
+            kt.net_pulled_at = None;
         } else if !info.rejected {
             let deliver = x.t.0
                 + if info.hang {
@@ -408,22 +499,20 @@ fn check_outcome(o: &Outcome) -> Result<(), String> {
             };
             if x.p.event != Some(Event::Stopped) {
                 kt.fail_until = deliver + wait;
-                // README: a network change may shorten a network-class backoff,
-                // but never below 30 s after the previous attempt.
+                // README: a network change or wake may shorten a network-class backoff,
+                // but never below 30 s after the previous attempt (checked at the next send).
                 let network_class =
                     matches!(info.min_wait, Duration::ZERO) && info.http_status.is_none();
-                if o.relaxed && network_class {
-                    kt.fail_until = x.t.0 + 30_000;
-                }
-                // A user's ask (relaxed runs) beats Seedwell's own backoff, 10 s after the attempt, but
-                // never what the tracker itself demanded (a hint).
-                if o.relaxed && info.min_wait == Duration::ZERO {
-                    kt.fail_until = kt.fail_until.min(x.t.0 + 10_000);
-                }
+                kt.net_failed_at = network_class.then_some(x.t.0);
+                // A user's ask beats Seedwell's own backoff, 10 s after the attempt, but never what
+                // the tracker itself demanded (a hint): checked at the next send.
+                kt.manual_from = (info.min_wait == Duration::ZERO).then_some(x.t.0);
                 kt.pullable = (info.min_wait == Duration::ZERO && (network_class || info.http_status.is_some_and(|s| s >= 500))).then_some(deliver);
             }
         } else {
             kt.fail_until = 0;
+            kt.net_failed_at = None;
+            kt.net_pulled_at = None;
         }
         if info.ok.is_some() && x.p.event != Some(Event::Stopped) {
             succ.entry(x.host.clone()).or_default().push(x.t.0 + info.latency.as_millis() as u64);
@@ -485,15 +574,18 @@ fn check_outcome(o: &Outcome) -> Result<(), String> {
 proptest! {
     #![proptest_config(ProptestConfig { cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(400), max_shrink_iters: 2000, ..ProptestConfig::default() })]
 
-    /// Strict mode: no manual re-announce, no network change, so every regular
-    /// announce must be >= max(interval, min interval) after the last success.
+    /// Strict mode: no manual re-announce, no explicit network change or wake (a `Sleep` still
+    /// wakes the hub), so every regular announce must be >= max(interval, min interval) after the
+    /// last success.
     #[test]
     fn strict_schedule_and_grammar(ops in proptest::collection::vec(op_strategy(false), 1..80)) {
         let o = run_ops(&ops);
         check_outcome(&o).map_err(TestCaseError::fail)?;
     }
 
-    /// With manual re-announce / network / wake pressure: >= min interval.
+    /// With manual re-announce / network / wake pressure. A manual re-announce may come at the
+    /// min interval; a network change or wake moves no regular announce and only pulls a
+    /// network-class retry in, never within 30 s of its attempt (SPEC 7C.4, 7C.4b rule 6).
     #[test]
     fn relaxed_schedule_and_grammar(ops in proptest::collection::vec(op_strategy(true), 1..80)) {
         let o = run_ops(&ops);
@@ -527,31 +619,7 @@ fn deterministic_smoke_of_the_property_driver() {
 /// The checker must be able to fail: feed it logs a banned client would produce.
 #[test]
 fn the_tracker_side_checker_flags_known_bad_sequences() {
-    use trs_tracker::AnnounceParams;
-    let mk = |n: usize, t: u64, ev: Option<Event>, left: u64| Sent {
-        n,
-        t: Millis(t),
-        ih: ih(1),
-        slot: 0,
-        url: "http://a.test/announce".into(),
-        host: "a.test".into(),
-        p: AnnounceParams {
-            info_hash: ih(1),
-            peer_id: [1; 20],
-            port: 1,
-            uploaded: 0,
-            downloaded: 0,
-            corrupt: 0,
-            left,
-            key: 1,
-            event: ev,
-            numwant: if ev == Some(Event::Stopped) { 0 } else { 50 },
-            tracker_id: None,
-            ipv4: None,
-            ipv6: None,
-            crypto: Default::default(),
-        },
-    };
+    let mk = fake_sent;
     let run = |seq: Vec<(Option<Event>, u64, bool)>| {
         let mut v = View::new();
         for (i, (ev, left, ok)) in seq.into_iter().enumerate() {
@@ -598,4 +666,256 @@ fn the_tracker_side_checker_flags_known_bad_sequences() {
         1,
         "completed with left"
     );
+}
+
+/// One request of torrent 1 to `a.test`, as the tracker would log it.
+fn fake_sent(n: usize, t: u64, ev: Option<Event>, left: u64) -> Sent {
+    Sent {
+        n,
+        t: Millis(t),
+        ih: ih(1),
+        slot: 0,
+        url: "http://a.test/announce?pk=0".into(),
+        host: "a.test".into(),
+        p: AnnounceParams {
+            info_hash: ih(1),
+            peer_id: [1; 20],
+            port: 1,
+            uploaded: 0,
+            downloaded: 0,
+            corrupt: 0,
+            left,
+            key: 1,
+            event: ev,
+            numwant: if ev == Some(Event::Stopped) { 0 } else { 50 },
+            tracker_id: None,
+            ipv4: None,
+            ipv6: None,
+            crypto: Default::default(),
+        },
+    }
+}
+
+/// Found by the PC's run (`proptest-regressions/adversarial_props.txt`): a wake pulled a
+/// resumed torrent's timed-out `started` in from a 38-minute backoff to 9 s after the wake, and
+/// the checker called it "sent before the backoff ended" because it let only an explicit network
+/// change pull a retry in. The scheduler was right (SPEC 7C.4: sleep/wake reschedule failed
+/// announces; 7C.4b rule 6). This targets the two ways that pull could hammer a tracker: a retry
+/// within 30 s of the failed attempt, and a wake cutting short a tracker's own `Retry-After`.
+#[test]
+fn after_a_wake_a_resumed_torrents_started_retry_still_waits_30_s_and_any_retry_after() {
+    // Twenty torrents, so twenty draws of the wake jitter: one draw can land past 30 s by luck.
+    for n in 1..=20 {
+        // A tracker that times out 1 s after each request: without the 30 s floor the wake's
+        // quick retry (1-16 s from the wake) would land well inside it.
+        let (attempt, retry) = woken_after_failures(n, 4, Box::new(|_| vec![(d(1), timeout())]));
+        let retry = retry.expect("retried");
+        assert_eq!(retry.event(), Some(Event::Started));
+        assert!(
+            retry.t.0 >= attempt + 30_000,
+            "torrent {n}: retried {} ms after the failed attempt; a wake never pulls within 30 s",
+            retry.t.0 - attempt
+        );
+        // The backoff after four failures is 8 min or more: the wake pulled the retry in, as
+        // SPEC 7C.4 promises a download whose network came back.
+        assert!(
+            retry.t.0 < attempt + 120_000,
+            "torrent {n}: the wake did not pull the failed started in ({} s)",
+            (retry.t.0 - attempt) / 1000
+        );
+
+        // A tracker that answers 429 with Retry-After 600 s: a wake does not move that wait.
+        let throttle: Responder = Box::new(|_| {
+            vec![(
+                d(1),
+                Err(AnnounceError::Http {
+                    status: 429,
+                    retry_after: Some(d(600)),
+                }),
+            )]
+        });
+        let (attempt, retry) = woken_after_failures(n, 1, throttle);
+        let retry = retry.expect("retried after the Retry-After");
+        assert!(
+            retry.t.0 >= attempt + 600_000,
+            "torrent {n}: retried {} s after a Retry-After of 600 s",
+            (retry.t.0 - attempt) / 1000
+        );
+    }
+}
+
+/// Torrent `n` (one tracker) is resumed after a long sleep; once its `started` has failed
+/// `failures` times, the Mac wakes 2 s after the last failure was answered. Returns the last
+/// failed attempt's time and the first request after the wake (within 15 min).
+fn woken_after_failures(n: u32, failures: usize, responder: Responder) -> (u64, Option<Sent>) {
+    let mut lab = Lab::new(responder);
+    lab.add(spec(n, &[&["http://a.test/announce"]]));
+    lab.sleep(d(30 * 3600));
+    lab.stats(n, 0, 0, SIZE, SIZE);
+    lab.ev(n, TorrentEvent::Resume);
+    while lab.sent.len() < failures {
+        lab.run_for(d(1));
+    }
+    let attempt = lab.sent[failures - 1].t.0;
+    lab.run_for(d(2)); // its answer (1 s) has arrived
+    assert_eq!(lab.sent.len(), failures, "torrent {n}: nothing before the backoff");
+    assert!(lab.now.0 < attempt + 30_000);
+    lab.wake();
+    lab.run_for(d(900));
+    (attempt, lab.sent.get(failures).cloned())
+}
+
+/// The checker's wake rule must still be able to fail: a wake licenses a timed-out retry from
+/// 30 s after its attempt, not sooner, not before a tracker's Retry-After, and a wake that came
+/// before the failure licenses nothing.
+#[test]
+fn the_checker_flags_a_wake_pulled_retry_too_soon_or_before_a_retry_after() {
+    let timed_out = Info {
+        ok: None,
+        rejected: false,
+        latency: d(1),
+        hang: false,
+        min_wait: Duration::ZERO,
+        http_status: None,
+    };
+    let throttled = Info {
+        min_wait: d(600),
+        http_status: Some(429),
+        ..timed_out.clone()
+    };
+    let check = |first: &Info, retry_at: u64, wake_at: u64| {
+        let shared = Rc::new(RefCell::new(Shared::default()));
+        shared.borrow_mut().info.insert(0, first.clone());
+        shared.borrow_mut().info.insert(1, timed_out.clone());
+        let mut lab = Lab::new(Box::new(|_| vec![]));
+        lab.sent = vec![
+            fake_sent(0, 1_000, Some(Event::Started), SIZE),
+            fake_sent(1, retry_at, Some(Event::Started), SIZE),
+        ];
+        check_outcome(&Outcome {
+            lab,
+            shared,
+            crash_marks: vec![],
+            relaxed: false,
+            manuals: vec![],
+            net_events: vec![wake_at],
+            outages: vec![],
+        })
+    };
+    check(&timed_out, 31_000, 2_000).expect("30 s after the attempt, after a wake");
+    assert!(check(&timed_out, 20_000, 2_000).is_err(), "19 s after the attempt");
+    assert!(check(&timed_out, 31_000, 500).is_err(), "the wake came before the failure");
+    assert!(check(&throttled, 31_000, 2_000).is_err(), "inside a Retry-After");
+}
+
+/// The checker's once-per-series rule must be able to fail: two network-pulled retries of one
+/// failure series are flagged, while an outage declared between them (its rollback may forgive
+/// the series) licenses the second.
+#[test]
+fn the_checker_flags_a_second_network_pull_in_one_failure_series() {
+    let timed_out = Info {
+        ok: None,
+        rejected: false,
+        latency: d(1),
+        hang: false,
+        min_wait: Duration::ZERO,
+        http_status: None,
+    };
+    let check = |outages: Vec<u64>| {
+        let shared = Rc::new(RefCell::new(Shared::default()));
+        for n in 0..3 {
+            shared.borrow_mut().info.insert(n, timed_out.clone());
+        }
+        let mut lab = Lab::new(Box::new(|_| vec![]));
+        // Each retry 31 s after the failed attempt before it: only a network change or wake
+        // (at 2 s and 33 s) explains either one.
+        lab.sent = vec![
+            fake_sent(0, 1_000, Some(Event::Started), SIZE),
+            fake_sent(1, 32_000, Some(Event::Started), SIZE),
+            fake_sent(2, 63_000, Some(Event::Started), SIZE),
+        ];
+        check_outcome(&Outcome {
+            lab,
+            shared,
+            crash_marks: vec![],
+            relaxed: false,
+            manuals: vec![],
+            net_events: vec![2_000, 33_000],
+            outages,
+        })
+    };
+    let err = check(vec![]).expect_err("a second pull in one failure series");
+    assert!(err.contains("pulled a retry in again"), "{err}");
+    check(vec![40_000]).expect("an outage between the pulls may have begun a new series");
+}
+
+/// A network that keeps flapping (Wi-Fi dropping, a VPN reconnecting: a network change or a
+/// wake every 10 s) pulls a dead tracker's retry in once, then the backoff grows. The failure
+/// this catches: every network change or wake pulling a failed network-class retry in again,
+/// so a flapping interface retried a dead tracker every 30-46 s for as long as it flapped, held
+/// back only by the per-host limit (SPEC 7C.4, 7C.4b rule 6). Network changes and wakes share
+/// the one pull; a success ends the series, and the next outage gets its own early try.
+#[test]
+fn a_network_that_keeps_flapping_pulls_a_dead_trackers_retry_in_once_then_the_backoff_grows() {
+    let up = Rc::new(Cell::new(false));
+    let u = up.clone();
+    let mut lab = Lab::new(Box::new(move |_| {
+        vec![(d(1), if u.get() { ok(1800, None) } else { timeout() })]
+    }));
+    lab.add(spec(1, &[&["http://a.test/announce"]]));
+    lab.stats(1, 0, 0, SIZE, SIZE);
+    lab.ev(1, TorrentEvent::Start);
+    // Fails until `n` requests were sent, with no network change; then its answer arrives.
+    let fail_until_sent = |lab: &mut Lab, n: usize| {
+        while lab.sent.len() < n {
+            lab.run_for(d(1));
+        }
+        lab.run_for(d(2));
+        assert_eq!(lab.sent.len(), n, "nothing before the backoff");
+    };
+    // Alternating network changes and wakes, every 10 s.
+    let flap = |lab: &mut Lab, secs: u64| {
+        for i in 0..secs / 10 {
+            if i % 2 == 0 {
+                lab.network();
+            } else {
+                lab.wake();
+            }
+            lab.run_for(d(10));
+        }
+    };
+    let gaps_s = |lab: &Lab, from: usize| -> Vec<u64> {
+        lab.sent[from..].windows(2).map(|w| (w[1].t.0 - w[0].t.0) / 1000).collect()
+    };
+
+    // Four failures: the downloading backoff is 8 min or more. Then two hours of flapping.
+    fail_until_sent(&mut lab, 4);
+    flap(&mut lab, 2 * 3600);
+    let gaps = gaps_s(&lab, 3);
+    assert!(gaps.len() >= 3, "retries during two hours of flapping: {gaps:?}");
+    // One early "are we back?" try: 30 s after the failed attempt at the earliest, well inside
+    // the 8 min backoff.
+    assert!((30..120).contains(&gaps[0]), "the first flap pulls the retry in: {gaps:?}");
+    // Then the normal growing backoff (16 min, 32 min, capped at 1 h), whatever the network does.
+    for (i, g) in gaps[1..].iter().enumerate() {
+        let floor = ((16 * 60u64) << i).min(3600);
+        assert!(*g >= floor, "retry {} came {g} s after the one before, under the {floor} s backoff: {gaps:?}", i + 2);
+    }
+
+    // The tracker comes back: a success ends the series.
+    up.set(true);
+    let before = lab.sent.len();
+    while lab.sent.len() == before {
+        lab.run_for(d(10));
+    }
+    lab.run_for(d(2));
+    up.set(false);
+    // It dies again: the regular announce and three retries fail, then the network flaps. The
+    // new series gets its one early try, and only one.
+    let first = lab.sent.len();
+    fail_until_sent(&mut lab, first + 4);
+    flap(&mut lab, 30 * 60);
+    let gaps = gaps_s(&lab, first + 3);
+    assert!(!gaps.is_empty() && (30..120).contains(&gaps[0]), "a new series is pulled in once: {gaps:?}");
+    assert!(gaps[1..].iter().all(|g| *g >= 16 * 60), "and once only: {gaps:?}");
 }

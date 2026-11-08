@@ -1,6 +1,6 @@
 //! Size and load-time budgets (docs/ENGINEERING.md memory discipline, task: 1000 torrents < 50 ms).
 //!
-//! Run `cargo test -p trs-state --release --test perf -- --nocapture` for the real numbers; the
+//! Run `cargo test -p seedwell-state --release --test perf -- --nocapture` for the real numbers; the
 //! debug build only checks a 10x looser bound.
 
 use crate::common;
@@ -8,9 +8,9 @@ use crate::common;
 use std::time::Instant;
 
 use common::{TempDir, fast, id};
-use trs_classify::Category;
-use trs_state::rules::{Priority, SeedingGoal};
-use trs_state::{Counters, Store, TorrentRecord};
+use seedwell_classify::Category;
+use seedwell_state::rules::{Priority, SeedingGoal};
+use seedwell_state::{Counters, Store, TorrentRecord};
 
 fn rec(n: u32) -> TorrentRecord {
     let mut r = TorrentRecord::new(

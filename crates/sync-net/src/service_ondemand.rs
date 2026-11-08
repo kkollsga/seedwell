@@ -8,13 +8,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use trs_sync::folder::{FolderCore, HostError, RENAME_NEEDS_HOLDER, Requested};
-use trs_sync::fs::Fs;
-use trs_sync::index::IndexStore;
-use trs_sync::ondemand::{ChangePage, Deleted, Evicted, Item, Page};
-use trs_sync_proto::ids::{FolderId, ShortId};
-use trs_sync_proto::model::STATE_DIR;
-use trs_sync_proto::msg::{HeldFile, MAX_HOLD_FILES};
+use seedwell_sync::folder::{FolderCore, HostError, RENAME_NEEDS_HOLDER, Requested};
+use seedwell_sync::fs::Fs;
+use seedwell_sync::index::IndexStore;
+use seedwell_sync::ondemand::{ChangePage, Deleted, Evicted, Item, Page};
+use seedwell_sync_proto::ids::{FolderId, ShortId};
+use seedwell_sync_proto::model::STATE_DIR;
+use seedwell_sync_proto::msg::{HeldFile, MAX_HOLD_FILES};
 
 use super::{OnDemandError, SyncError, SyncHandle, invalid, lock};
 
@@ -116,7 +116,7 @@ fn copy_err(e: &SyncError) -> SyncError {
 
 /// The newest sequence of the records at `path` and below it (deleted ones too); with `but`, of the versions another
 /// device made (this device's own writes and deletes left out).
-fn newest_below(store: &dyn IndexStore, path: &str, but: Option<trs_sync_proto::ids::ShortId>) -> io::Result<u64> {
+fn newest_below(store: &dyn IndexStore, path: &str, but: Option<seedwell_sync_proto::ids::ShortId>) -> io::Result<u64> {
     let mut newest = 0;
     let mut after: Option<String> = None;
     loop {
@@ -140,8 +140,8 @@ fn check(path: &str) -> Result<(), SyncError> {
     if path.is_empty() {
         return Ok(());
     }
-    trs_sync_proto::model::validate_path(path).map_err(|_| invalid(format!("{path:?} is not a path in the folder")))?;
-    trs_sync::path::check_wire_path(path).map_err(|_| invalid(format!("{path:?} is not a path in the folder")))
+    seedwell_sync_proto::model::validate_path(path).map_err(|_| invalid(format!("{path:?} is not a path in the folder")))?;
+    seedwell_sync::path::check_wire_path(path).map_err(|_| invalid(format!("{path:?} is not a path in the folder")))
 }
 
 fn abs(root: &Path, path: &str) -> PathBuf {
@@ -219,7 +219,7 @@ impl SyncHandle {
     pub fn od_anchor(&self, id: &FolderId) -> Result<u64, SyncError> {
         let f = self.on_demand_folder(id)?;
         let m = f.index.view().meta()?;
-        Ok(trs_sync::ondemand::anchor_of(m.index_id, m.sequence))
+        Ok(seedwell_sync::ondemand::anchor_of(m.index_id, m.sequence))
     }
 
     /// Where the content of `path` is on this device (in the cache), whether it is there or not.
@@ -274,7 +274,7 @@ impl SyncHandle {
     /// - or the devices asked sent none of it for [`FETCH_STALL`] while it was waited on.
     ///
     /// Never while all of it is here and waits for the pull round that places and records it (a stream that ended, a
-    /// build with no chunk left: [`trs_sync::lazy::Streams::finished`]): that answers coming until the record is
+    /// build with no chunk left: [`seedwell_sync::lazy::Streams::finished`]): that answers coming until the record is
     /// committed, then here, whether the device it came from is still connected or not. A paused folder places nothing,
     /// so there the usual rules apply.
     ///
@@ -288,8 +288,8 @@ impl SyncHandle {
     pub async fn od_fetch_wait(&self, id: &FolderId, path: &str, wait: Duration) -> Result<FetchWait, SyncError> {
         let end = Instant::now() + wait;
         // A version no device can give is not waited for.
-        if self.od_item_at(id, path)?.is_some_and(|i| i.state == trs_sync::ondemand::ItemState::Unavailable) {
-            return Err(super::on_demand(OnDemandError::Unavailable, format!("{path}: {}", trs_sync::ondemand::UNAVAILABLE)));
+        if self.od_item_at(id, path)?.is_some_and(|i| i.state == seedwell_sync::ondemand::ItemState::Unavailable) {
+            return Err(super::on_demand(OnDemandError::Unavailable, format!("{path}: {}", seedwell_sync::ondemand::UNAVAILABLE)));
         }
         let f = self.on_demand_folder(id)?;
         let (ask, requesting, stands) = {
@@ -342,7 +342,7 @@ impl SyncHandle {
             // A file that became one no device can give meanwhile says so at once.
             if st.unavailable.iter().any(|p| p == path) {
                 Self::fetch_over(&f, path);
-                return Err(super::on_demand(OnDemandError::Unavailable, format!("{path}: {}", trs_sync::ondemand::UNAVAILABLE)));
+                return Err(super::on_demand(OnDemandError::Unavailable, format!("{path}: {}", seedwell_sync::ondemand::UNAVAILABLE)));
             }
             if st.here {
                 Self::fetch_over(&f, path);
@@ -460,7 +460,7 @@ impl SyncHandle {
             return Ok(false);
         }
         let view = f.index.view();
-        if !view.local(path)?.is_some_and(|r| trs_sync::ondemand::live(&r)) {
+        if !view.local(path)?.is_some_and(|r| seedwell_sync::ondemand::live(&r)) {
             return Ok(false);
         }
         let mut after: Option<String> = None;
@@ -468,7 +468,7 @@ impl SyncHandle {
             let page = view.local_paths(path, after.as_deref(), 1000)?;
             let Some(last) = page.last().cloned() else { return Ok(true) };
             for p in &page {
-                if view.local(p)?.is_some_and(|r| trs_sync::ondemand::live(&r) && r.dataless && !r.want) {
+                if view.local(p)?.is_some_and(|r| seedwell_sync::ondemand::live(&r) && r.dataless && !r.want) {
                     return Ok(false);
                 }
             }
@@ -499,7 +499,7 @@ impl SyncHandle {
             for p in &page {
                 let Some(r) = view.local(p)?.filter(|r| !r.file.info.deleted) else { continue };
                 if !r.dataless {
-                    st.here_count += u64::from(r.file.info.kind == trs_sync_proto::model::FileKind::File);
+                    st.here_count += u64::from(r.file.info.kind == seedwell_sync_proto::model::FileKind::File);
                     continue;
                 }
                 if r.want && self.inner.ctx.fetch_read_gap.load(std::sync::atomic::Ordering::SeqCst) {
@@ -513,7 +513,7 @@ impl SyncHandle {
                 st.wanted |= r.want;
                 if r.want {
                     left += 1;
-                    finished += u64::from(trs_sync::lazy::lock(&f.jobs).finished(p));
+                    finished += u64::from(seedwell_sync::lazy::lock(&f.jobs).finished(p));
                     if let Some(n) = view.need(p)? {
                         st.holders.extend(n.holders);
                     }
@@ -539,7 +539,7 @@ impl SyncHandle {
             return Ok(FetchProgress { done: total, total, here: true, fetching: false });
         }
         // (A stream of a file not hashed yet builds a temp file of its own.)
-        let built = [trs_sync::pull::temp_path(path), trs_sync::pull::stream_temp_path(path)]
+        let built = [seedwell_sync::pull::temp_path(path), seedwell_sync::pull::stream_temp_path(path)]
             .iter()
             .filter_map(|t| std::fs::metadata(abs(&f.root, t)).ok())
             .map(|m| m.len())
@@ -733,17 +733,17 @@ impl SyncHandle {
                     })
                 };
                 if edit_moved_on
-                    && let Some(r) = c.store().local(&p)?.filter(|r| trs_sync::ondemand::live(r) && r.file.info.kind == trs_sync_proto::model::FileKind::File)
+                    && let Some(r) = c.store().local(&p)?.filter(|r| seedwell_sync::ondemand::live(r) && r.file.info.kind == seedwell_sync_proto::model::FileKind::File)
                     && host_file_holds_version(&*core, &r, &from, same_file(&p))?
                 {
                     return Ok(p);
                 }
                 let store = c.store();
-                let holds_copy = &mut |i: &trs_sync_proto::model::FileInfo| match store.local(&i.path)? {
+                let holds_copy = &mut |i: &seedwell_sync_proto::model::FileInfo| match store.local(&i.path)? {
                     Some(r) => host_file_holds_version(&*core, &r, &from, false),
                     None => Ok(false),
                 };
-                if edit_moved_on && let Some(r) = trs_sync::ondemand::copy_holding(c.store(), &p, holds_copy)? {
+                if edit_moved_on && let Some(r) = seedwell_sync::ondemand::copy_holding(c.store(), &p, holds_copy)? {
                     let copy = r.file.info.path.clone();
                     if !r.dataless {
                         return Ok(copy);
@@ -753,11 +753,11 @@ impl SyncHandle {
                     // a copy not here is no record of the host's file), and the host's feed names the item again so
                     // the host lets go of its file. Changed while copied: a new edit, written below.
                     make_parents(c, &root, &copy)?;
-                    let tmp_rel = trs_sync::pull::temp_path(&copy);
+                    let tmp_rel = seedwell_sync::pull::temp_path(&copy);
                     let tmp = abs(&root, &tmp_rel);
-                    trs_platform::fs::copy_shared(&from, &tmp)?;
+                    seedwell_platform::fs::copy_shared(&from, &tmp)?;
                     if host_file_holds(&tmp, &r.file.info)? {
-                        let cache = trs_sync::fs::StdFs::new(root.clone());
+                        let cache = seedwell_sync::fs::StdFs::new(root.clone());
                         cache.set_mtime(&tmp_rel, r.file.info.mtime_ns)?;
                         std::fs::rename(&tmp, abs(&root, &copy))?;
                         c.scan(&copy)?;
@@ -768,11 +768,11 @@ impl SyncHandle {
                 }
                 make_parents(c, &root, &to)?;
                 let target = abs(&root, &to);
-                let tmp = abs(&root, &trs_sync::pull::temp_path(&to));
+                let tmp = abs(&root, &seedwell_sync::pull::temp_path(&to));
                 // The user's file, which another program may be writing: never locked against it (Windows), and a copy
                 // that overlapped a write is made again or refused for now, never recorded. On APFS a clone: the
                 // host's copy and the cache share their blocks.
-                trs_platform::fs::copy_shared(&from, &tmp)?;
+                seedwell_platform::fs::copy_shared(&from, &tmp)?;
                 // Kept in place: the new content is the cache's until the host fills the placeholder with it
                 // (`od_hydrated`), whose note stays as a record of what it held.
                 if let Some(pl) = &placed {
@@ -793,7 +793,7 @@ impl SyncHandle {
 
     /// Why `path` (a directory with `dir`) is a name on-demand folder `id` does not sync, if it is: the line that decides
     /// and whether it is deletable (SPEC §7G.2). From the patterns as the core last read them (never waiting for it).
-    pub fn od_ignored(&self, id: &FolderId, path: &str, dir: bool) -> Result<Option<trs_sync::ignore::Why>, SyncError> {
+    pub fn od_ignored(&self, id: &FolderId, path: &str, dir: bool) -> Result<Option<seedwell_sync::ignore::Why>, SyncError> {
         check(path)?;
         let f = self.on_demand_folder(id)?;
         Ok(f.ignore.get().why(path, dir))
@@ -802,7 +802,7 @@ impl SyncHandle {
     /// What announcing folder `id`'s changes waits for (a delete the host made a moment ago may be a save by replace,
     /// SPEC §7G.11): how long still, and whether a new file is being written at a deleted name, which holds it past the
     /// window until that write ends. `None` when nothing waits.
-    pub fn od_replace_hold(&self, id: &FolderId) -> Option<trs_sync::ondemand::Hold> {
+    pub fn od_replace_hold(&self, id: &FolderId) -> Option<seedwell_sync::ondemand::Hold> {
         self.inner.ctx.registry.folder(id)?.replacing.hold()
     }
 
@@ -822,7 +822,7 @@ impl SyncHandle {
         let f = self.on_demand_folder(id)?;
         let (root, p) = (f.root.clone(), path.to_string());
         // The host's tree, where its folder is (in place only: elsewhere the host's folder is the system's, not seen).
-        let place = f.placed.as_ref().map(|pl| (trs_sync::fs::StdFs::new(pl.place()), pl.place()));
+        let place = f.placed.as_ref().map(|pl| (seedwell_sync::fs::StdFs::new(pl.place()), pl.place()));
         let kept = self
             .with_core(&f, move |c| {
                 c.host_check_write(&p, true)?;
@@ -893,8 +893,8 @@ impl SyncHandle {
                     Some(super::DeleteSeen::File(seen)) => c
                         .store()
                         .local(&p)?
-                        .filter(trs_sync::ondemand::live)
-                        .filter(|r| &trs_sync::ondemand::content_version_of(&r.file.info) != seen)
+                        .filter(seedwell_sync::ondemand::live)
+                        .filter(|r| &seedwell_sync::ondemand::content_version_of(&r.file.info) != seen)
                         .map(|_| format!("{p}: a newer version arrived from another device, so it was not deleted")),
                     None => None,
                 };
@@ -975,13 +975,13 @@ impl SyncHandle {
     /// moves the pins with them. No answer (an earlier Seedwell, a session ended) may still mean done: the host is told
     /// it failed, and the pins follow if the renamed records arrive later.
     async fn rename_by_holder(&self, id: &FolderId, f: &Arc<FolderShared>, from: &str, to: &str, seen: [u8; 32], holders: Vec<ShortId>) -> Result<u64, SyncError> {
-        use trs_sync_proto::msg::RenameOutcome;
+        use seedwell_sync_proto::msg::RenameOutcome;
         let peers = self.inner.ctx.registry.peers();
         let mut refused = None;
         for d in holders {
             // Only a device that answers is asked: an earlier build (full, so first) would leave every rename unanswered.
             let Some(peer) = peers.iter().find(|p| {
-                p.device.short() == d && p.access(&f.id).is_some() && f.writes(&p.device_pk) && p.has(trs_sync_proto::msg::FEATURE_RENAMES)
+                p.device.short() == d && p.access(&f.id).is_some() && f.writes(&p.device_pk) && p.has(seedwell_sync_proto::msg::FEATURE_RENAMES)
             }) else {
                 continue;
             };
@@ -1048,7 +1048,7 @@ impl SyncHandle {
         let end = Instant::now() + wait;
         loop {
             let view = f.index.view();
-            let live = |p: &str| -> io::Result<bool> { Ok(view.local(p)?.is_some_and(|r| trs_sync::ondemand::live(&r))) };
+            let live = |p: &str| -> io::Result<bool> { Ok(view.local(p)?.is_some_and(|r| seedwell_sync::ondemand::live(&r))) };
             if live(to)? && !live(from)? {
                 let mut n = 0u64;
                 let mut after: Option<String> = None;
@@ -1225,16 +1225,16 @@ pub(crate) fn check_kept(f: &FolderShared) {
         return;
     }
     let Some(pl) = &f.placed else { return };
-    let place = trs_sync::fs::StdFs::new(pl.place());
+    let place = seedwell_sync::fs::StdFs::new(pl.place());
     let ignore = f.ignore.get();
     let view = f.index.view();
     let mut over = Vec::new();
     for (dir, by) in kept {
-        let back = view.local(&dir).ok().flatten().is_some_and(|r| trs_sync::ondemand::live(&r));
+        let back = view.local(&dir).ok().flatten().is_some_and(|r| seedwell_sync::ondemand::live(&r));
         let (Ok(d), Ok(b)) = (place.lstat(&dir), place.lstat(&by)) else { continue };
-        let dir_there = d.is_some_and(|m| m.kind == trs_sync_proto::model::FileKind::Dir);
+        let dir_there = d.is_some_and(|m| m.kind == seedwell_sync_proto::model::FileKind::Dir);
         let keeps = b.is_some_and(|m| {
-            ignore.matches(&by, m.kind == trs_sync_proto::model::FileKind::Dir).is_some_and(|x| x.ignored && !x.deletable)
+            ignore.matches(&by, m.kind == seedwell_sync_proto::model::FileKind::Dir).is_some_and(|x| x.ignored && !x.deletable)
         });
         if back || !dir_there || !keeps {
             over.push((dir, by));
@@ -1253,10 +1253,10 @@ pub(crate) fn check_kept(f: &FolderShared) {
 /// (the host filled it and said so) and is unchanged since: an item the host adopted already.
 fn adopted_already(pl: &crate::placed::Placed, store: &dyn IndexStore, p: &str, from: &Path) -> io::Result<bool> {
     let Some(n) = pl.held(p).filter(|n| n.at == p) else { return Ok(false) };
-    let Some(rec) = store.local(p)?.filter(|r| trs_sync::ondemand::live(r) && r.file.info.kind == trs_sync_proto::model::FileKind::File) else {
+    let Some(rec) = store.local(p)?.filter(|r| seedwell_sync::ondemand::live(r) && r.file.info.kind == seedwell_sync_proto::model::FileKind::File) else {
         return Ok(false);
     };
-    if n.content != trs_sync::ondemand::content_version_of(&rec.file.info) {
+    if n.content != seedwell_sync::ondemand::content_version_of(&rec.file.info) {
         return Ok(false);
     }
     let at = abs(&pl.place(), p);
@@ -1264,22 +1264,22 @@ fn adopted_already(pl: &crate::placed::Placed, store: &dyn IndexStore, p: &str, 
         (Ok(a), Ok(b)) if a == b => {}
         _ => return Ok(false),
     }
-    let Some(m) = trs_sync::fs::StdFs::new(pl.place()).lstat(p)? else { return Ok(false) };
+    let Some(m) = seedwell_sync::fs::StdFs::new(pl.place()).lstat(p)? else { return Ok(false) };
     Ok(n.real.is_some_and(|r| r.same(&crate::placed::Mark::of(&m))))
 }
 
 /// Whether the host's file `from` holds exactly `info`'s content (its size, each chunk's hash; never an unhashed one's).
-fn host_file_holds(from: &Path, info: &trs_sync_proto::model::FileInfo) -> io::Result<bool> {
+fn host_file_holds(from: &Path, info: &seedwell_sync_proto::model::FileInfo) -> io::Result<bool> {
     let (Some(dir), Some(name)) = (from.parent(), from.file_name().and_then(|n| n.to_str())) else { return Ok(false) };
-    crate::placed::holds_content(&trs_sync::fs::StdFs::new(dir.to_path_buf()), name, info)
+    crate::placed::holds_content(&seedwell_sync::fs::StdFs::new(dir.to_path_buf()), name, info)
 }
 
 /// Whether the host's file `from` holds the content of `rec`, a version recorded here ([`crate::placed::holds_version`]:
 /// an unhashed one by the bytes `core`, the folder's filesystem, has of it; `same_file`: `from` is where the core reads
 /// it).
-fn host_file_holds_version(core: &dyn Fs, rec: &trs_sync::index::LocalRecord, from: &Path, same_file: bool) -> io::Result<bool> {
+fn host_file_holds_version(core: &dyn Fs, rec: &seedwell_sync::index::LocalRecord, from: &Path, same_file: bool) -> io::Result<bool> {
     let (Some(dir), Some(name)) = (from.parent(), from.file_name().and_then(|n| n.to_str())) else { return Ok(false) };
-    crate::placed::holds_version(core, rec, &trs_sync::fs::StdFs::new(dir.to_path_buf()), name, same_file)
+    crate::placed::holds_version(core, rec, &seedwell_sync::fs::StdFs::new(dir.to_path_buf()), name, same_file)
 }
 
 /// Makes the folders above `path` that are missing in the cache, each recorded as the host's new folder.
@@ -1319,6 +1319,6 @@ fn test_read_gap(f: &FolderShared, path: &str) {
 fn hold_askee(f: &FolderShared, d: ShortId, peers: &[Arc<crate::shared::PeerHandle>]) -> Option<Arc<crate::shared::PeerHandle>> {
     peers
         .iter()
-        .find(|p| p.device.short() == d && p.access(&f.id).is_some() && f.writes(&p.device_pk) && p.has(trs_sync_proto::msg::FEATURE_HOLDS))
+        .find(|p| p.device.short() == d && p.access(&f.id).is_some() && f.writes(&p.device_pk) && p.has(seedwell_sync_proto::msg::FEATURE_HOLDS))
         .cloned()
 }

@@ -62,7 +62,7 @@ pub(crate) fn reconcile(pl: &Placement) -> Vec<Conflict> {
             if let Some(d) = cur.parent() {
                 let _ = std::fs::create_dir_all(d);
             }
-            let _ = trs_storage::rename_excl(&alt, cur);
+            let _ = seedwell_storage::rename_excl(&alt, cur);
         }
     }
     out
@@ -96,13 +96,13 @@ pub(crate) fn settle(c: &Conflict, keep_cur: bool) -> std::io::Result<()> {
         if let Some(d) = to.parent() {
             std::fs::create_dir_all(d)?;
         }
-        trs_storage::rename_excl(from, &to)
+        seedwell_storage::rename_excl(from, &to)
     };
     if keep_cur {
         aside(&c.alt)
     } else {
         aside(&c.cur)?;
-        trs_storage::rename_excl(&c.alt, &c.cur)
+        seedwell_storage::rename_excl(&c.alt, &c.cur)
     }
 }
 

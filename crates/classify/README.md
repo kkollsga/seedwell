@@ -1,4 +1,4 @@
-# trs-classify
+# seedwell-classify
 
 On-device content detection for Seedwell (SPEC §7A.2). Detection drives smart add, titles, icons and rules; it
 does not decide where files go (the layout is flat, SPEC §7A.3).
@@ -7,7 +7,7 @@ for the property tests only). Every parser is hand-written; a regex engine would
 binary size and per-call latency than it saves, and the grammar is small enough to read.
 
 ```rust
-use trs_classify::{classify, FileEntry, Input};
+use seedwell_classify::{classify, FileEntry, Input};
 
 let files = [
     FileEntry { path: "Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP.mkv", size: 8_000_000_000 },
@@ -20,7 +20,7 @@ let input = Input {
     content_type_hint: None,   // `Content-Type` of a direct HTTP download
 };
 let c = classify(&input);
-assert_eq!(c.category, trs_classify::Category::Movie);
+assert_eq!(c.category, seedwell_classify::Category::Movie);
 assert!(!c.ask);                       // confidence >= 0.8
 assert_eq!(c.fields.year, Some(1968));
 assert_eq!(c.junk_files[0].index, 1);  // the sample
@@ -56,7 +56,7 @@ between. Pure, no I/O, nothing cached per torrent: compute it when a chooser ope
 whether one is needed, then drop it. It follows `Classification::category` (the best guess, even when `ask` is set).
 
 ```rust
-use trs_classify::{classify, structure, FileEntry, Input, StructureKind};
+use seedwell_classify::{classify, structure, FileEntry, Input, StructureKind};
 
 let files = [
     FileEntry { path: "Season 1/Show.S01E01.1080p.WEB-DL.mkv", size: 4_000_000_000 },
@@ -239,7 +239,7 @@ that is not in the name or a file name. Known limits (parser, not display): `Aut
   naming styles, the rest from a seeded generator with ground truth by construction).
   `tests/fixtures/holdout.tsv` (99 rows) and `blind.tsv` (102 rows) were written after tuning and are reported separately.
   Column format: see the header of `tests/corpus.rs`. Add rows freely; run
-  `CORPUS_VERBOSE=1 cargo test -p trs-classify --test corpus -- --nocapture` for the confusion matrix and every miss.
+  `CORPUS_VERBOSE=1 cargo test -p seedwell-classify --test corpus -- --nocapture` for the confusion matrix and every miss.
   **The titles are public-domain works or invented**, and the names are written in the style of real releases,
   but they are not scraped from a tracker: extend the corpus with real names from your own library before trusting the numbers.
 * `tests/structure.rs`: `structure()` on fixtures (5-season pack with Extras/samples/nfo, flat multi-season pack, season folders without markers, double episodes, specials, daily show, anime, `Subs/` folders, film collections with stacks and subtitles, Blu-ray folder, discography with discs and scans, book and audiobook bundles, multi-platform software, `.app` bundle, 20,000-file timings). `tests/structure_corpus.rs`: partition invariant and oracles over all corpus rows (classifier category and labelled category). `tests/structure_props.rs`: proptest, the partition invariant for every category on hostile input.

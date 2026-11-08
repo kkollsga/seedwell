@@ -1,11 +1,11 @@
 //! Real-swarm test: downloads the Debian netinst ISO (a legal Linux distro torrent) with the
 //! public tracker and DHT. Ignored by default; run with
-//! `cargo test -p trs-engine --test it --release network:: -- --ignored --nocapture`.
+//! `cargo test -p seedwell-engine --test it --release network:: -- --ignored --nocapture`.
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use trs_engine::*;
+use seedwell_engine::*;
 
 fn peak_rss_bytes() -> u64 {
     // SAFETY: getrusage only writes into the zeroed struct we pass.
@@ -20,7 +20,7 @@ fn peak_rss_bytes() -> u64 {
 async fn download_debian_netinst() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let torrent = std::fs::read(root.join("bench/torrents/debian-netinst.torrent")).expect("torrent file");
-    let out = root.join("bench/downloads/trs-engine");
+    let out = root.join("bench/downloads/seedwell-engine");
     std::fs::create_dir_all(&out).unwrap();
     let cfg = EngineConfig {
         default_save_dir: out.clone(),

@@ -1,5 +1,5 @@
 [package]
-name = "trs-sync"
+name = "seedwell-sync"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,9 +8,9 @@ publish = false
 description = "Folder sync core: scanner, chunker, index, planner, puller and conflict rules over an injected filesystem (SPEC 7G)"
 
 [dependencies]
-trs-platform = { path = "../platform" }
+seedwell-platform = { path = "../platform" }
 # Each dependency is justified in README.md.
-trs-sync-proto = { path = "../sync-proto" }
+seedwell-sync-proto = { path = "../sync-proto" }
 redb = "4"
 sha2 = { version = "0.11", default-features = false }
 unicode-normalization = { version = "0.1", default-features = false, features = ["std"] }

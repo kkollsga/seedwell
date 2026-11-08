@@ -1,4 +1,4 @@
-//! Play while downloading (SPEC 7F), the engine side of `trs-stream`'s [`PieceSource`] contract.
+//! Play while downloading (SPEC 7F), the engine side of `seedwell-stream`'s [`PieceSource`] contract.
 //!
 //! A torrent that nobody streams owns none of this: the actor's `stream` slot is `None`, the
 //! picker's hint list is empty and no task or allocation exists. The first `stream_url` creates a
@@ -26,8 +26,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use tokio::sync::watch;
-use trs_stream::{FileRange, Geometry, PieceSource, StreamId, UrgentRange};
-use trs_wire::BLOCK_SIZE;
+use seedwell_stream::{FileRange, Geometry, PieceSource, StreamId, UrgentRange};
+use seedwell_wire::BLOCK_SIZE;
 
 use crate::chan::Sender;
 use crate::peer::PeerCtx;

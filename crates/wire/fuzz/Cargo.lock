@@ -128,6 +128,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
+name = "seedwell-wire"
+version = "0.1.20"
+dependencies = [
+ "bytes",
+ "sha1",
+]
+
+[[package]]
+name = "seedwell-wire-fuzz"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "libfuzzer-sys",
+ "seedwell-wire",
+]
+
+[[package]]
 name = "sha1"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -143,23 +160,6 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
-
-[[package]]
-name = "trs-wire"
-version = "0.0.1"
-dependencies = [
- "bytes",
- "sha1",
-]
-
-[[package]]
-name = "trs-wire-fuzz"
-version = "0.0.0"
-dependencies = [
- "bytes",
- "libfuzzer-sys",
- "trs-wire",
-]
 
 [[package]]
 name = "typenum"

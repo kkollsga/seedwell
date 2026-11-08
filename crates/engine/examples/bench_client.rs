@@ -15,16 +15,16 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use std::io::Write as _;
-use trs_engine::{AddOptions, EngineConfig, EngineHandle, Host, HostOptions, Totals};
+use seedwell_engine::{AddOptions, EngineConfig, EngineHandle, Host, HostOptions, Totals};
 
-/// Live heap bytes, counted only when `TRS_BENCH_DIAG=1` (measurement aid; with it, a diagnostics line
+/// Live heap bytes, counted only when `SEEDWELL_BENCH_DIAG=1` (measurement aid; with it, a diagnostics line
 /// goes to stderr every 10 s).
 /// Everything the process allocates goes through it, so the number includes tokio, redb and the
 /// runtime, and can be set against `phys_footprint` to see what is not heap.
 mod heap {
     use std::alloc::{GlobalAlloc, Layout};
-    // The allocator the apps install (`trs_storage::MappedAlloc`), so that the benchmark measures it.
-    use trs_storage::MappedAlloc as System;
+    // The allocator the apps install (`seedwell_storage::MappedAlloc`), so that the benchmark measures it.
+    use seedwell_storage::MappedAlloc as System;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 
     pub static ON: AtomicBool = AtomicBool::new(false);
@@ -48,7 +48,7 @@ mod heap {
     static PROF_N: AtomicUsize = AtomicUsize::new(0);
 
     /// Allocation profiler (diagnostics): prints a backtrace for every 8th allocation whose size lies in
-    /// `TRS_BENCH_PROF=lo-hi`.
+    /// `SEEDWELL_BENCH_PROF=lo-hi`.
     fn profile(size: usize) {
         if size < PROF_LO.load(Relaxed) || size > PROF_HI.load(Relaxed) || !PROF_N.fetch_add(1, Relaxed).is_multiple_of(8) {
             return;
@@ -145,7 +145,7 @@ fn parse_args() -> Args {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--version" => {
-                println!("trs-bench-client {} (trs-engine)", env!("CARGO_PKG_VERSION"));
+                println!("seedwell-bench-client {} (seedwell-engine)", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             "add" if !started => started = true,
@@ -232,13 +232,13 @@ async fn run(a: Args) -> Result<(), String> {
                 c.alt_schedule = None;
                 c.alt_speed = false;
                 // The local benchmarks use a mock tracker on loopback (production refuses that).
-                c.tracker_destinations = trs_tracker::policy::DestinationPolicy::LOCAL;
+                c.tracker_destinations = seedwell_tracker::policy::DestinationPolicy::LOCAL;
                 c.dht_enabled = dht;
                 c.pex_enabled = pex;
                 c.utp = utp;
                 // Measurement aid: shorter tier timers, so that an idle seeder reaches its steady
-                // Cold state in minutes instead of ten (`TRS_BENCH_TIER_SECS=15`).
-                if let Some(secs) = std::env::var("TRS_BENCH_TIER_SECS").ok().and_then(|v| v.parse::<u64>().ok()) {
+                // Cold state in minutes instead of ten (`SEEDWELL_BENCH_TIER_SECS=15`).
+                if let Some(secs) = std::env::var("SEEDWELL_BENCH_TIER_SECS").ok().and_then(|v| v.parse::<u64>().ok()) {
                     c.tiers.hot_to_warm = Duration::from_secs(secs);
                     c.tiers.warm_to_cold = Duration::from_secs(secs);
                 }
@@ -254,14 +254,14 @@ async fn run(a: Args) -> Result<(), String> {
     for p in &a.torrents {
         let bytes = std::fs::read(p).map_err(|e| format!("{}: {e}", p.display()))?;
         match h.add_torrent_file(bytes, AddOptions::default()).await {
-            Ok(_) | Err(trs_engine::EngineError::Duplicate(_)) => {}
+            Ok(_) | Err(seedwell_engine::EngineError::Duplicate(_)) => {}
             Err(e) => eprintln!("{}: {e}", p.display()),
         }
     }
     eprintln!("bench_client: {} torrents added, listening on {}", a.torrents.len(), h.listen_port());
 
-    let heap_log = std::env::var_os("TRS_BENCH_DIAG").is_some();
-    let mut stop = trs_platform::signal::Shutdown::new().map_err(|e| e.to_string())?;
+    let heap_log = std::env::var_os("SEEDWELL_BENCH_DIAG").is_some();
+    let mut stop = seedwell_platform::signal::Shutdown::new().map_err(|e| e.to_string())?;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut stdout = std::io::stdout();
@@ -312,15 +312,15 @@ async fn run(a: Args) -> Result<(), String> {
 }
 
 fn main() {
-    if let Some((lo, hi)) = std::env::var("TRS_BENCH_PROF").ok().and_then(|v| v.split_once('-').map(|(a, b)| (a.parse().unwrap_or(0), b.parse().unwrap_or(0)))) {
+    if let Some((lo, hi)) = std::env::var("SEEDWELL_BENCH_PROF").ok().and_then(|v| v.split_once('-').map(|(a, b)| (a.parse().unwrap_or(0), b.parse().unwrap_or(0)))) {
         heap::PROF_LO.store(lo, std::sync::atomic::Ordering::Relaxed);
         heap::PROF_HI.store(hi, std::sync::atomic::Ordering::Relaxed);
     }
-    if std::env::var_os("TRS_BENCH_DIAG").is_some() {
+    if std::env::var_os("SEEDWELL_BENCH_DIAG").is_some() {
         heap::ON.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     let a = parse_args();
-    let rt = match trs_engine::build_runtime() {
+    let rt = match seedwell_engine::build_runtime() {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("bench_client: {e}");

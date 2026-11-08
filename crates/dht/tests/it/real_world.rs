@@ -1,7 +1,7 @@
 //! Live-network test against the real Mainline DHT. Run explicitly:
 //!
 //! ```text
-//! cargo test -p trs-dht --test real_world -- --ignored --nocapture
+//! cargo test -p seedwell-dht --test real_world -- --ignored --nocapture
 //! ```
 //!
 //! Polite by construction: one lookup, no `announce_peer` (we have no data), and the node is shut
@@ -11,7 +11,7 @@
 use sha1::{Digest, Sha1};
 use std::process::Command;
 use std::time::{Duration, Instant};
-use trs_dht::{DriverConfig, LookupUpdate, PublicInfoHash, spawn};
+use seedwell_dht::{DriverConfig, LookupUpdate, PublicInfoHash, spawn};
 
 const DIR_URL: &str = "https://cdimage.debian.org/debian-cd/current/amd64/bt-cd/";
 /// Fallback if the directory listing cannot be fetched: Debian 13.7.0 amd64 netinst.
@@ -82,7 +82,7 @@ fn info_hash(torrent: &[u8]) -> Option<[u8; 20]> {
 }
 
 fn debian_info_hash() -> ([u8; 20], String) {
-    let dir = std::env::temp_dir().join(format!("trs-dht-realworld-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("seedwell-dht-realworld-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let listing = curl(DIR_URL, None)
         .map(|b| String::from_utf8_lossy(&b).into_owned())

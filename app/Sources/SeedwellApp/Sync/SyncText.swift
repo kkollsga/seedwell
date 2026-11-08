@@ -1,7 +1,7 @@
 import Foundation
 
 // Folder sync (SPEC 7G, 8.2 item 5): the words and states the menu, the window and the modals share are the core's
-// (trs-ffi `sync_text.rs` and `sync_menu.rs`, the same in every host app). This only forwards the ones used in many
+// (seedwell-ffi `sync_text.rs` and `sync_menu.rs`, the same in every host app). This only forwards the ones used in many
 // places, and writes dates in the user's own style (`Fmt.day`).
 
 enum SyncText {

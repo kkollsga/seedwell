@@ -144,8 +144,11 @@ import SwiftUI
                 return SyncAddView(model: m)
             }
             let link = (try? await core.syncCreateInvite(id: folders[0].id, role: .readOnly, maxUses: 1, validDays: 7, channelId: core.syncSnapshot().folders[0].channelId))?.link ?? ""
+            // (Once its link's places are read: off the main thread.)
+            let shared = SyncAddModel(core: core, prefill: link)
+            await shared.ready()
             await render("sync-add-shared-\(suffix)", size: NSSize(width: 480, height: 290), dark: dark, settings: true) {
-                SyncAddView(model: SyncAddModel(core: core, prefill: link))
+                SyncAddView(model: shared)
             }
             await render("sync-add-bad-\(suffix)", size: NSSize(width: 480, height: 340), dark: dark, settings: true) {
                 let m = SyncAddModel(core: core, prefill: "SWW-NOTAKEY")
@@ -158,17 +161,24 @@ import SwiftUI
                 return SyncEditView(model: m, actions: sync)
             }
             _ = try? await core.syncCreateInvite(id: folders[0].id, role: .readWrite, maxUses: 1, validDays: 7, channelId: nil)
+            // (Each Share dialog once the core has drawn it: its reads are off the main thread.)
+            let share = SyncShareModel(core: core, id: folders[0].id, copied: true)
+            await share.ready()
             await render("sync-share-\(suffix)", size: NSSize(width: 460, height: 440), dark: dark, settings: true) {
-                SyncShareView(model: SyncShareModel(core: core, id: folders[0].id, copied: true), actions: sync)
+                SyncShareView(model: share, actions: sync)
             }
             // A sharing period running: the countdown with Extend.
             _ = try? await core.syncSetShareUntil(id: folders[0].id, untilS: UInt64(Date().timeIntervalSince1970) + 7 * 86_400 - 3_600)
+            let period = SyncShareModel(core: core, id: folders[0].id)
+            await period.ready()
             await render("sync-share-period-\(suffix)", size: NSSize(width: 460, height: 360), dark: dark, settings: true) {
-                SyncShareView(model: SyncShareModel(core: core, id: folders[0].id), actions: sync)
+                SyncShareView(model: period, actions: sync)
             }
+            // Share ▸ Seedwell on a folder not synced yet: add and share in one.
+            let new = SyncShareModel(core: core, newFolder: NSHomeDirectory() + "/Documents/Novel")
+            await new.ready()
             await render("sync-share-new-\(suffix)", size: NSSize(width: 460, height: 330), dark: dark, settings: true) {
-                // Share ▸ Seedwell on a folder not synced yet: add and share in one.
-                SyncShareView(model: SyncShareModel(core: core, newFolder: NSHomeDirectory() + "/Documents/Novel"), actions: sync)
+                SyncShareView(model: new, actions: sync)
             }
             for (name, state) in [("off", (false, false)), ("badges-on", (true, false)), ("on", (true, true))] {
                 await render("finder-setup-\(name)-\(suffix)", size: NSSize(width: 460, height: state.0 ? 260 : 330), dark: dark, settings: true) {
@@ -192,6 +202,22 @@ import SwiftUI
                 // Agents writing Markdown, each with its name and computer.
                 let c = core.chatChannels().first { $0.name == "Release notes" }?.id ?? ""
                 return MainWindowView(model: model(.chat(channelId: c, topicId: nil), select: nil), commands: commands, settings: settings, nav: SettingsNavigation())
+            }
+            // Groups of channels (SPEC 7G.7 Groups): "Agents" (its icon from its name) holding Release notes, open and
+            // closed (its unread count then), above the plain list; the group goes again so later shots are as before.
+            if let notes = core.chatChannels().first(where: { $0.name == "Release notes" }),
+               let g = try? await core.chatGroupNew(name: "Agents", icon: nil, channelId: notes.id) {
+                // Closed first: showing the open one's channel reads it.
+                for open in [false, true] {
+                    await render("chats-groups-\(open ? "open" : "closed")-\(suffix)", size: NSSize(width: 1180, height: 760), dark: dark) {
+                        // Open: its channel shown; closed: a channel of the plain list, the group's count beside it.
+                        let shown = open ? notes.id : core.chatChannels().first { $0.id != notes.id }?.id ?? ""
+                        let m = model(.chat(channelId: shown, topicId: nil), select: nil)
+                        if !open { m.setGroupOpen(g.id, false) }
+                        return MainWindowView(model: m, commands: commands, settings: settings, nav: SettingsNavigation())
+                    }
+                }
+                _ = try? await core.chatGroupDelete(id: g.id)
             }
             await render("chats-direct-\(suffix)", size: NSSize(width: 1180, height: 760), dark: dark) {
                 let m = model(.direct(deviceId: core.chatDirects().first?.deviceId ?? ""), select: nil)
@@ -433,6 +459,20 @@ import SwiftUI
         }
     }
 
+    /// A window's frame view drawn once settled, as QA's shots draw one: with its vibrant layers (the sidebar's
+    /// material, labels and icons) composited in the app (`VibrancyPass`). A plain `cacheDisplay` leaves the window
+    /// server's part out, and every main-window render had a blank sidebar.
+    static func windowImage(_ frame: NSView) async -> NSBitmapImageRep? {
+        for _ in 0..<6 {
+            try? await Task.sleep(for: .milliseconds(20))
+            frame.layoutSubtreeIfNeeded()
+        }
+        return await SnapshotWindow.settled {
+            frame.layoutSubtreeIfNeeded()
+            return VibrancyPass.image(of: frame)
+        }
+    }
+
     func render<V: View>(_ name: String, size: NSSize, dark: Bool = true, settings: Bool = false,
                          @ViewBuilder _ content: () -> V) async {
         guard wanted(name) else { return }
@@ -446,9 +486,13 @@ import SwiftUI
         w.setContentSize(size)
         w.setFrameOrigin(SnapshotWindow.offscreen)
         w.orderFront(nil)
+        // Told once that it became key and main (nothing reaches the window server): the sidebar's vibrancy follows
+        // the key changes it is told of, not `isKeyWindow`, and drew dim and inactive without it (as QuietRun.drawActive).
+        w.becomeMain()
+        w.becomeKey()
         w.makeFirstResponder(nil)
         defer { w.contentViewController = nil; w.close() }
-        guard let frame = w.contentView?.superview, let rep = await SnapshotWindow.settledImage(of: frame),
+        guard let frame = w.contentView?.superview, let rep = await Self.windowImage(frame),
               let png = rep.representation(using: .png, properties: [:]) else { return }
         try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent("\(name).png"))
         print("wrote \(name).png (\(rep.pixelsWide)x\(rep.pixelsHigh))")
@@ -489,15 +533,20 @@ class SnapshotWindow: NSWindow {
         }
     }
 
-    /// What `draw` draws, drawn every 50 ms until two drawings in a row are the same, or for `limit` at most.
+    /// What `draw` draws, drawn every 50 ms until two drawings in a row are the same, or for `limit` at most. Each
+    /// drawing is one of the renderer's captures (`RendererCaptures`): the hang watchdog does not count it as the app
+    /// stuttering; what the main thread does between two drawings it still counts.
     static func settled(limit: Duration = .seconds(1.3), _ draw: () -> NSBitmapImageRep?) async -> NSBitmapImageRep? {
         let clock = ContinuousClock()
         let end = clock.now + limit
         var last: Data?
         while true {
             try? await Task.sleep(for: .milliseconds(50))
-            guard let rep = draw() else { return nil }
-            let data = rep.bitmapData.map { Data(bytes: $0, count: rep.bytesPerRow * rep.pixelsHigh) }
+            let drawn: (NSBitmapImageRep, Data?)? = RendererCaptures.shared.capture {
+                guard let rep = draw() else { return nil }
+                return (rep, rep.bitmapData.map { Data(bytes: $0, count: rep.bytesPerRow * rep.pixelsHigh) })
+            }
+            guard let (rep, data) = drawn else { return nil }
             if data == last || clock.now >= end { return rep }
             last = data
         }

@@ -30,7 +30,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot};
-use trs_wire::Handshake;
+use seedwell_wire::Handshake;
 
 use self::cold::*;
 pub(crate) use self::sharing::TrackerErr;
@@ -65,13 +65,13 @@ pub(crate) enum SessionMsg {
     /// Result of re-matching tracker profiles after `trackers.toml` changed.
     Rematched(Vec<(TorrentId, ProfileMatch)>),
     /// Display titles computed off the actor: `(torrent, category they were computed for, title)`.
-    Titled(Vec<(TorrentId, Option<trs_classify::Category>, String)>),
+    Titled(Vec<(TorrentId, Option<seedwell_classify::Category>, String)>),
     /// Something happened to a direct download.
     Direct(direct::DirectMsg),
     /// A live listen-port change finished binding (`gen` tells a stale answer from the current one).
     Rebound { serial: u64, wanted: u16, result: Result<Box<crate::engine::Bound>, String> },
     /// The DHT node was moved to the new UDP socket after a live port change.
-    DhtMoved { serial: u64, dht: trs_dht::DhtHandle },
+    DhtMoved { serial: u64, dht: seedwell_dht::DhtHandle },
     /// The listen port was mapped (or not). `serial` tells a stopped mapper's last word from the
     /// current one's.
     PortMap { serial: u64, status: crate::api::PortMapStatus },
@@ -114,7 +114,7 @@ pub(crate) struct ChoiceJob {
     pub stage_root: Option<PathBuf>,
     pub placed: bool,
     /// Category in effect (the chooser's structure follows it).
-    pub category: Option<trs_classify::Category>,
+    pub category: Option<seedwell_classify::Category>,
     /// Rule id in effect (`None` = Default) and the goal the torrent has now.
     pub rule: Option<String>,
     pub goal: SeedGoal,
@@ -192,13 +192,13 @@ pub(crate) enum Cmd {
     StreamOpen {
         id: TorrentId,
         file: usize,
-        server: Arc<trs_stream::StreamServer>,
+        server: Arc<seedwell_stream::StreamServer>,
         reply: streams::OpenReply,
     },
     /// A stream was closed by the caller: torrents nobody streams any more may go back to the queue.
     StreamsClosed,
     /// The DHT node, for public lookups by other services (folder sync); `None` while the DHT is off.
-    PublicDht(oneshot::Sender<Option<trs_dht::DhtHandle>>),
+    PublicDht(oneshot::Sender<Option<seedwell_dht::DhtHandle>>),
     /// Map one more port (TCP and UDP) with the listen port's mapper (folder sync's port), or stop mapping it.
     SetExtraMappedPort(Option<u16>),
     /// Tests only: the actor does nothing else for this long (as a slow commit or a stat of a hung disk would).
@@ -308,7 +308,7 @@ pub(crate) struct Session {
     pub roots: Vec<PathBuf>,
     pub ids: IdTable,
     pub directs: HashMap<TorrentId, direct::DirectEntry>,
-    pub downloader: Option<trs_http::Downloader>,
+    pub downloader: Option<seedwell_http::Downloader>,
     pub watcher: Option<tokio::task::JoinHandle<()>>,
     pub portmap: Option<crate::portmap::PortMapRunner>,
     /// Bumped at every mapper (re)start; answers of an older one are dropped.
@@ -337,7 +337,7 @@ pub(crate) struct Session {
     pub edge_busy: HashMap<TorrentId, bool>,
     pub hosts: Vec<Box<str>>,
     pub tracker: Option<TrackerHandle>,
-    pub dht: Option<trs_dht::DhtHandle>,
+    pub dht: Option<seedwell_dht::DhtHandle>,
     pub writer: Writer,
     dirty: Dirty,
     /// Torrents and direct downloads removed whose removal may not be stored yet (waiting in `dirty`, or with the
@@ -391,7 +391,7 @@ impl Session {
         sh: Arc<Shared>,
         rx: mpsc::Receiver<SessionMsg>,
         tracker: Option<TrackerHandle>,
-        dht: Option<trs_dht::DhtHandle>,
+        dht: Option<seedwell_dht::DhtHandle>,
     ) -> Self {
         Self {
             writer: Writer::start(sh.store.clone()),
@@ -562,7 +562,7 @@ impl Session {
             }
             SessionMsg::Cmd(c) => self.on_cmd(c),
             SessionMsg::MseLookup { target, reply } => {
-                let found = self.table.keys().find(|id| trs_wire::mse::hash(&[b"req2", &id[..]]) == target).copied();
+                let found = self.table.keys().find(|id| seedwell_wire::mse::hash(&[b"req2", &id[..]]) == target).copied();
                 let _ = reply.send(found);
             }
             SessionMsg::Incoming { stream, hs, addr, permit } => self.on_incoming(stream, hs, addr, permit),
@@ -630,7 +630,7 @@ impl Session {
     /// its primary announce host.
     pub(crate) fn stat_domain(&self, c: &ColdTorrent) -> Option<String> {
         let h = self.hosts.get(usize::from(c.host))?;
-        (!h.is_empty()).then(|| trs_state::trackers::registrable_domain(h))
+        (!h.is_empty()).then(|| seedwell_state::trackers::registrable_domain(h))
     }
 
     pub(crate) fn push_stat(&mut self, d: StatDelta) {
@@ -864,7 +864,7 @@ impl Session {
         }
         let Some(dht) = self.dht.clone() else { return true };
         // The only way to build a PublicInfoHash is to state the private flag.
-        let Some(h) = trs_dht::PublicInfoHash::new(id, e.cold.private()) else { return true };
+        let Some(h) = seedwell_dht::PublicInfoHash::new(id, e.cold.private()) else { return true };
         if !self.dht_inflight.insert(id) {
             return false;
         }
@@ -879,7 +879,7 @@ impl Session {
             let res = if announce { dht.announce(h, port).await } else { dht.get_peers(h).await };
             if let Ok(Ok(mut stream)) = res {
                 while let Some(u) = stream.next().await {
-                    if let trs_dht::LookupUpdate::Peers(v) = u {
+                    if let seedwell_dht::LookupUpdate::Peers(v) = u {
                         let peers = v.into_iter().map(SocketAddr::V4).collect();
                         let _ = tx.send(SessionMsg::DhtPeers { id, peers }).await;
                     }
@@ -940,7 +940,7 @@ impl Session {
         self.trim_since = None;
         if !self.shutting_down {
             // A syscall that walks the allocator's free lists: off the actor.
-            tokio::task::spawn_blocking(trs_storage::release_free_memory);
+            tokio::task::spawn_blocking(seedwell_storage::release_free_memory);
             if self.trim_followups > 0 {
                 self.trim_followups -= 1;
                 self.schedule_after(TRIM_FOLLOWUP_EVERY, Job::Trim);

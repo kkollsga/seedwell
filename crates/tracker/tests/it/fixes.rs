@@ -16,9 +16,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use adversarial_support::*;
-use trs_tracker::gate::{GateConfig, GateEvent};
-use trs_tracker::response::{AnnounceError, TransportError, is_permanent_reason};
-use trs_tracker::{Event, Millis, Report, TorrentEvent};
+use seedwell_tracker::gate::{GateConfig, GateEvent};
+use seedwell_tracker::response::{AnnounceError, TransportError, is_permanent_reason};
+use seedwell_tracker::{Event, Millis, Report, TorrentEvent};
 
 const A: &str = "http://a.test/announce?passkey=SECRET";
 
@@ -199,7 +199,7 @@ fn completed_that_provably_never_reached_the_tracker_is_sent_again() {
         }),
         ("tls", || Err(AnnounceError::Transport(TransportError::Tls))),
         ("policy", || {
-            Err(AnnounceError::Transport(TransportError::Forbidden(trs_tracker::policy::Refusal::Loopback)))
+            Err(AnnounceError::Transport(TransportError::Forbidden(seedwell_tracker::policy::Refusal::Loopback)))
         }),
     ];
     for (name, f) in kinds {
@@ -235,7 +235,7 @@ fn ambiguous_failures_never_resend_completed() {
         ("503", || http_status(503)),
         ("garbage", || {
             Err(AnnounceError::Garbage(
-                trs_tracker::response::ParseError::NotBencode,
+                seedwell_tracker::response::ParseError::NotBencode,
             ))
         }),
     ];
@@ -361,7 +361,7 @@ fn forward_excursion_that_is_corrected_costs_at_most_one_early_announce() {
 
 #[test]
 fn persisted_timings_stay_on_the_wall_clock_after_a_backward_step() {
-    use trs_tracker::store::{TimingKey, TimingStore};
+    use seedwell_tracker::store::{TimingKey, TimingStore};
     let mut lab = Lab::new(always(|| ok(1800, Some(900))));
     lab.now = s(1_000_000);
     start(&mut lab, 1, &[A]);
@@ -429,7 +429,7 @@ fn equivalent_host_spellings_share_one_budget_end_to_end() {
 
 #[test]
 fn scrape_gap_follows_the_announce_interval() {
-    use trs_tracker::gate::SubmitError;
+    use seedwell_tracker::gate::SubmitError;
     let mut lab = Lab::with_cfg(
         always(|| ok(7200, None)),
         GateConfig {
@@ -474,7 +474,7 @@ fn debug_output_of_the_store_never_contains_the_passkey() {
 
 // ------------------------------------------------------------------- roles
 
-use trs_tracker::TorrentRole;
+use seedwell_tracker::TorrentRole;
 
 fn role_lab(role: TorrentRole, answers: impl Fn(&Sent) -> Resp + 'static) -> Lab {
     let mut lab = Lab::new(Box::new(move |s| {

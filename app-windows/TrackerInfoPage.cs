@@ -2,7 +2,7 @@ using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
@@ -41,9 +41,9 @@ sealed class TrackerInfoPage
         scroll.Content = body;
         // A folder draft of another tracker is not this one's.
         editing.Editor.RevertFolders();
-        timer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
+        // One page for each opening: this must let it go (see Timers).
+        timer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().Owned(this, static p => p.Load());
         timer.IsRepeating = false;
-        timer.Tick += (_, _) => Load();
         editing.Changed += Draw;
         scroll.Unloaded += (_, _) => timer.Stop();
         scroll.Loaded += (_, _) => Load();
@@ -250,7 +250,7 @@ sealed class TrackerInfoPage
     /// </summary>
     static UIElement RateField(ulong bytes, Action<ulong> changed)
     {
-        if (TrsFfiMethods.SettingsRateControl(bytes, 76) is not SettingsControl.Field f) return new TextBlock();
+        if (SeedwellFfiMethods.SettingsRateControl(bytes, 76) is not SettingsControl.Field f) return new TextBlock();
         var s = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
         var box = new TextBox { Text = f.Text, PlaceholderText = f.Placeholder, Width = Math.Max(70, f.Width), TextAlignment = f.Trailing ? TextAlignment.Right : TextAlignment.Left, MinHeight = 0 };
         if (f.Help is string help) ToolTipService.SetToolTip(box, help);
@@ -258,7 +258,7 @@ sealed class TrackerInfoPage
         void Read()
         {
             var u = unit.SelectedItem as string ?? f.Unit;
-            if (TrsFfiMethods.SettingsFieldRead(f.Kind, box.Text, u, bytes) is ulong v && v != bytes) changed(v);
+            if (SeedwellFfiMethods.SettingsFieldRead(f.Kind, box.Text, u, bytes) is ulong v && v != bytes) changed(v);
         }
         box.KeyDown += (_, e) => { if (e.Key == Windows.System.VirtualKey.Enter) { e.Handled = true; Read(); } };
         box.LostFocus += (_, _) => Read();

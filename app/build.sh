@@ -15,7 +15,7 @@ else
 fi
 BUILD="$APP_DIR/build"
 APP="$BUILD/Seedwell.app"
-# One version for everything: [workspace.package] version in Cargo.toml (also trs-cli --version, User-Agent,
+# One version for everything: [workspace.package] version in Cargo.toml (also seedwell-cli --version, User-Agent,
 # peer id). The build number is the git commit count: meaningful and monotonic.
 VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p;}' "$REPO/Cargo.toml" | head -1)"
 [ -n "$VERSION" ] || { echo "no version in Cargo.toml [workspace.package]" >&2; exit 1; }
@@ -48,25 +48,29 @@ if [ "${SEEDWELL_FAST:-0}" = "1" ]; then
 fi
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-8}"
 
-echo "==> Rust core (trs-ffi, ${SEEDWELL_PROFILE:-release})"
-(cd "$REPO" && cargo build -p trs-ffi ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"})
-LIB="$RUST_OUT/libtrs_ffi.a"
+echo "==> Rust core (seedwell-ffi, ${SEEDWELL_PROFILE:-release})"
+(cd "$REPO" && cargo build -p seedwell-ffi ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"})
+LIB="$RUST_OUT/libseedwell_ffi.a"
 mkdir -p "$BUILD/rust"
-cp "$LIB" "$BUILD/rust/libtrs_ffi.a"
+cp "$LIB" "$BUILD/rust/libseedwell_ffi.a"
 
 echo "==> seedwell CLI (client + embedded skill, no engine)"
-(cd "$REPO" && cargo build -p trs-cli ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"} --no-default-features)
+(cd "$REPO" && cargo build -p seedwell-cli ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"} --no-default-features)
 CLI="$RUST_OUT/seedwell"
 
 echo "==> Swift bindings (uniffi-bindgen)"
 GEN="$BUILD/generated"
 rm -rf "$GEN" && mkdir -p "$GEN"
-(cd "$REPO" && cargo run -q -p trs-ffi --features bindgen --bin uniffi-bindgen -- \
+(cd "$REPO" && cargo run -q -p seedwell-ffi --features bindgen --bin uniffi-bindgen -- \
     generate --library "$LIB" --language swift --out-dir "$GEN")
-mkdir -p "$APP_DIR/Sources/trs_ffiFFI/include" "$APP_DIR/Sources/SeedwellApp/Generated"
-cp "$GEN/trs_ffiFFI.h" "$APP_DIR/Sources/trs_ffiFFI/include/trs_ffiFFI.h"
-cp "$GEN/trs_ffiFFI.modulemap" "$APP_DIR/Sources/trs_ffiFFI/include/module.modulemap"
-cp "$GEN/trs_ffi.swift" "$APP_DIR/Sources/SeedwellApp/Generated/trs_ffi.swift"
+# Only this build's bindings: a checkout that built before the 2026-11-07 rename still holds the old module's
+# (another *_ffiFFI folder, another .swift in Generated), which would be compiled into the app beside these.
+for d in "$APP_DIR"/Sources/*_ffiFFI; do [ "$d" = "$APP_DIR/Sources/seedwell_ffiFFI" ] || rm -rf "$d"; done
+rm -rf "$APP_DIR/Sources/SeedwellApp/Generated"
+mkdir -p "$APP_DIR/Sources/seedwell_ffiFFI/include" "$APP_DIR/Sources/SeedwellApp/Generated"
+cp "$GEN/seedwell_ffiFFI.h" "$APP_DIR/Sources/seedwell_ffiFFI/include/seedwell_ffiFFI.h"
+cp "$GEN/seedwell_ffiFFI.modulemap" "$APP_DIR/Sources/seedwell_ffiFFI/include/module.modulemap"
+cp "$GEN/seedwell_ffi.swift" "$APP_DIR/Sources/SeedwellApp/Generated/seedwell_ffi.swift"
 
 # SwiftUI's @State is a macro in the newest SDKs and needs the plugin shipped with full Xcode.
 # Without it (Command Line Tools only), fall back to the 26.x SDK, which needs no plugin.

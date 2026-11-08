@@ -13,21 +13,28 @@ test(/^calls::tests::/)
 test(/^sync_host_tests::a_pipe_in_the_uploads_is_refused_at_once$/)
 
 # Bounds of a second or less, and rates.
-package(trs-sync-net) & test(/^ondemand::(holders_are_asked_together_and_a_paused_one_holds_nothing|a_change_sent_between_resume_and_the_new_session_arrives_by_the_new_one|a_fetch_only_an_offline_device_can_serve_fails_at_once_and_one_waits_while_it_connects|a_fetch_that_gets_none_of_the_file_gives_up|a_slow_fetch_answers_each_wait_in_time_and_shows_how_far_it_is|a_fetch_from_a_connected_device_says_it_is_coming_until_it_is_here|a_fetch_while_the_core_is_busy_answers_in_time_and_asks_once_it_is_free)$/)
+package(seedwell-sync-net) & test(/^ondemand::(holders_are_asked_together_and_a_paused_one_holds_nothing|a_change_sent_between_resume_and_the_new_session_arrives_by_the_new_one|a_fetch_only_an_offline_device_can_serve_fails_at_once_and_one_waits_while_it_connects|a_fetch_that_gets_none_of_the_file_gives_up|a_slow_fetch_answers_each_wait_in_time_and_shows_how_far_it_is|a_fetch_from_a_connected_device_says_it_is_coming_until_it_is_here|a_fetch_while_the_core_is_busy_answers_in_time_and_asks_once_it_is_free)$/)
 # A save by replace: the full device never sees the file missing, however late the threads run.
-package(trs-sync-net) & test(/^ondemand::(a_delete_made_while_a_session_announces_still_waits_for_the_save|words_save_and_a_plain_delete_reach_the_other_device_as_they_should|a_save_by_replace_reaches_the_other_device_as_one_edit|a_big_document_saved_by_replace_reaches_the_other_device_as_one_edit|a_save_by_replace_slower_than_the_window_still_reaches_the_other_device_as_one_edit)$/)
+package(seedwell-sync-net) & test(/^ondemand::(a_delete_made_while_a_session_announces_still_waits_for_the_save|words_save_and_a_plain_delete_reach_the_other_device_as_they_should|a_save_by_replace_reaches_the_other_device_as_one_edit|a_big_document_saved_by_replace_reaches_the_other_device_as_one_edit|a_save_by_replace_slower_than_the_window_still_reaches_the_other_device_as_one_edit)$/)
 # ... and the delete waits for a file still being written at its name, bounded (core and the Mac host's feed).
-package(trs-sync) & test(/^ondemand::a_delete_waits_for_a_file_still_being_written_at_its_name$/)
-package(trs-ffi) & test(/^sync_host::tests::the_feed_waits_for_a_new_file_still_being_written_past_the_window$/)
-package(trs-stream) & test(/^protocol::client_disconnect_drops_urgency_at_once$/)
-package(trs-tracker) & test(/^dual_stack_transport::accept_then_blackhole_falls_back_after_the_address_timeout$/)
-package(trs-storage) & test(/^(pool::dropping_joins_the_running_workers_and_an_unused_pool_drops_at_once|relocate::cancel_mid_copy_cleans_parts_and_keeps_source|verify::tests::limiter_paces)$/)
-package(trs-cli) & test(/^sim::swarm::tests::limiter_paces$/)
-package(trs-portmap) & test(/^natpmp_loopback::shutdown_with_a_dead_gateway_returns_within_the_deadline$/)
-package(trs-http) & test(/^(get_small_gives_up_on_a_server_that_never_answers|global_rate_gate_limits_to_2_mb_per_s_within_10_percent|no_validator_means_restart_not_blind_append)$/)
-package(trs-ffi) & test(/^sync_host::tests::long_work_keeps_alive$/)
+package(seedwell-sync) & test(/^ondemand::a_delete_waits_for_a_file_still_being_written_at_its_name$/)
+package(seedwell-ffi) & test(/^sync_host::tests::the_feed_waits_for_a_new_file_still_being_written_past_the_window$/)
+package(seedwell-stream) & test(/^protocol::client_disconnect_drops_urgency_at_once$/)
+package(seedwell-tracker) & test(/^dual_stack_transport::accept_then_blackhole_falls_back_after_the_address_timeout$/)
+package(seedwell-storage) & test(/^(pool::dropping_joins_the_running_workers_and_an_unused_pool_drops_at_once|relocate::cancel_mid_copy_cleans_parts_and_keeps_source|verify::tests::limiter_paces)$/)
+package(seedwell-cli) & test(/^sim::swarm::tests::limiter_paces$/)
+package(seedwell-portmap) & test(/^natpmp_loopback::shutdown_with_a_dead_gateway_returns_within_the_deadline$/)
+package(seedwell-http) & test(/^(get_small_gives_up_on_a_server_that_never_answers|global_rate_gate_limits_to_2_mb_per_s_within_10_percent|no_validator_means_restart_not_blind_append)$/)
+package(seedwell-ffi) & test(/^sync_host::tests::long_work_keeps_alive$/)
 # Lazy hashing (build 68): listed in seconds, and every host call answers at once while a file streams, a scan holds the folder, or nothing has come.
-package(trs-sync-net) & test(/^lazy::(a_big_on_demand_folder_is_listed_on_a_peer_within_seconds_of_being_added|listings_and_status_answer_at_once_while_a_file_is_hashed_for_another_device|listings_and_status_answer_at_once_while_a_scan_holds_the_folder|a_stream_stalled_on_a_piece_holds_up_no_call_on_the_folders_core|a_fetch_stalled_on_a_chunk_holds_up_no_call_on_the_folders_core|a_long_stream_holds_up_no_hashed_files_fetch|a_member_whose_owner_has_not_listed_the_folder_yet_answers_at_once_and_says_whom_it_waits_for|a_download_waiting_for_its_record_is_coming_until_it_is_recorded)$/)
-package(trs-ffi) & test(/^sync_host::tests::a_member_lists_at_once_while_its_owner_has_sent_nothing_and_is_signalled_when_it_does$/)
+package(seedwell-sync-net) & test(/^lazy::(a_big_on_demand_folder_is_listed_on_a_peer_within_seconds_of_being_added|listings_and_status_answer_at_once_while_a_file_is_hashed_for_another_device|listings_and_status_answer_at_once_while_a_scan_holds_the_folder|a_stream_stalled_on_a_piece_holds_up_no_call_on_the_folders_core|a_fetch_stalled_on_a_chunk_holds_up_no_call_on_the_folders_core|a_long_stream_holds_up_no_hashed_files_fetch|a_member_whose_owner_has_not_listed_the_folder_yet_answers_at_once_and_says_whom_it_waits_for|a_download_waiting_for_its_record_is_coming_until_it_is_recorded)$/)
+package(seedwell-ffi) & test(/^sync_host::tests::a_member_lists_at_once_while_its_owner_has_sent_nothing_and_is_signalled_when_it_does$/)
 # A ranking asked for ("Find a Faster Server") cuts a hanging health check short, within the probe limit.
-package(trs-engine) & test(/^proxy::tests::a_ranking_asked_for_does_not_wait_for_a_hanging_health_check$/)
+package(seedwell-engine) & test(/^proxy::tests::a_ranking_asked_for_does_not_wait_for_a_hanging_health_check$/)
+# A syncing folder's time left over a limited link: shown in step with the real time, gone once it is done.
+package(seedwell-sync-net) & test(/^limits::a_syncing_folder_says_its_time_left_until_it_is_done$/)
+# A peer left as redundant still sends a while after our FIN: read within the 2 s a leave may take, not reset.
+package(seedwell-engine) & test(/^redundant::a_peer_left_as_redundant_gets_a_clean_end_while_it_still_sends$/)
+
+# `seedwell restart` gives up at its time limit and waits past the old run (a fake app on a real socket).
+package(seedwell-cli) & test(/^restart::tests::/)

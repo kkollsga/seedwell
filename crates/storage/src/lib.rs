@@ -1,4 +1,4 @@
-//! trs-storage — the disk layer of Seedwell. See `README.md` and `docs/ENGINEERING.md` §3.
+//! seedwell-storage — the disk layer of Seedwell. See `README.md` and `docs/ENGINEERING.md` §3.
 //!
 //! * [`Layout`]: allocation-free piece/block ↔ file mapping (padding files, per-file custom paths).
 //! * [`DiskIo`] / [`TorrentHandle`]: explicit I/O + hashing thread pools, shared fd LRU cache,

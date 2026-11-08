@@ -14,19 +14,19 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinHandle;
-use trs_sync::archive::Retention;
-use trs_sync::clock::SystemClock;
-use trs_sync::folder::{FolderConfig, FolderCore};
-use trs_sync::fs::{Fs, StdFs};
-use trs_sync::ignore::Ignore;
-use trs_sync::store_redb::{RedbReader, RedbStore};
-use trs_sync_proto::device::DeviceKey;
-use trs_sync_proto::ids::{DeviceId, FolderId};
-use trs_sync_proto::keys::{Access, FolderKey, FolderSecret};
-use trs_sync_proto::members::{Body, InviteLink, Membership, Role, Signer, Statement, hex, new_invite};
-use trs_sync_proto::model::STATE_DIR;
-use trs_sync_proto::reach::LinkReach;
-use trs_sync_proto::msg::{AddressRecord, Addresses, Message};
+use seedwell_sync::archive::Retention;
+use seedwell_sync::clock::SystemClock;
+use seedwell_sync::folder::{FolderConfig, FolderCore};
+use seedwell_sync::fs::{Fs, StdFs};
+use seedwell_sync::ignore::Ignore;
+use seedwell_sync::store_redb::{RedbReader, RedbStore};
+use seedwell_sync_proto::device::DeviceKey;
+use seedwell_sync_proto::ids::{DeviceId, FolderId};
+use seedwell_sync_proto::keys::{Access, FolderKey, FolderSecret};
+use seedwell_sync_proto::members::{Body, InviteLink, Membership, Role, Signer, Statement, hex, new_invite};
+use seedwell_sync_proto::model::STATE_DIR;
+use seedwell_sync_proto::reach::LinkReach;
+use seedwell_sync_proto::msg::{AddressRecord, Addresses, Message};
 
 use crate::config::{FolderEntry, Settings, SyncConfig};
 use crate::secrets::SecretStore;
@@ -83,10 +83,10 @@ pub struct Options {
     /// **Tests:** at most this many direct dials, from the start (`None`: no limit). See
     /// [`SyncHandle::test_dials_left`].
     pub dials: Option<u32>,
-    /// The protocol versions to speak, lowest and highest ([`trs_sync_proto::msg::MIN_PROTOCOL`],
-    /// [`trs_sync_proto::msg::PROTOCOL`]); tests play older or newer devices with others.
+    /// The protocol versions to speak, lowest and highest ([`seedwell_sync_proto::msg::MIN_PROTOCOL`],
+    /// [`seedwell_sync_proto::msg::PROTOCOL`]); tests play older or newer devices with others.
     pub protocol: (u32, u32),
-    /// The feature bits to offer ([`trs_sync_proto::msg::FEATURES`]).
+    /// The feature bits to offer ([`seedwell_sync_proto::msg::FEATURES`]).
     pub features: u64,
     /// An isolated (test) run: the real home (the user profile on Windows). A folder inside it is refused (a
     /// temporary folder excepted); a first start finds no device over the Internet and relays nothing (LAN only),
@@ -99,7 +99,7 @@ pub struct Options {
     /// The host that shows on-demand folders in the file manager, once there is one (the app sets it when it serves
     /// the Mac's File Provider; a headless daemon has none). Shared, so it outlives a restart of the service.
     pub on_demand_host: OnDemandHostCell,
-    /// This device keeps folders on demand ([`trs_platform::ON_DEMAND_FOLDERS`]: a file manager host shows them). Off,
+    /// This device keeps folders on demand ([`seedwell_platform::ON_DEMAND_FOLDERS`]: a file manager host shows them). Off,
     /// a folder that is on demand on the device that put it on all the user's devices is joined here in full, and its
     /// page says why.
     pub on_demand: bool,
@@ -113,7 +113,7 @@ pub struct Options {
 }
 
 /// Seedwell's own torrents, which may seed from inside a synced folder (SPEC §7G.11, *Modes*). Lent by whoever runs the
-/// engine beside the service (`trs_control::sync::start_sync_with`). Freeing a folder's local copies (its files moved
+/// engine beside the service (`seedwell_control::sync::start_sync_with`). Freeing a folder's local copies (its files moved
 /// into this device's cache) is refused while a torrent uses files in it, and after any move of a folder's files a
 /// torrent that missed its files looks again (they may be back).
 pub trait LocalTorrents: Send + Sync {
@@ -168,12 +168,12 @@ impl Options {
             utp: true,
             dial_tcp: true,
             dials: None,
-            protocol: (trs_sync_proto::msg::MIN_PROTOCOL, trs_sync_proto::msg::PROTOCOL),
-            features: trs_sync_proto::msg::FEATURES,
+            protocol: (seedwell_sync_proto::msg::MIN_PROTOCOL, seedwell_sync_proto::msg::PROTOCOL),
+            features: seedwell_sync_proto::msg::FEATURES,
             forbidden_root: None,
             chat_agents: None,
             on_demand_host: Arc::new(Mutex::new(None)),
-            on_demand: trs_platform::ON_DEMAND_FOLDERS,
+            on_demand: seedwell_platform::ON_DEMAND_FOLDERS,
             torrents: None,
             peer_client: None,
         }
@@ -382,7 +382,7 @@ pub(crate) struct Inner {
     pub(crate) wake_dialer: Notify,
     pub(crate) lan: crate::lan::Lan,
     /// uTP on the sync port's UDP twin.
-    pub(crate) utp: Option<trs_utp::UtpSocket>,
+    pub(crate) utp: Option<seedwell_utp::UtpSocket>,
     /// Dial over TCP (off in tests that force uTP).
     pub(crate) dial_tcp: bool,
     /// Relays and hole punching.
@@ -431,14 +431,14 @@ const DEVICE_KEY: &str = "device";
 /// A folder's issue line while it is *Read only* and this device, not its owner, holds its changes back.
 pub const HELD_READ_ONLY: &str = concat!(
     "Read only: only the folder's owner changes it. Changes made on this ",
-    trs_platform::computer!(),
+    seedwell_platform::computer!(),
     " stay here until the owner turns it off."
 );
 
 /// The page of a folder joined in full although it is on demand on the device that put it on all the user's devices.
 pub const FULL_HERE: &str = concat!(
     "On demand on your other device, but this ",
-    trs_platform::computer!(),
+    seedwell_platform::computer!(),
     " can't keep folders on demand yet: every file is downloaded here."
 );
 
@@ -446,7 +446,7 @@ pub const FULL_HERE: &str = concat!(
 const STOP_WAIT: Duration = Duration::from_secs(60);
 
 /// What a call on a service that has stopped says when it would save (the app may hold the old service for a moment
-/// while sync starts again on another port, `trs_control::sync::SyncSlot::move_port`, and show this).
+/// while sync starts again on another port, `seedwell_control::sync::SyncSlot::move_port`, and show this).
 pub const STOPPED: &str = "Folder sync is restarting. Try again in a moment.";
 
 /// A folder public key from its hex form in `sync.toml`.
@@ -470,7 +470,7 @@ fn random_u64() -> u64 {
 /// A user name as typed: control characters dropped, trimmed, at most 64 characters; empty = none.
 fn clean_user_name(name: &str) -> String {
     let name: String = name.chars().filter(|c| !c.is_control()).collect();
-    name.trim().chars().take(trs_sync_proto::msg::MAX_DEVICE_NAME).collect::<String>().trim_end().to_string()
+    name.trim().chars().take(seedwell_sync_proto::msg::MAX_DEVICE_NAME).collect::<String>().trim_end().to_string()
 }
 
 pub(crate) fn random_id() -> [u8; 16] {
@@ -658,7 +658,7 @@ impl SyncHandle {
             if let Ok(id) = e.id.parse::<FolderId>() {
                 let _ = h.chat_leave(&id);
             }
-            eprintln!(concat!("seedwell sync: channel {} was made by a test build; it is no longer on this ", trs_platform::computer!()), e.name);
+            eprintln!(concat!("seedwell sync: channel {} was made by a test build; it is no longer on this ", seedwell_platform::computer!()), e.name);
         }
         let (stopped, switched) = h.recover_journals().await;
         *lock(&h.inner.held) = stopped.clone();
@@ -966,12 +966,12 @@ impl SyncHandle {
         let index = self.index_path(&id);
         let ctx = self.inner.ctx.clone();
         let entry = e.clone();
-        let core = tokio::task::spawn_blocking(move || -> Result<(FolderCore, RedbReader, trs_sync::ignore::Current, trs_sync::ondemand::Replacing), SyncError> {
+        let core = tokio::task::spawn_blocking(move || -> Result<(FolderCore, RedbReader, seedwell_sync::ignore::Current, seedwell_sync::ondemand::Replacing), SyncError> {
             let fs = StdFs::new(root.clone());
             let (case_insensitive, exec_bits) = match fs.lstat(STATE_DIR) {
                 Ok(Some(_)) => (
-                    trs_sync::path::probe_case_insensitive(&fs).unwrap_or(true),
-                    trs_sync::path::probe_exec_bits(&fs).unwrap_or(cfg!(unix)),
+                    seedwell_sync::path::probe_case_insensitive(&fs).unwrap_or(true),
+                    seedwell_sync::path::probe_exec_bits(&fs).unwrap_or(cfg!(unix)),
                 ),
                 _ => (cfg!(target_os = "macos"), cfg!(unix)),
             };
@@ -989,7 +989,7 @@ impl SyncHandle {
                 on_demand: entry.on_demand,
             };
             let ignore = load_ignore(&fs, &entry.ignore);
-            let clock: Arc<dyn trs_sync::clock::Clock> = Arc::new(SystemClock);
+            let clock: Arc<dyn seedwell_sync::clock::Clock> = Arc::new(SystemClock);
             let core_fs: Arc<dyn Fs> = match core_placed {
                 Some(p) => Arc::new(crate::placed::PlaceFs::new(p)),
                 None => Arc::new(fs),
@@ -1044,9 +1044,11 @@ impl SyncHandle {
         space.lan_only.store(e.lan_only, Ordering::Relaxed);
         space.held_read_only.store(held, Ordering::SeqCst);
         crate::devices::mark_following(&self.inner.ctx, &space);
-        let mut items = trs_sync::ondemand::Items::default();
+        let mut items = seedwell_sync::ondemand::Items::default();
         items.set_not_members(core.not_members());
         let jobs = core.streams();
+        // Who listed it, read here with the rest of the index: a status shows it from the first one on.
+        let listed = crate::shared::ListedLook::new(crate::shared::Listed::read(&reader.view()).ok());
         let shared = Arc::new(FolderShared {
             space: Arc::new(space),
             root: if e.on_demand { self.cache_path(&id) } else { e.path.clone() },
@@ -1064,11 +1066,13 @@ impl SyncHandle {
             local_seq: seq_tx,
             remote_changed: Notify::new(),
             live: Mutex::new(Live::default()),
+            listed,
             rescan: Notify::new(),
             stopped: watch::channel(false).0,
             retention: Retention { max_age_s: i64::from(e.archive_days) * 86_400, ..Retention::default() },
             fetched: crate::limit::Meter::default(),
             served: crate::limit::Meter::default(),
+            eta: Mutex::new(Default::default()),
             fetches: Mutex::new(Default::default()),
             announce_pause: Mutex::new(Duration::ZERO),
             write_wait: Mutex::new(Duration::ZERO),
@@ -1122,7 +1126,7 @@ impl SyncHandle {
             // says what we hold, so the peer sends again everything since (nothing of it was taken meanwhile).
             if p.is_stale(&folder) && !self.plays_0_1_11() {
                 let reason = "a folder was opened again here: starting the session anew".to_string();
-                let _ = p.control.send(Message::Close(trs_sync_proto::msg::Close { reason })).await;
+                let _ = p.control.send(Message::Close(seedwell_sync_proto::msg::Close { reason })).await;
                 self.inner.wake_dialer.notify_one();
                 continue;
             }
@@ -1299,12 +1303,12 @@ impl SyncHandle {
         let id = link.invite.folder_id();
         // Running or not (held back by an unfinished move, failed to open): one folder is never joined twice.
         if self.inner.ctx.registry.folder(&id).is_some() || lock(&self.inner.cfg).folder(&id.to_string()).is_some() {
-            return Err(invalid(concat!("this folder is already synced on this ", trs_platform::computer!())));
+            return Err(invalid(concat!("this folder is already synced on this ", seedwell_platform::computer!())));
         }
         // Files of an earlier time on demand are never read in as this device's: the user decides what they are.
         let cache = self.cache_path(&id);
         if on_demand && cache.exists() {
-            return Err(invalid(format!("files this folder had on this {} earlier are still in {}: move them away first", trs_platform::computer!(), cache.display())));
+            return Err(invalid(format!("files this folder had on this {} earlier are still in {}: move them away first", seedwell_platform::computer!(), cache.display())));
         }
         let channel = chat.as_ref().map(|c| c.invite.folder_id());
         if let Some(c) = chat
@@ -1337,7 +1341,7 @@ impl SyncHandle {
             // Files of an earlier time on demand are never read in as this device's: the user decides what they are.
             let cache = self.cache_path(&id);
             if cache.exists() {
-                return Err(invalid(format!("files this folder had on this {} earlier are still in {}: move them away first", trs_platform::computer!(), cache.display())));
+                return Err(invalid(format!("files this folder had on this {} earlier are still in {}: move them away first", seedwell_platform::computer!(), cache.display())));
             }
         } else {
             std::fs::create_dir(&path)?;
@@ -1448,7 +1452,7 @@ impl SyncHandle {
     pub fn online_only(&self, id: &FolderId) -> Result<u64, SyncError> {
         let Some(f) = self.inner.ctx.registry.folder(id).filter(|f| f.on_demand) else { return Ok(0) };
         let view = f.index.view();
-        let store: &dyn trs_sync::index::IndexStore = &view;
+        let store: &dyn seedwell_sync::index::IndexStore = &view;
         let (mut n, mut after) = (0u64, None::<String>);
         loop {
             let page = store.local_paths("", after.as_deref(), 1000)?;
@@ -1457,7 +1461,7 @@ impl SyncHandle {
                 if let Some(r) = store.local(p)?
                     && r.dataless
                     && !r.file.info.deleted
-                    && r.file.info.kind == trs_sync_proto::model::FileKind::File
+                    && r.file.info.kind == seedwell_sync_proto::model::FileKind::File
                 {
                     n += 1;
                 }
@@ -1517,8 +1521,8 @@ impl SyncHandle {
         let view = f.index.view();
         // Devices with entries here that are no members any more hold nothing for the others.
         let members = crate::roles::member_ids(&f.membership.read().unwrap_or_else(|e| e.into_inner()));
-        let gone = trs_sync::index::IndexStore::peer_ids(&view)?.into_iter().filter(|d| !members.contains(d)).collect();
-        Ok(trs_sync::ondemand::files_only_here(&view, &gone)?)
+        let gone = seedwell_sync::index::IndexStore::peer_ids(&view)?.into_iter().filter(|d| !members.contains(d)).collect();
+        Ok(seedwell_sync::ondemand::files_only_here(&view, &gone)?)
     }
 
     /// Where a folder's files are on this device: an on-demand folder's in its cache, a full folder's at its place
@@ -1567,9 +1571,9 @@ impl SyncHandle {
         }
         let removed = self.remove_here(id, for_trash).await;
         if removed.is_ok()
-            && let Some((pk, name, serial)) = everywhere
+            && let Some(everywhere) = everywhere
         {
-            self.removed_everywhere(pk, name, serial).await;
+            self.removed_everywhere(everywhere).await;
         }
         removed
     }
@@ -2071,8 +2075,8 @@ impl SyncHandle {
     /// not kept goes to this Mac's archive, never away; the change then syncs like any edit.
     pub async fn resolve_conflict(&self, id: &FolderId, copy: &str, keep: Keep) -> Result<(), SyncError> {
         let f = self.inner.ctx.registry.folder(id).ok_or(SyncError::NotFound)?;
-        trs_sync_proto::model::validate_path(copy).map_err(|_| invalid(format!("{copy:?} is not a path in the folder")))?;
-        let parsed = trs_sync::conflict::parse_conflict(copy);
+        seedwell_sync_proto::model::validate_path(copy).map_err(|_| invalid(format!("{copy:?} is not a path in the folder")))?;
+        let parsed = seedwell_sync::conflict::parse_conflict(copy);
         let known = lock(&f.live).conflicts.get(copy).cloned();
         let Some(original) = known.or_else(|| parsed.map(|c| c.original)) else {
             return Err(invalid(format!("{copy} is not a conflict copy")));
@@ -2116,9 +2120,9 @@ impl SyncHandle {
     async fn resolve_on_demand(&self, f: &Arc<FolderShared>, copy: String, original: String, keep: Keep) -> Result<(), SyncError> {
         let refused = self
             .with_core(f, move |c| {
-                use trs_sync::ondemand::ItemState;
+                use seedwell_sync::ondemand::ItemState;
                 if !c.signs() {
-                    return Err(trs_sync::folder::HostError::ReadOnly);
+                    return Err(seedwell_sync::folder::HostError::ReadOnly);
                 }
                 for p in [&copy, &original] {
                     if !c.item_at(p)?.is_some_and(|i| matches!(i.state, ItemState::Downloaded | ItemState::ModifiedHere)) {
@@ -2235,10 +2239,10 @@ impl SyncHandle {
     /// linked to the channel here when it has no channel yet.
     pub fn create_bundle_invite(&self, id: &FolderId, role: Role, max_uses: u32, valid_days: u32, channel: &FolderId) -> Result<InviteInfo, SyncError> {
         let f = self.inner.ctx.registry.folder(id).ok_or(SyncError::NotFound)?;
-        let c = self.inner.ctx.registry.channel(channel).ok_or_else(|| invalid(concat!("no such channel on this ", trs_platform::computer!())))?;
+        let c = self.inner.ctx.registry.channel(channel).ok_or_else(|| invalid(concat!("no such channel on this ", seedwell_platform::computer!())))?;
         self.may_invite(&f, role, max_uses)?;
         let name = lock(&c.name).clone();
-        self.may_invite(&c, role, max_uses).map_err(|e| invalid(format!(concat!("this ", trs_platform::computer!(), " may not share the channel {name} at that role ({e})"), name = name, e = e)))?;
+        self.may_invite(&c, role, max_uses).map_err(|e| invalid(format!(concat!("this ", seedwell_platform::computer!(), " may not share the channel {name} at that role ({e})"), name = name, e = e)))?;
         // One clock reading for both halves: read twice, they could expire a second apart.
         let now = crate::roles::now_s();
         let ci = self.make_invite(channel, role, max_uses, valid_days, now, None)?;
@@ -2262,7 +2266,7 @@ impl SyncHandle {
         if let Some(c) = channel
             && self.inner.ctx.registry.channel(c).is_none()
         {
-            return Err(invalid(concat!("no such channel on this ", trs_platform::computer!())));
+            return Err(invalid(concat!("no such channel on this ", seedwell_platform::computer!())));
         }
         {
             let mut cfg = lock(&self.inner.cfg);
@@ -2283,11 +2287,11 @@ impl SyncHandle {
             Some(Role::Admin) => return Err(invalid(format!("only the {noun}'s owner can invite admins or owners"))),
             _ => return Err(invalid(format!("only the {noun}'s owner or an admin can share it"))),
         }
-        if max_uses > trs_sync_proto::members::MAX_INVITE_USES {
-            return Err(invalid(format!("a link can have at most {} uses (or unlimited)", trs_sync_proto::members::MAX_INVITE_USES)));
+        if max_uses > seedwell_sync_proto::members::MAX_INVITE_USES {
+            return Err(invalid(format!("a link can have at most {} uses (or unlimited)", seedwell_sync_proto::members::MAX_INVITE_USES)));
         }
         if mine == Some(Role::Owner) && f.secret.read().unwrap_or_else(|e| e.into_inner()).is_none() {
-            return Err(invalid(format!(concat!("this ", trs_platform::computer!(), " is an owner but has not received the {noun}'s owner key yet"), noun = noun)));
+            return Err(invalid(format!(concat!("this ", seedwell_platform::computer!(), " is an owner but has not received the {noun}'s owner key yet"), noun = noun)));
         }
         Ok(())
     }
@@ -2312,13 +2316,13 @@ impl SyncHandle {
         };
         let invite = new_invite(*f.public.public_key(), random_id(), seed, role, max_uses, expires_s, now, issuer, &sign);
         let name = lock(&f.name).clone();
-        let kind = if f.kind == SpaceKind::Channel { trs_sync_proto::members::LinkKind::Channel } else { trs_sync_proto::members::LinkKind::Folder };
+        let kind = if f.kind == SpaceKind::Channel { seedwell_sync_proto::members::LinkKind::Channel } else { seedwell_sync_proto::members::LinkKind::Folder };
         // A channel open to agents says so in its link, so agents on the joining device may use it before admission.
         let agents = f.kind == SpaceKind::Channel && f.membership.read().unwrap_or_else(|e| e.into_inner()).agents();
         // Where this device is now, so the joining device can dial it without discovery (sealed in the link).
         let l = InviteLink { invite, token_seed: seed, name: Some(name), agents, reach: Some(self.own_reach()) };
         let link = match bundle {
-            Some(c) if kind == trs_sync_proto::members::LinkKind::Folder => l.format_bundle(c),
+            Some(c) if kind == seedwell_sync_proto::members::LinkKind::Folder => l.format_bundle(c),
             _ => l.format_as(kind),
         };
         {
@@ -2403,7 +2407,7 @@ impl SyncHandle {
     pub fn revoke_invite(&self, id: &FolderId, invite_id: &str) -> Result<(), SyncError> {
         let bundled = {
             let f = self.inner.ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
-            let iid = trs_sync_proto::members::invite_id_from_hex(invite_id).ok_or_else(|| invalid("no such link"))?;
+            let iid = seedwell_sync_proto::members::invite_id_from_hex(invite_id).ok_or_else(|| invalid("no such link"))?;
             lock(&f.links).get(&iid).and_then(|l| InviteLink::parse_bundle(l).ok()).and_then(|(_, c)| c)
         };
         self.revoke_one(id, invite_id)?;
@@ -2417,7 +2421,7 @@ impl SyncHandle {
 
     fn revoke_one(&self, id: &FolderId, invite_id: &str) -> Result<(), SyncError> {
         let f = self.inner.ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
-        let iid = trs_sync_proto::members::invite_id_from_hex(invite_id).ok_or_else(|| invalid("no such link"))?;
+        let iid = seedwell_sync_proto::members::invite_id_from_hex(invite_id).ok_or_else(|| invalid("no such link"))?;
         let me = *self.inner.ctx.key.public_key();
         let body = Body::Revoke { id: iid, at_s: crate::roles::now_s() };
         let st = match f.role_of(&me) {
@@ -2425,7 +2429,7 @@ impl SyncHandle {
             Some(Role::Admin) => Some(Statement::by_device(&self.inner.ctx.key, id, body)),
             _ => return Err(invalid(format!("only the {}'s owner or an admin can revoke a link", crate::roles::noun(&f)))),
         };
-        let st = st.ok_or_else(|| invalid(format!(concat!("this ", trs_platform::computer!(), " has not received the {}'s owner key yet"), crate::roles::noun(&f))))?;
+        let st = st.ok_or_else(|| invalid(format!(concat!("this ", seedwell_platform::computer!(), " has not received the {}'s owner key yet"), crate::roles::noun(&f))))?;
         if crate::roles::add(&f, [st]) {
             self.spawn_changed(&f);
         }
@@ -2452,8 +2456,8 @@ impl SyncHandle {
         let f = self.inner.ctx.registry.user_space(id).ok_or(SyncError::NotFound)?;
         if *device == self.inner.ctx.me {
             return Err(invalid(match f.kind {
-                SpaceKind::Folder => concat!("to stop syncing on this ", trs_platform::computer!(), ", remove the folder instead"),
-                SpaceKind::Channel | SpaceKind::Devices => concat!("to leave the channel on this ", trs_platform::computer!(), ", leave it instead"),
+                SpaceKind::Folder => concat!("to stop syncing on this ", seedwell_platform::computer!(), ", remove the folder instead"),
+                SpaceKind::Channel | SpaceKind::Devices => concat!("to leave the channel on this ", seedwell_platform::computer!(), ", leave it instead"),
             }));
         }
         let me = *self.inner.ctx.key.public_key();
@@ -2512,15 +2516,15 @@ impl SyncHandle {
         if entry.on_demand {
             return Err(invalid(concat!(
                 "an on-demand folder's files are online only: switch it to keep every file on this ",
-                trs_platform::computer!(),
+                seedwell_platform::computer!(),
                 " (mode full) first, then share it again"
             )));
         }
         let me = *self.inner.ctx.key.public_key();
         match f.role_of(&me) {
-            Some(Role::Owner | Role::Admin) => return Err(invalid(concat!("this ", trs_platform::computer!(), " can share the folder itself: make a link with Share"))),
-            None if f.joining(&me) => return Err(invalid(concat!("this ", trs_platform::computer!(), " is not admitted to the folder yet: there is nothing to share again"))),
-            None => return Err(invalid(concat!("this ", trs_platform::computer!(), " is no longer a member of the folder: add the folder as a new one instead"))),
+            Some(Role::Owner | Role::Admin) => return Err(invalid(concat!("this ", seedwell_platform::computer!(), " can share the folder itself: make a link with Share"))),
+            None if f.joining(&me) => return Err(invalid(concat!("this ", seedwell_platform::computer!(), " is not admitted to the folder yet: there is nothing to share again"))),
+            None => return Err(invalid(concat!("this ", seedwell_platform::computer!(), " is no longer a member of the folder: add the folder as a new one instead"))),
             Some(_) => {}
         }
         // An owner or admin connected now can admit devices and change roles: nothing is stuck.
@@ -2529,7 +2533,7 @@ impl SyncHandle {
             let name = names.get(&p.device).map(|n| n.device.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| p.name.clone());
             let role = if f.role_of(&p.device_pk) == Some(Role::Owner) { "an owner" } else { "an admin" };
             return Err(invalid(format!(
-                concat!("{name}, {role} of this folder, is connected: ask it to share the folder, or to make this ", trs_platform::computer!(), " an admin"),
+                concat!("{name}, {role} of this folder, is connected: ask it to share the folder, or to make this ", seedwell_platform::computer!(), " an admin"),
                 name = name,
                 role = role
             )));
@@ -2705,7 +2709,7 @@ impl SyncHandle {
         lock(&self.inner.cfg).settings.clone()
     }
 
-    /// Changes the device-wide settings (the port takes effect at the next start; `trs_control::sync::SyncSlot::move_port` starts the service again on it).
+    /// Changes the device-wide settings (the port takes effect at the next start; `seedwell_control::sync::SyncSlot::move_port` starts the service again on it).
     pub fn set_settings(&self, s: Settings) -> Result<(), SyncError> {
         if !s.default_location.trim().is_empty() {
             self.refuse_forbidden(Path::new(&s.default_location))?;
@@ -2794,21 +2798,22 @@ impl SyncHandle {
             let held = lock(&self.inner.held).get(id).cloned()?;
             return self.held_status(id, &held);
         };
-        Some(self.status_of(&f))
+        Some(self.status_of(&f, Instant::now() + crate::shared::LISTED_WAIT))
     }
 
     /// Devices of the folder are connected, none has sent its list of the folder yet (its first index), and this device
     /// lists nothing of its own: whom it waits for, in words ("Waiting for Mac mini to list Movies"), so a folder that shows nothing yet says why
-    /// (SPEC §7G.5). Read from the index's read-only handle: never waits.
-    fn unlisted(&self, f: &FolderShared) -> Option<String> {
-        let view = f.index.view();
+    /// (SPEC §7G.5). The index is read on a blocking thread, waited for until `until` at most ([`ListedLook`]): the
+    /// caller (the app's UI thread, `sync list`) never reads the index file, which can wait for the disk.
+    fn unlisted(&self, f: &Arc<FolderShared>, until: Instant) -> Option<String> {
+        let listed = crate::shared::ListedLook::get(f, &self.inner.rt, until)?;
         // A device with files of its own listed (an owner) waits for nobody's list.
-        if trs_sync::index::IndexStore::local_paths(&view, "", None, 1).is_ok_and(|p| !p.is_empty()) {
+        if listed.own {
             return None;
         }
         let mut names: Vec<String> = Vec::new();
         for p in self.inner.ctx.registry.peers().iter().filter(|p| p.access(&f.id).is_some()) {
-            if trs_sync::index::IndexStore::peer(&view, p.device.short()).ok().flatten().is_some_and(|s| s.index_id != 0) {
+            if listed.peers.contains(&p.device.short()) {
                 return None;
             }
             if !names.contains(&p.name) {
@@ -2823,7 +2828,9 @@ impl SyncHandle {
         Some(format!("Waiting for {who} to list {}", lock(&f.name)))
     }
 
-    fn status_of(&self, f: &Arc<FolderShared>) -> FolderStatus {
+    /// `until`: how long its index may be waited for at most ([`Self::unlisted`]), for all the folders of a snapshot together.
+    fn status_of(&self, f: &Arc<FolderShared>, until: Instant) -> FolderStatus {
+        crate::shared::note_status();
         // On all the user's devices, the statement says it (the last of the user's devices to change it), else this
         // device's own mark.
         let shared = self.follow_on_demand(&f.id);
@@ -2844,7 +2851,7 @@ impl SyncHandle {
                 let back: Vec<String> = l
                     .kept
                     .keys()
-                    .filter(|p| trs_sync::index::IndexStore::local(&view, p).ok().flatten().is_some_and(|r| trs_sync::ondemand::live(&r)))
+                    .filter(|p| seedwell_sync::index::IndexStore::local(&view, p).ok().flatten().is_some_and(|r| seedwell_sync::ondemand::live(&r)))
                     .cloned()
                     .collect();
                 for p in back {
@@ -2882,12 +2889,16 @@ impl SyncHandle {
             FolderState::WaitingForAdmin
         } else {
             let ended = f.membership.read().unwrap_or_else(|e| e.into_inner()).expired(self.inner.ctx.key.public_key());
-            live.error = Some(if ended { "this folder is no longer shared" } else { concat!("this ", trs_platform::computer!(), " was removed from the folder") }.into());
+            live.error = Some(if ended { "this folder is no longer shared" } else { concat!("this ", seedwell_platform::computer!(), " was removed from the folder") }.into());
             FolderState::Error
         };
         let scanning = state == FolderState::Scanning;
         let share_until = f.membership.read().unwrap_or_else(|e| e.into_inner()).share_until();
         let (need_files, need_bytes) = live.need;
+        // The time left: what was needed when the last pull settled, less what came since.
+        let fetched = f.fetched.total();
+        let remaining = need_bytes.saturating_sub(fetched.saturating_sub(live.need_mark));
+        let eta_secs = lock(&f.eta).sample(std::time::Instant::now(), fetched, remaining, state == FolderState::Syncing);
         let connected = self.inner.ctx.registry.peers().iter().filter(|p| p.access(&f.id).is_some()).count() as u32;
         let members = f.members.read().unwrap_or_else(|e| e.into_inner()).len() as u32;
         let (progress, problem, join_attempts) = self.join_status(f);
@@ -2895,7 +2906,7 @@ impl SyncHandle {
         let shows = role.is_some() && !matches!(state, FolderState::Paused | FolderState::Missing | FolderState::Error);
         let reshare = shows && !f.on_demand && away.stuck(role);
         // (Before the status below: its name field holds the name's lock to the end of it.)
-        let waiting = away.waiting().filter(|_| shows).or_else(|| shows.then(|| self.unlisted(f)).flatten());
+        let waiting = away.waiting().filter(|_| shows).or_else(|| shows.then(|| self.unlisted(f, until)).flatten());
         FolderStatus {
             id: f.id.to_string(),
             name: lock(&f.name).clone(),
@@ -2909,6 +2920,7 @@ impl SyncHandle {
             need_files,
             need_bytes,
             rate_in: f.fetched.rate(),
+            eta_secs,
             rate_out: f.served.rate(),
             connected,
             members,
@@ -3016,6 +3028,7 @@ impl SyncHandle {
             need_files: 0,
             need_bytes: 0,
             rate_in: 0,
+            eta_secs: None,
             rate_out: 0,
             connected: 0,
             members: 0,
@@ -3041,13 +3054,14 @@ impl SyncHandle {
     /// Everything, for the UI.
     pub fn snapshot(&self) -> Snapshot {
         let held: Vec<(FolderId, Held)> = lock(&self.inner.held).iter().map(|(i, w)| (*i, w.clone())).collect();
+        let until = Instant::now() + crate::shared::LISTED_WAIT;
         let folders = self
             .inner
             .ctx
             .registry
             .folders()
             .iter()
-            .map(|f| self.status_of(f))
+            .map(|f| self.status_of(f, until))
             .chain(held.iter().filter_map(|(id, why)| self.held_status(id, why)))
             .collect();
         let devices = self
@@ -3088,6 +3102,53 @@ impl SyncHandle {
             devices,
             offline: self.offline_devices(),
         }
+    }
+
+    /// What a Share dialog shows of folder or channel `id`: its name, this device's role, the end of its sharing and a
+    /// folder's chat, read from that one alone. The hosts call it on their UI thread each time the dialog is drawn, so it
+    /// never makes the status of every folder ([`Self::snapshot`]: each folder's members, index and absences) and holds
+    /// each lock only to copy a field. `None`: no such folder or channel here.
+    pub fn share_brief(&self, id: &FolderId) -> Option<crate::status::ShareBrief> {
+        let me = self.inner.ctx.key.public_key();
+        if let Some(f) = self.inner.ctx.registry.folder(id) {
+            let (role, share_until) = {
+                let m = f.membership.read().unwrap_or_else(|e| e.into_inner());
+                (m.role(me), m.share_until())
+            };
+            let channel_id = {
+                let cfg = lock(&self.inner.cfg);
+                cfg.folder(&id.to_string()).map(|e| e.channel.clone()).filter(|c| !c.is_empty() && cfg.channels.iter().any(|ch| ch.id == *c))
+            };
+            return Some(crate::status::ShareBrief { name: lock(&f.name).clone(), role, share_until, channel: false, channel_id });
+        }
+        if let Some(c) = self.inner.ctx.registry.channel(id) {
+            let (role, share_until) = {
+                let m = c.membership.read().unwrap_or_else(|e| e.into_inner());
+                (m.role(me), m.share_until())
+            };
+            return Some(crate::status::ShareBrief { name: lock(&c.name).clone(), role, share_until, channel: true, channel_id: None });
+        }
+        // A folder held back (an unfinished move, a missing disk): as the snapshot shows it.
+        let role = lock(&self.inner.held).get(id).map(|h| h.role)?;
+        let e = lock(&self.inner.cfg).folder(&id.to_string()).cloned()?;
+        let name = e.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        Some(crate::status::ShareBrief { name, role, share_until: None, channel: false, channel_id: None })
+    }
+
+    /// Every channel's id, name and this device's role in it, by name as [`Self::chat_channels`] orders them: what a
+    /// Share dialog offers a folder's link to join. None of a channel's status (its unread messages, its members away).
+    pub fn channel_roles(&self) -> Vec<(FolderId, String, Option<Role>)> {
+        let me = self.inner.ctx.key.public_key();
+        let mut out: Vec<(FolderId, String, Option<Role>)> = self
+            .inner
+            .ctx
+            .registry
+            .channels()
+            .iter()
+            .map(|c| (c.id, lock(&c.name).clone(), c.membership.read().unwrap_or_else(|e| e.into_inner()).role(me)))
+            .collect();
+        out.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()).then_with(|| a.0.to_string().cmp(&b.0.to_string())));
+        out
     }
 
     /// A folder's or channel's members other than this device: which are connected for it, and for the others when
@@ -3233,7 +3294,7 @@ impl SyncHandle {
     }
 
     /// Our uTP socket, if uTP runs.
-    pub(crate) fn utp(&self) -> Option<&trs_utp::UtpSocket> {
+    pub(crate) fn utp(&self) -> Option<&seedwell_utp::UtpSocket> {
         self.inner.utp.as_ref()
     }
 
@@ -3449,8 +3510,8 @@ impl SyncHandle {
         }
     }
 
-    /// **Tests only:** folder `id`'s save-by-replace window ([`trs_sync::ondemand::REPLACE_WINDOW`]) and the longest a
-    /// write keeps a delete waiting ([`trs_sync::ondemand::WRITE_HOLD_MAX`]).
+    /// **Tests only:** folder `id`'s save-by-replace window ([`seedwell_sync::ondemand::REPLACE_WINDOW`]) and the longest a
+    /// write keeps a delete waiting ([`seedwell_sync::ondemand::WRITE_HOLD_MAX`]).
     #[doc(hidden)]
     pub fn test_replace_window(&self, id: &FolderId, window: Duration, write_max: Duration) {
         if let Some(f) = self.inner.ctx.registry.folder(id) {
@@ -3524,7 +3585,7 @@ impl SyncHandle {
     pub fn test_place_wait(&self, wait: Duration) {
         *lock(&self.inner.ctx.place_wait) = wait;
         for f in self.inner.ctx.registry.folders() {
-            trs_sync::lazy::lock(&f.jobs).test_place_pause = wait;
+            seedwell_sync::lazy::lock(&f.jobs).test_place_pause = wait;
         }
     }
 
@@ -3553,6 +3614,23 @@ impl SyncHandle {
             });
             let _ = rx.recv();
         }
+    }
+
+    /// **Tests only:** holds the folder's core (as a long pull does), on a thread of its own, until the returned value
+    /// is dropped. Returns once the core is held; `None` for a folder not running here.
+    #[doc(hidden)]
+    pub fn test_hold_core(&self, id: &FolderId) -> Option<Box<dyn std::any::Any + Send>> {
+        let f = self.inner.ctx.registry.folder(id)?;
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let _core = lock(&f.core);
+            let _ = held_tx.send(());
+            // (Ends when the sender is dropped.)
+            let _ = release_rx.recv();
+        });
+        let _ = held_rx.recv();
+        Some(Box::new(release_tx))
     }
 
     /// **Tests only:** hold queries of ours still waiting for an answer, over every session.
@@ -3649,11 +3727,11 @@ impl SyncHandle {
     pub(crate) fn own_reach(&self) -> LinkReach {
         let bind = self.inner.bind;
         let ips: Vec<IpAddr> = if bind.is_unspecified() {
-            trs_platform::net::lan_addresses().into_iter().filter(|ip| ip.is_ipv4() || bind.is_ipv6()).collect()
+            seedwell_platform::net::lan_addresses().into_iter().filter(|ip| ip.is_ipv4() || bind.is_ipv6()).collect()
         } else {
             vec![bind]
         };
-        let lan = ips.into_iter().take(trs_sync_proto::reach::MAX_LAN).map(|ip| SocketAddr::new(ip, self.inner.port)).collect();
+        let lan = ips.into_iter().take(seedwell_sync_proto::reach::MAX_LAN).map(|ip| SocketAddr::new(ip, self.inner.port)).collect();
         let public = if bind.is_unspecified() { self.inner.discovery.as_ref().and_then(|d| d.public_address()) } else { None };
         let rendezvous = Some(self.rendezvous_url()).filter(|u| !u.is_empty());
         LinkReach { device: self.inner.ctx.me, name: lock(&self.inner.ctx.device_name).clone(), lan, public, rendezvous }
@@ -3917,7 +3995,7 @@ fn absolute(p: &Path) -> io::Result<PathBuf> {
 /// A folder an isolated run must not use: inside `forbidden` (the real home) and not in a temporary folder (Windows
 /// keeps those in the user's profile, under the home it forbids).
 pub fn inside_forbidden(p: &Path, forbidden: &Path) -> bool {
-    !p.as_os_str().is_empty() && p.starts_with(forbidden) && !trs_platform::dirs::in_temp_folder(p)
+    !p.as_os_str().is_empty() && p.starts_with(forbidden) && !seedwell_platform::dirs::in_temp_folder(p)
 }
 
 impl SyncHandle {
@@ -3942,14 +4020,14 @@ fn in_use_text(names: &[String]) -> String {
 }
 
 fn refuse_cloud_root(p: &Path) -> Result<(), SyncError> {
-    if trs_platform::dirs::in_cloud_storage(p) {
+    if seedwell_platform::dirs::in_cloud_storage(p) {
         return Err(invalid("folders in iCloud Drive or other cloud storage cannot be synced"));
     }
     Ok(())
 }
 
 fn load_ignore(fs: &StdFs, local: &[String]) -> Ignore {
-    let synced = trs_sync::fs::read_all(fs, ".seedwellignore").ok().and_then(|b| String::from_utf8(b).ok()).unwrap_or_default();
+    let synced = seedwell_sync::fs::read_all(fs, ".seedwellignore").ok().and_then(|b| String::from_utf8(b).ok()).unwrap_or_default();
     let local = local.join("\n");
     Ignore::parse_all(&[&synced, &local]).0
 }
@@ -4081,10 +4159,10 @@ impl Journal {
 pub(crate) fn write_journal_at(path: &Path, j: &Journal) -> io::Result<()> {
     let tmp = path.with_extension("journal.tmp");
     std::fs::write(&tmp, serde_json::to_vec(j).map_err(io::Error::other)?)?;
-    trs_platform::fs::sync_file(&tmp)?;
+    seedwell_platform::fs::sync_file(&tmp)?;
     std::fs::rename(&tmp, path)?;
     if let Some(d) = path.parent() {
-        trs_platform::fs::sync_dir(d)?;
+        seedwell_platform::fs::sync_dir(d)?;
     }
     Ok(())
 }
@@ -4094,11 +4172,11 @@ fn to_archive(fs: &dyn Fs, p: &str) -> io::Result<()> {
     if fs.lstat(p)?.is_none() {
         return Ok(());
     }
-    let stamp = trs_sync::clock::compact_stamp(trs_sync::clock::Clock::now_ns(&SystemClock));
-    let mut dest = trs_sync::conflict::archive_path(p, &stamp);
+    let stamp = seedwell_sync::clock::compact_stamp(seedwell_sync::clock::Clock::now_ns(&SystemClock));
+    let mut dest = seedwell_sync::conflict::archive_path(p, &stamp);
     let mut n = 2;
     while fs.lstat(&dest)?.is_some() {
-        dest = trs_sync::conflict::archive_path(p, &format!("{stamp}-{n}"));
+        dest = seedwell_sync::conflict::archive_path(p, &format!("{stamp}-{n}"));
         n += 1;
     }
     if let Some((dir, _)) = dest.rsplit_once('/') {
@@ -4206,7 +4284,7 @@ const PARTIAL: &str = ".seedwell/partial-copy";
 fn mark_partial(to: &Path) -> io::Result<()> {
     std::fs::create_dir_all(to.join(STATE_DIR))?;
     std::fs::write(to.join(PARTIAL), b"")?;
-    trs_platform::fs::sync_dir(&to.join(STATE_DIR))
+    seedwell_platform::fs::sync_dir(&to.join(STATE_DIR))
 }
 
 /// `to` carries the partial-copy mark.
@@ -4230,7 +4308,7 @@ fn unmark_partial(to: &Path) -> io::Result<()> {
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
         _ => {}
     }
-    trs_platform::fs::sync_dir(&to.join(STATE_DIR)).or_else(|_| trs_platform::fs::sync_dir(to))
+    seedwell_platform::fs::sync_dir(&to.join(STATE_DIR)).or_else(|_| seedwell_platform::fs::sync_dir(to))
 }
 
 /// Moves a directory: a rename on the same volume (or with `copy`, always) else a copy, made durable, then `copied`
@@ -4282,7 +4360,7 @@ pub(crate) fn move_tree_kept(
     std::fs::create_dir(to)?;
     let made = (|| {
         mark_partial(to)?;
-        trs_platform::fs::sync_dir(to)?;
+        seedwell_platform::fs::sync_dir(to)?;
         let source = Manifest::of(from)?;
         let (fold_case, fold_norm) = folds(to)?;
         let clashes = clashes(&source, fold_case, fold_norm);
@@ -4478,7 +4556,7 @@ fn changed_since_copied(from: &Path, to: &Path, rel: &Path) -> io::Result<bool> 
                 return Ok(true);
             }
         } else if t.is_symlink() {
-            if trs_platform::fs::read_link(&from.join(&r))? != trs_platform::fs::read_link(&to.join(&r))? {
+            if seedwell_platform::fs::read_link(&from.join(&r))? != seedwell_platform::fs::read_link(&to.join(&r))? {
                 return Ok(true);
             }
         } else if a.len() != b.len() || a.modified().ok() != b.modified().ok() {
@@ -4555,11 +4633,11 @@ impl ManifestEntry {
 fn fold_key(name: &std::ffi::OsStr, fold_case: bool, fold_norm: bool) -> Vec<u8> {
     let Some(s) = name.to_str() else { return name_bytes(name) };
     match (fold_norm, fold_case) {
-        // As the folder's own names are compared ([`trs_sync::path::key`]).
-        (true, _) => trs_sync::path::key(s, fold_case).into_bytes(),
+        // As the folder's own names are compared ([`seedwell_sync::path::key`]).
+        (true, _) => seedwell_sync::path::key(s, fold_case).into_bytes(),
         (false, true) => {
             let mut out = String::with_capacity(s.len());
-            s.chars().for_each(|c| trs_sync::path::fold_char(c, &mut out));
+            s.chars().for_each(|c| seedwell_sync::path::fold_char(c, &mut out));
             out.into_bytes()
         }
         (false, false) => s.as_bytes().to_vec(),
@@ -4615,10 +4693,10 @@ impl Manifest {
     fn save(&self, at: &Path) -> io::Result<()> {
         let tmp = at.with_extension("manifest.tmp");
         std::fs::write(&tmp, serde_json::to_vec(self).map_err(io::Error::other)?)?;
-        trs_platform::fs::sync_file(&tmp)?;
+        seedwell_platform::fs::sync_file(&tmp)?;
         std::fs::rename(&tmp, at)?;
         if let Some(d) = at.parent() {
-            trs_platform::fs::sync_dir(d)?;
+            seedwell_platform::fs::sync_dir(d)?;
         }
         Ok(())
     }
@@ -4716,10 +4794,10 @@ fn sync_tree(p: &Path) -> io::Result<()> {
         if t.is_dir() {
             sync_tree(&e.path())?;
         } else if t.is_file() {
-            trs_platform::fs::sync_file(&e.path())?;
+            seedwell_platform::fs::sync_file(&e.path())?;
         }
     }
-    trs_platform::fs::sync_dir(p)
+    seedwell_platform::fs::sync_dir(p)
 }
 
 /// Copies `from` to `to`, which must not exist yet. A copy that fails halfway (a full disk, a link
@@ -4779,10 +4857,10 @@ fn copy_entry(src: &Path, dst: &Path, t: std::fs::FileType) -> io::Result<()> {
         return Ok(());
     }
     if t.is_symlink() {
-        trs_platform::fs::symlink(&trs_platform::fs::read_link(src)?, dst)?;
+        seedwell_platform::fs::symlink(&seedwell_platform::fs::read_link(src)?, dst)?;
     } else {
         // A user's file, which a program may be writing during the move: never locked against it (Windows).
-        trs_platform::fs::copy_shared(src, dst)?;
+        seedwell_platform::fs::copy_shared(src, dst)?;
         let m = std::fs::metadata(src)?;
         if let Ok(t) = m.modified() {
             std::fs::File::options().write(true).open(dst)?.set_modified(t)?;
@@ -4791,7 +4869,7 @@ fn copy_entry(src: &Path, dst: &Path, t: std::fs::FileType) -> io::Result<()> {
     Ok(())
 }
 
-type Foreign = mpsc::Receiver<trs_utp::ForeignDatagram>;
+type Foreign = mpsc::Receiver<seedwell_utp::ForeignDatagram>;
 
 /// Binds the sync port: TCP, and with `utp` its UDP twin (same number) for uTP and hole-punch probes. The
 /// saved port first; if it (or its UDP twin) is taken, any free pair, which the caller then remembers. If
@@ -4800,8 +4878,8 @@ type Foreign = mpsc::Receiver<trs_utp::ForeignDatagram>;
 /// On `[::]` both sockets take IPv4 as well (`IPV6_V6ONLY` off, set on every system: Windows defaults to on, and
 /// its sync port then refused every IPv4 connection). A system that cannot do that (IPv6 turned off) gets
 /// `0.0.0.0` instead, said in the log. Returns the address bound.
-async fn bind_port(ip: IpAddr, saved: u16, utp: bool) -> io::Result<(IpAddr, TcpListener, Option<trs_utp::UtpSocket>, Option<Foreign>)> {
-    let ip = if ip == IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED) && !trs_platform::net::dual_stack_available() {
+async fn bind_port(ip: IpAddr, saved: u16, utp: bool) -> io::Result<(IpAddr, TcpListener, Option<seedwell_utp::UtpSocket>, Option<Foreign>)> {
+    let ip = if ip == IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED) && !seedwell_platform::net::dual_stack_available() {
         eprintln!("seedwell sync: this system cannot listen for IPv4 and IPv6 on one socket (IPv6 off?): listening on IPv4 only");
         IpAddr::V4(Ipv4Addr::UNSPECIFIED)
     } else {
@@ -4811,7 +4889,7 @@ async fn bind_port(ip: IpAddr, saved: u16, utp: bool) -> io::Result<(IpAddr, Tcp
     let mut last = None;
     for attempt in 0..TRIES {
         let want = if attempt == 0 { saved } else { 0 };
-        let listener = match trs_platform::net::listen_tcp(SocketAddr::new(ip, want)) {
+        let listener = match seedwell_platform::net::listen_tcp(SocketAddr::new(ip, want)) {
             Ok(l) => l,
             Err(e) if attempt + 1 < TRIES => {
                 last = Some(e);
@@ -4824,7 +4902,7 @@ async fn bind_port(ip: IpAddr, saved: u16, utp: bool) -> io::Result<(IpAddr, Tcp
         }
         let port = listener.local_addr()?.port();
         let (tx, rx) = mpsc::channel(256);
-        let cfg = trs_utp::Config::default();
+        let cfg = seedwell_utp::Config::default();
         match utp_socket(SocketAddr::new(ip, port), cfg, tx).await {
             Ok(u) => return Ok((ip, listener, Some(u), Some(rx))),
             Err(e) if attempt + 1 < TRIES => last = Some(e),
@@ -4838,14 +4916,14 @@ async fn bind_port(ip: IpAddr, saved: u16, utp: bool) -> io::Result<(IpAddr, Tcp
 }
 
 /// The uTP socket on `addr`, bound like the TCP listener (dual-stack on `[::]`).
-async fn utp_socket(addr: SocketAddr, cfg: trs_utp::Config, foreign: mpsc::Sender<trs_utp::ForeignDatagram>) -> io::Result<trs_utp::UtpSocket> {
-    let udp = trs_platform::net::bind_udp(addr)?;
+async fn utp_socket(addr: SocketAddr, cfg: seedwell_utp::Config, foreign: mpsc::Sender<seedwell_utp::ForeignDatagram>) -> io::Result<seedwell_utp::UtpSocket> {
+    let udp = seedwell_platform::net::bind_udp(addr)?;
     udp.writable().await?;
-    trs_utp::UtpSocket::from_udp(udp, cfg, Some(foreign))
+    seedwell_utp::UtpSocket::from_udp(udp, cfg, Some(foreign))
 }
 
 /// Accepts uTP sessions on the sync port's UDP twin, like TCP ones (magic, then TLS).
-async fn utp_accept_loop(h: SyncHandle, sock: trs_utp::UtpSocket) {
+async fn utp_accept_loop(h: SyncHandle, sock: seedwell_utp::UtpSocket) {
     loop {
         let Ok((s, remote)) = sock.accept().await else {
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -5466,7 +5544,7 @@ mod tests {
     /// on an IPv6 socket, on the Mac since the sync port moved to `[::]`).
     #[tokio::test]
     async fn the_sync_port_on_any_ipv6_address_takes_ipv4_and_ipv6_over_tcp_and_utp() {
-        if !trs_platform::net::dual_stack_available() {
+        if !seedwell_platform::net::dual_stack_available() {
             eprintln!("no IPv6 here: nothing to check");
             return;
         }
@@ -5493,7 +5571,7 @@ mod tests {
             let n = tokio::time::timeout(wait, c.recv(&mut buf)).await.unwrap_or_else(|_| panic!("nothing came back to {back}")).unwrap();
             assert_eq!(&buf[..n], b"probe back");
             // A uTP dial from the sync port to a peer on that address.
-            let peer = trs_utp::UtpSocket::bind(SocketAddr::new(to, 0), trs_utp::Config::default()).await.unwrap();
+            let peer = seedwell_utp::UtpSocket::bind(SocketAddr::new(to, 0), seedwell_utp::Config::default()).await.unwrap();
             let (dial, accept) = tokio::join!(tokio::time::timeout(wait, utp.connect(peer.local_addr())), tokio::time::timeout(wait, peer.accept()));
             dial.expect("uTP dial timed out").unwrap_or_else(|e| panic!("uTP to {to}: {e}"));
             accept.expect("uTP accept timed out").unwrap();

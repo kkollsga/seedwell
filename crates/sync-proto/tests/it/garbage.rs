@@ -3,8 +3,8 @@
 
 use proptest::collection::vec;
 use proptest::prelude::*;
-use trs_sync_proto::codec::{DecodeError, Frame};
-use trs_sync_proto::msg::{MAX_INDEX_ENTRIES, Message};
+use seedwell_sync_proto::codec::{DecodeError, Frame};
+use seedwell_sync_proto::msg::{MAX_INDEX_ENTRIES, Message};
 
 use crate::roundtrip::message;
 

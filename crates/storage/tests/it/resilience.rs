@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use common::*;
-use trs_storage::{
+use seedwell_storage::{
     CancelToken, DiskConfig, DiskIo, FileStatus, Mode, RecheckOptions, StorageError, TorrentConfig,
 };
 
@@ -208,7 +208,7 @@ fn downloading_into_vanished_root_fails_instead_of_recreating() {
     // Root does not exist: write must fail (reported via the piece future), not create it.
     let mut res = None;
     for (b, d) in s.blocks(0) {
-        if let trs_storage::WriteAck::Complete(f) = h.write_block(0, b, &d).unwrap() {
+        if let seedwell_storage::WriteAck::Complete(f) = h.write_block(0, b, &d).unwrap() {
             res = Some(f.wait());
         }
     }
@@ -220,10 +220,10 @@ fn downloading_into_vanished_root_fails_instead_of_recreating() {
     assert!(root.is_dir());
     let h2 = io.add_torrent(
         s.layout.clone(),
-        TorrentConfig::download("/Volumes/__trs_unplugged__/dl"),
+        TorrentConfig::download("/Volumes/__seedwell_unplugged__/dl"),
     );
     assert!(matches!(h2.ensure_root(), Err(StorageError::MissingRoot)));
-    assert!(!std::path::Path::new("/Volumes/__trs_unplugged__").exists());
+    assert!(!std::path::Path::new("/Volumes/__seedwell_unplugged__").exists());
 }
 
 #[test]
@@ -366,8 +366,8 @@ fn resident_cost_per_torrent_is_small() {
     assert!(warm < 1024 && cold < 512, "warm {warm}, cold {cold}");
 }
 
-fn synth_layout_only(files: &[(&[&str], u64, bool)]) -> Arc<trs_storage::Layout> {
-    use trs_storage::{FilePath, FileSpec, Layout};
+fn synth_layout_only(files: &[(&[&str], u64, bool)]) -> Arc<seedwell_storage::Layout> {
+    use seedwell_storage::{FilePath, FileSpec, Layout};
     let specs: Vec<_> = files
         .iter()
         .map(|(c, l, p)| FileSpec {

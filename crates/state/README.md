@@ -1,7 +1,7 @@
-# trs-state
+# seedwell-state
 
 Everything Seedwell keeps on disk, behind plain engine-agnostic types (`[u8; 20]` info-hashes, no
-dependency on `trs-engine`):
+dependency on `seedwell-engine`):
 
 | File (in `~/Library/Application Support/Seedwell/`) | What | Module |
 |---|---|---|
@@ -20,7 +20,7 @@ nothing is ever deleted to "fix" a problem (damaged files are moved aside).
 ## API tour
 
 ```rust
-use trs_state::*;
+use seedwell_state::*;
 
 // --- the three TOML documents -------------------------------------------------------------
 let dir = std::path::Path::new("/path/to/Seedwell");
@@ -47,7 +47,7 @@ let policy = rules.resolve(&TorrentAttrs {
     tracker: m.map(|m| m.profile.id.as_str()),
     linked_rule: m.and_then(|m| m.profile.rule.as_deref()),
     private: true,
-    category: trs_classify::Category::Tv,
+    category: seedwell_classify::Category::Tv,
 });                                                                                  // ResolvedPolicy, pure
 let dangling = cross_check(&cfg, &rules, &profiles);                                // Vec<Warning>
 
@@ -59,14 +59,14 @@ store.put_resume(hash, &resume)?;
 store.add_counters(hash, Counters { downloaded: 0, uploaded: 4096, seed_secs: 5 })?;
 store.record_stats(&StatsScope::Profile("tl".into()), Day::from_unix(now, tz_offset), &StatsBucket { uploaded: 4096, ..Default::default() })?;
 store.flush_now()?;                                       // commit and wait
-let mut timing = store.timing_handle();                  // impl trs_tracker::TimingStore, durable save()
+let mut timing = store.timing_handle();                  // impl seedwell_tracker::TimingStore, durable save()
 let series = store.stats_series(&StatsScope::All, Day::from_unix(now, tz_offset), 30)?;
 ```
 
 Locations and volumes (SPEC §7A.4):
 
 ```rust
-use trs_state::volume::{same_volume, volume_id, cross_volume_pairs, CrossVolume, LocationScope};
+use seedwell_state::volume::{same_volume, volume_id, cross_volume_pairs, CrossVolume, LocationScope};
 same_volume(Path::new("~/x"), Path::new("/Volumes/Media/y"))?;   // io::Result<bool>: st_dev of the nearest EXISTING ancestor
 let warnings: Vec<CrossVolume> = cross_volume_pairs(&cfg);       // every incomplete -> finished pair on different disks
 ```
@@ -197,7 +197,7 @@ trackers when they need one.
 
 **Watch folder baselines.** `Config::stamp_watch_baselines(previous, now)` sets `since` on every entry that has
 none, whose path was not in `previous` (new or edited entry) or that was disabled and is enabled now; it
-returns whether anything changed so the caller saves. `trs_engine::Host` calls it at start-up (first launch,
+returns whether anything changed so the caller saves. `seedwell_engine::Host` calls it at start-up (first launch,
 upgrade) and on every reload, and rounds `now` up to the next whole second so a file that was there a moment
 ago is never "newer" than the baseline.
 
@@ -427,8 +427,8 @@ which keeps DST handling with the OS and makes tests deterministic. Weeks start 
 | `redb` 4.x | the transactional store; pure Rust, copy-on-write, crash safe |
 | `redb` 2.6 (as `redb2`) | reads a Seedwell 0.1 database once to convert it (`src/legacy.rs`); can go once no 0.1 files are left |
 | `serde` (derive) + `toml` | TOML documents; `toml` with `preserve_order` (uses `indexmap`, already in the tree via `toml_edit`) so files keep the struct order |
-| `trs-tracker` (no default features) | the `TimingStore` trait only; none of the async transports are built |
-| `trs-classify` | the `Category` enum |
+| `seedwell-tracker` (no default features) | the `TimingStore` trait only; none of the async transports are built |
+| `seedwell-classify` | the `Category` enum |
 | dev: `proptest` | property tests (same as the other crates) |
 
 No `tempfile`, `libc`, `chrono` or logging dependency: temp directories, civil-date maths (Hinnant) and
@@ -436,7 +436,7 @@ SIGKILL (`Child::kill`) use std.
 
 ## Tests
 
-`cargo test -p trs-state` (unit + integration), `cargo clippy -p trs-state --all-targets -- -D warnings`.
+`cargo test -p seedwell-state` (unit + integration), `cargo clippy -p seedwell-state --all-targets -- -D warnings`.
 
 * `tests/store.rs`: persistence, batching, removal, statistics, timing, migrations, newer schema, failure
   retry (`__inject_commit_failures`), garbage/truncated/mutated database files
@@ -445,7 +445,7 @@ SIGKILL (`Child::kill`) use std.
   `SIGKILL`ed at random moments (5-405 ms after spawn, so also while opening and while committing); the
   parent reopens and checks no recovery happened, the integrity check passes, acknowledged flushes and durable
   timing writes are present, counters are monotonic and counters/statistics (one transaction) agree.
-  `CRASH_ITERS=1000 CRASH_SEED=n cargo test -p trs-state --test crash -- --nocapture`. This proves process-crash
+  `CRASH_ITERS=1000 CRASH_SEED=n cargo test -p seedwell-state --test crash -- --nocapture`. This proves process-crash
   safety; power-loss safety rests on redb's fsync'd two-phase commit. Recorded runs: 2 x 1000 SIGKILLs (seeds
   987654321 and 424242; 835-839 kills landed after the child had acknowledged work, the rest during startup),
   ~17 000 durable timing writes verified per run, no corruption, no lost acknowledgement, no counter regression.

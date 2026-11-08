@@ -2,7 +2,7 @@
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::Duration;
-use trs_dht::{Config, DhtHandle, DriverConfig, LookupUpdate, PublicInfoHash, Refused, spawn};
+use seedwell_dht::{Config, DhtHandle, DriverConfig, LookupUpdate, PublicInfoHash, Refused, spawn};
 
 fn cfg(boot: Option<SocketAddr>, saved: Option<Vec<u8>>) -> DriverConfig {
     DriverConfig {
@@ -36,10 +36,10 @@ async fn network(n: usize) -> Vec<DhtHandle> {
 }
 
 async fn drain(
-    mut s: trs_dht::PeerStream,
+    mut s: seedwell_dht::PeerStream,
 ) -> (
     Vec<SocketAddrV4>,
-    Option<trs_dht::LookupStats>,
+    Option<seedwell_dht::LookupStats>,
     Option<(u8, u8)>,
 ) {
     let mut peers = Vec::new();
@@ -139,8 +139,8 @@ async fn lone_node_answers_ping_and_survives_garbage() {
             .await
             .unwrap()
             .unwrap();
-        let m = trs_dht::codec::parse(&buf[..n]).unwrap();
-        if matches!(m.body, trs_dht::codec::Body::Response(_)) {
+        let m = seedwell_dht::codec::parse(&buf[..n]).unwrap();
+        if matches!(m.body, seedwell_dht::codec::Body::Response(_)) {
             assert_eq!(m.tid, b"aa");
             answered = true;
             break;

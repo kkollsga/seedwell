@@ -10,15 +10,15 @@
 //!
 //! **NordVPN** is used only the way NordVPN documents it: its SOCKS5 servers ([`NORDVPN_SOCKS5_SERVERS`], from its
 //! own setup guides) on port 1080, with the service credentials. No other NordVPN interface is ever contacted. The
-//! engine picks the server that answers fastest and switches when one fails (`trs_engine::proxy`).
+//! engine picks the server that answers fastest and switches when one fails (`seedwell_engine::proxy`).
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use trs_engine::{ProxyConfig, ProxyHealth, ProxyProblem, ProxyStatus};
-use trs_socks::Credentials;
-use trs_state::config::{ProxyKind as StateKind, TorrentProxy};
-use trs_sync_net::secrets::SecretStore;
+use seedwell_engine::{ProxyConfig, ProxyHealth, ProxyProblem, ProxyStatus};
+use seedwell_socks::Credentials;
+use seedwell_state::config::{ProxyKind as StateKind, TorrentProxy};
+use seedwell_sync_net::secrets::SecretStore;
 
 use crate::Core;
 use crate::types::CoreError;
@@ -636,7 +636,7 @@ pub fn window(cfg: &TorrentProxy, has_key: bool, job: &Job) -> ProxyWindowModel 
 
 // ------------------------------------------------------------------------------------------ testing a key
 
-/// Tests `servers` on `port` with `auth` (all at once, each within [`trs_engine::proxy::PROBE_TIMEOUT`]): the fastest
+/// Tests `servers` on `port` with `auth` (all at once, each within [`seedwell_engine::proxy::PROBE_TIMEOUT`]): the fastest
 /// that answered, or why none did. On a runtime of its own: the caller is a thread of its own, never a UI thread.
 fn test_servers(servers: &[String], port: u16, auth: Option<&Credentials>) -> Result<(String, Duration), ProxyProblem> {
     if servers.is_empty() {
@@ -649,10 +649,10 @@ fn test_servers(servers: &[String], port: u16, auth: Option<&Credentials>) -> Re
     let results = rt.block_on(async {
         let mut set = tokio::task::JoinSet::new();
         for (i, host) in servers.iter().enumerate() {
-            let p = trs_socks::Proxy { host: host.clone(), port, auth: auth.cloned() };
-            set.spawn(async move { (i, trs_socks::handshake(&p, trs_engine::proxy::PROBE_TIMEOUT).await) });
+            let p = seedwell_socks::Proxy { host: host.clone(), port, auth: auth.cloned() };
+            set.spawn(async move { (i, seedwell_socks::handshake(&p, seedwell_engine::proxy::PROBE_TIMEOUT).await) });
         }
-        let mut out: Vec<Result<Duration, trs_socks::Error>> = servers.iter().map(|_| Err(trs_socks::Error::Timeout)).collect();
+        let mut out: Vec<Result<Duration, seedwell_socks::Error>> = servers.iter().map(|_| Err(seedwell_socks::Error::Timeout)).collect();
         while let Some(Ok((i, r))) = set.join_next().await {
             out[i] = r;
         }
@@ -662,11 +662,11 @@ fn test_servers(servers: &[String], port: u16, auth: Option<&Credentials>) -> Re
     if let Some((i, d)) = best {
         return Ok((servers[i].clone(), d));
     }
-    let errs: Vec<&trs_socks::Error> = results.iter().filter_map(|r| r.as_ref().err()).collect();
-    if errs.iter().any(|e| **e == trs_socks::Error::AuthRejected) {
+    let errs: Vec<&seedwell_socks::Error> = results.iter().filter_map(|r| r.as_ref().err()).collect();
+    if errs.iter().any(|e| **e == seedwell_socks::Error::AuthRejected) {
         return Err(ProxyProblem::AuthRejected);
     }
-    if errs.iter().any(|e| **e == trs_socks::Error::NoMethod) {
+    if errs.iter().any(|e| **e == seedwell_socks::Error::NoMethod) {
         return Err(ProxyProblem::AuthMissing);
     }
     Err(errs.last().map_or(ProxyProblem::NoServer, |e| ProxyProblem::Unreachable(e.to_string())))
@@ -862,7 +862,7 @@ impl Core {
     }
 
     fn proxy_save_tested(&self, servers: &[String], port: u16, creds: Option<Credentials>, kind: StateKind, host: String, cport: u16) -> Result<String, String> {
-        let label = if kind == StateKind::Custom { trs_socks::Proxy { host: host.clone(), port: cport, auth: None }.label() } else { String::new() };
+        let label = if kind == StateKind::Custom { seedwell_socks::Proxy { host: host.clone(), port: cport, auth: None }.label() } else { String::new() };
         let (server, took) = test_servers(servers, port, creds.as_ref()).map_err(|p| match kind {
             StateKind::Nordvpn => nordvpn_refusal(&p, creds.as_ref().map_or("", Credentials::user)),
             StateKind::Custom => custom_refusal(&p, &label),
@@ -901,7 +901,7 @@ impl Core {
         // the one asked for comes after it, so its answer is the one shown.
         let fresh = |s: &ProxyStatus| s.ranks > before.ranks_started.max(before.ranks);
         let running = before.ranks_started > before.ranks;
-        let end = std::time::Instant::now() + trs_engine::proxy::PROBE_TIMEOUT * if running { 2 } else { 1 } + Duration::from_secs(4);
+        let end = std::time::Instant::now() + seedwell_engine::proxy::PROBE_TIMEOUT * if running { 2 } else { 1 } + Duration::from_secs(4);
         let mut after = before.clone();
         while std::time::Instant::now() < end {
             std::thread::sleep(Duration::from_millis(100));
@@ -1002,6 +1002,75 @@ impl Core {
     pub fn proxy_open_modal_model(&self) -> ProxyWindowModel {
         let has_key = self.proxy_has_key();
         window(&self.proxy_settings(), has_key, &lock(&self.proxy.job))
+    }
+}
+
+/// The control server's way to the proxy (`proxy.*`, `seedwell proxy`, SPEC §7H): the calls Settings' proxy box and
+/// window make, so an agent's change ends where the user's would. Holds the core weakly (the core owns the server
+/// that holds this).
+pub(crate) struct ControlHook(pub std::sync::Weak<Core>);
+
+fn words(e: CoreError) -> String {
+    e.to_string()
+}
+
+impl ControlHook {
+    fn core(&self) -> Result<Arc<Core>, String> {
+        self.0.upgrade().ok_or_else(|| "Seedwell is quitting.".to_string())
+    }
+}
+
+impl seedwell_control::ProxyControl for ControlHook {
+    fn status(&self) -> seedwell_control::types::ProxyDto {
+        let Some(core) = self.0.upgrade() else { return Default::default() };
+        let cfg = core.proxy_settings();
+        let m = core.proxy_model();
+        seedwell_control::types::ProxyDto {
+            enabled: cfg.enabled,
+            kind: match cfg.kind {
+                StateKind::Nordvpn => "nordvpn".into(),
+                StateKind::Custom => "custom".into(),
+            },
+            host: cfg.host,
+            port: cfg.port,
+            country: cfg.country,
+            has_key: m.has_key,
+            server: m.server,
+            status: m.status_line,
+            problem: m.problem,
+            note: String::new(),
+        }
+    }
+
+    fn switch(&self, on: bool) -> Result<String, String> {
+        let core = self.core()?;
+        if core.proxy_settings().enabled != on {
+            core.proxy_toggle().map_err(words)?;
+        }
+        Ok(if on { "The proxy is on: torrents go through it." } else { "The proxy is off: torrents connect directly." }.into())
+    }
+
+    fn country(&self, code: &str) -> Result<String, String> {
+        let m = self.core()?.proxy_set_country(code.to_owned()).map_err(words)?;
+        Ok(format!("Servers are chosen for: {}.", country_name(&m.country)))
+    }
+
+    fn nordvpn(&self, user: String, pass: String) -> Result<String, String> {
+        self.core()?.proxy_set_nordvpn_key(user, pass).map_err(words)
+    }
+
+    fn custom(&self, host: String, port: u16, key: Option<(String, String)>) -> Result<String, String> {
+        let (user, pass) = key.unzip();
+        self.core()?.proxy_set_custom(host, port, user, pass).map_err(words)
+    }
+
+    fn remove_key(&self) -> Result<String, String> {
+        self.core()?.proxy_remove_key().map_err(words)?;
+        Ok("The key was removed. Torrents connect directly.".into())
+    }
+
+    fn faster(&self) -> Result<String, String> {
+        self.core()?.proxy_find_faster().map_err(words)
     }
 }
 
@@ -1140,7 +1209,12 @@ mod tests {
     // ---------------------------------------------------------------------- a real core, as the host calls it
 
     /// A real core in temporary folders, its NordVPN preset a loopback fake proxy.
-    fn real_core(fake: &trs_socks::testkit::FakeProxy) -> (Arc<Core>, std::path::PathBuf, [tempfile::TempDir; 2]) {
+    fn real_core(fake: &seedwell_socks::testkit::FakeProxy) -> (Arc<Core>, std::path::PathBuf, [tempfile::TempDir; 2]) {
+        real_core_for(fake, crate::settings::AgentPermission::Off)
+    }
+
+    /// The same, with agents allowed at `agents` (its control socket is `<state>/control.sock`).
+    fn real_core_for(fake: &seedwell_socks::testkit::FakeProxy, agents: crate::settings::AgentPermission) -> (Arc<Core>, std::path::PathBuf, [tempfile::TempDir; 2]) {
         let home = tempfile::tempdir().unwrap();
         let work = tempfile::tempdir().unwrap();
         // SAFETY: set before the core starts any thread; nextest runs every test in its own process.
@@ -1152,11 +1226,63 @@ mod tests {
         st.folders.incomplete_dir = work.path().join("incomplete").display().to_string();
         st.folders.watch.clear();
         st.network.port_mapping = false;
+        st.agents.permission = agents;
         store.save_settings(&st).unwrap();
         let options = crate::CoreOptions { config_dir: dir.display().to_string(), mock: false, allow_loopback_trackers: false, forbidden_root: None };
         let core = Core::new(options).unwrap();
         core.set_proxy_preset_for_tests(vec![fake.addr().ip().to_string()], fake.addr().port());
         (core, dir, [home, work])
+    }
+
+    /// Failure: an agent's `seedwell proxy` (the control socket's `proxy.*`) does not end where the user's click and
+    /// window do (the key kept and tested, the proxy on in `config.toml` and in the engine; off again with `proxy
+    /// off`), or the key comes back in an answer, `settings get` or the activity log the user reads in Settings ›
+    /// Agents. The calls come as the CLI makes them: over the socket, from another process's runtime.
+    #[test]
+    fn an_agent_sets_the_key_and_switches_the_proxy_through_the_control_socket() {
+        use seedwell_control::proto::{Empty, ProxyKeyParams, ProxySetParams, Request, SettingsGetParams};
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let (user, pass) = ("svc-user-Q8R1", "svc-pass-M4N7P");
+        let fake = rt.block_on(seedwell_socks::testkit::FakeProxy::start(user, pass));
+        let (core, dir, _t) = real_core_for(&fake, crate::settings::AgentPermission::Full);
+        let sock = dir.join("control.sock");
+        let call = |req: Request| {
+            rt.block_on(async {
+                let mut c = seedwell_control::Client::connect(&sock, "agent-test").await.unwrap();
+                c.call(&req).await
+            })
+        };
+        let mut answers = Vec::new();
+        let key = |p: &str| Request::ProxyKey(ProxyKeyParams { kind: "nordvpn".into(), user: Some(user.into()), pass: Some(p.into()), host: None, port: None });
+        answers.push(format!("{:?}", call(key("wrong-pass")).unwrap_err()));
+        assert!(!core.proxy_model().has_key, "a key that fails its test is not kept");
+        let on = call(key(pass)).unwrap();
+        assert!(on["enabled"] == true && on["has_key"] == true && on["note"].as_str().is_some_and(|n| n.starts_with("NordVPN is on")), "{on}");
+        answers.push(on.to_string());
+        wait_icon(&core, ProxyIcon::On);
+        assert!(crate::SettingsStore::new(&dir).config().network.proxy.enabled);
+        let got = call(Request::SettingsGet(SettingsGetParams::default())).unwrap();
+        assert_eq!(got["settings"]["network.proxy.key"], "installed");
+        answers.push(got.to_string());
+        let off = call(Request::ProxySet(ProxySetParams { on: Some(false), country: None })).unwrap();
+        assert_eq!(off["enabled"], false, "{off}");
+        wait_icon(&core, ProxyIcon::Off);
+        assert!(!crate::SettingsStore::new(&dir).config().network.proxy.enabled);
+        answers.push(call(Request::ProxyStatus(Empty {})).unwrap().to_string());
+        // `settings set` does not go around it.
+        let e = call(Request::SettingsSet(seedwell_control::proto::SettingsSetParams {
+            changes: serde_json::json!({"network.proxy.enabled": true}).as_object().unwrap().clone(),
+            ..Default::default()
+        }))
+        .unwrap_err();
+        assert!(format!("{e:?}").contains("seedwell proxy"), "{e:?}");
+        let log = core.agent_activity(50);
+        assert!(log.iter().any(|a| a.method == "proxy.key" && a.summary.contains("key not logged") && a.outcome == "ok"), "{log:?}");
+        answers.extend(log.iter().map(|a| format!("{a:?}")));
+        for a in &answers {
+            assert!(!a.contains(user) && !a.contains(pass) && !a.contains("wrong-pass"), "the key leaked: {a}");
+        }
+        core.shutdown(5);
     }
 
     /// The host's way: the call on a thread of its own (the async FFI call runs it apart).
@@ -1188,7 +1314,7 @@ mod tests {
     #[test]
     fn wrong_credentials_fail_with_the_login_hint_and_nothing_is_kept() {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
-        let fake = rt.block_on(trs_socks::testkit::FakeProxy::start("svc-user", "svc-pass"));
+        let fake = rt.block_on(seedwell_socks::testkit::FakeProxy::start("svc-user", "svc-pass"));
         let (core, dir, _t) = real_core(&fake);
         let c = core.clone();
         let e = on_a_thread(move || c.proxy_set_nordvpn_key("me@example.com".into(), "my-login-password".into())).unwrap_err();
@@ -1210,7 +1336,7 @@ mod tests {
     fn the_key_is_kept_in_the_secret_store_only_and_the_calls_reach_the_engine() {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
         let (user, pass) = ("svc-user-K7Q2", "svc-pass-Z9X4W");
-        let fake = rt.block_on(trs_socks::testkit::FakeProxy::start(user, pass));
+        let fake = rt.block_on(seedwell_socks::testkit::FakeProxy::start(user, pass));
         let (core, dir, _t) = real_core(&fake);
         let c = core.clone();
         let said = on_a_thread(move || c.proxy_set_nordvpn_key(format!(" {user} "), pass.into())).unwrap();
@@ -1250,7 +1376,7 @@ mod tests {
     #[test]
     fn an_isolated_core_tests_keys_and_connects_only_through_its_own_stand_ins() {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
-        let fake = rt.block_on(trs_socks::testkit::FakeProxy::start("svc-user", "svc-pass"));
+        let fake = rt.block_on(seedwell_socks::testkit::FakeProxy::start("svc-user", "svc-pass"));
         let home = tempfile::tempdir().unwrap();
         let work = tempfile::tempdir().unwrap();
         // SAFETY: set before the core starts any thread; nextest runs every test in its own process.
@@ -1291,7 +1417,7 @@ mod tests {
     #[test]
     fn find_faster_answers_with_a_ranking_made_after_it_was_asked() {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
-        let fake = rt.block_on(trs_socks::testkit::FakeProxy::start("u", "p"));
+        let fake = rt.block_on(seedwell_socks::testkit::FakeProxy::start("u", "p"));
         let (core, _dir, _t) = real_core(&fake);
         fake.set_delay(Duration::from_millis(1200));
         let c = core.clone();
@@ -1321,7 +1447,7 @@ mod tests {
     #[test]
     fn a_refused_connection_reads_as_plain_sentences() {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
-        let fake = rt.block_on(trs_socks::testkit::FakeProxy::start("u", "p"));
+        let fake = rt.block_on(seedwell_socks::testkit::FakeProxy::start("u", "p"));
         let (core, _dir, _t) = real_core(&fake);
         let c = core.clone();
         on_a_thread(move || c.proxy_set_nordvpn_key("u".into(), "p".into())).unwrap();
@@ -1347,7 +1473,7 @@ mod tests {
     #[test]
     fn switching_or_removing_waits_for_a_running_test() {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
-        let fake = rt.block_on(trs_socks::testkit::FakeProxy::start("u", "p"));
+        let fake = rt.block_on(seedwell_socks::testkit::FakeProxy::start("u", "p"));
         let (core, _dir, _t) = real_core(&fake);
         let c = core.clone();
         on_a_thread(move || c.proxy_set_nordvpn_key("u".into(), "p".into())).unwrap();
@@ -1382,7 +1508,7 @@ mod tests {
     #[test]
     fn remove_key_forgets_it_and_torrents_connect_directly() {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
-        let fake = rt.block_on(trs_socks::testkit::FakeProxy::start("u", "p"));
+        let fake = rt.block_on(seedwell_socks::testkit::FakeProxy::start("u", "p"));
         let (core, dir, _t) = real_core(&fake);
         let c = core.clone();
         on_a_thread(move || c.proxy_set_nordvpn_key("u".into(), "p".into())).unwrap();
@@ -1448,11 +1574,11 @@ mod tests {
 
     /// Two loopback proxies on one port (127.0.0.1 and ::1) standing for servers in two countries, or `None` without
     /// IPv6 loopback.
-    async fn two_servers() -> Option<(trs_socks::testkit::FakeProxy, trs_socks::testkit::FakeProxy)> {
+    async fn two_servers() -> Option<(seedwell_socks::testkit::FakeProxy, seedwell_socks::testkit::FakeProxy)> {
         for _ in 0..20 {
-            let a = trs_socks::testkit::FakeProxy::start("u", "p").await;
+            let a = seedwell_socks::testkit::FakeProxy::start("u", "p").await;
             let at = std::net::SocketAddr::new(std::net::Ipv6Addr::LOCALHOST.into(), a.addr().port());
-            if let Some(b) = trs_socks::testkit::FakeProxy::start_on(at, "u", "p").await {
+            if let Some(b) = seedwell_socks::testkit::FakeProxy::start_on(at, "u", "p").await {
                 return Some((a, b));
             }
         }

@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use trs_wire::{PexBuilder, PexFlags};
+use seedwell_wire::{PexBuilder, PexFlags};
 
 use super::Torrent;
 use crate::peer::PeerCmd;
@@ -98,6 +98,7 @@ impl Torrent {
         }
         self.sh.diag.pex_received.fetch_add(1, Ordering::Relaxed);
         for (a, utp) in addrs {
+            let a = crate::net::canonical(a);
             if utp {
                 self.sh.utp_peers.lock().unwrap_or_else(|e| e.into_inner()).insert(a);
             }

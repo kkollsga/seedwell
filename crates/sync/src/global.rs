@@ -16,8 +16,8 @@
 
 use std::cmp::Ordering;
 
-use trs_sync_proto::ids::ShortId;
-use trs_sync_proto::model::{Causality, FileInfo, SignedFile};
+use seedwell_sync_proto::ids::ShortId;
+use seedwell_sync_proto::model::{Causality, FileInfo, SignedFile};
 
 /// One device's version of a path.
 #[derive(Clone, Debug)]
@@ -126,7 +126,7 @@ pub fn need(local: Option<&FileInfo>, current: Option<&FileInfo>) -> Need {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trs_sync_proto::model::{Counter, FileKind, Version};
+    use seedwell_sync_proto::model::{Counter, FileKind, Version};
 
     fn ver(pairs: &[(u64, u64)]) -> Version {
         Version::from_counters(pairs.iter().map(|&(id, value)| Counter { id: ShortId(id), value }).collect())
@@ -147,7 +147,7 @@ mod tests {
                 file_id: [0; 16],
                 symlink_target: String::new(),
                 conflict_of: None,
-                chunks: if deleted { vec![] } else { vec![trs_sync_proto::model::ChunkRef { len: 1, hash: [content; 32] }] },
+                chunks: if deleted { vec![] } else { vec![seedwell_sync_proto::model::ChunkRef { len: 1, hash: [content; 32] }] },
             },
             sig: [by as u8; 64],
         }

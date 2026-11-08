@@ -10,10 +10,10 @@ static N: AtomicU64 = AtomicU64::new(0);
 pub struct TempDir(PathBuf);
 
 impl TempDir {
-    /// Create `<system temp>/trs-state-<label>-<pid>-<n>`.
+    /// Create `<system temp>/seedwell-state-<label>-<pid>-<n>`.
     pub fn new(label: &str) -> Self {
         let n = N.fetch_add(1, Ordering::Relaxed);
-        let p = std::env::temp_dir().join(format!("trs-state-{label}-{}-{n}", std::process::id()));
+        let p = std::env::temp_dir().join(format!("seedwell-state-{label}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).expect("create temp dir");
         TempDir(p)

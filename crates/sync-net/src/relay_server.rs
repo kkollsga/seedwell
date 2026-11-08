@@ -48,9 +48,9 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
-use trs_sync_proto::codec::Magic;
-use trs_sync_proto::device::{self, DeviceKey};
-use trs_sync_proto::ids::DeviceId;
+use seedwell_sync_proto::codec::Magic;
+use seedwell_sync_proto::device::{self, DeviceKey};
+use seedwell_sync_proto::ids::DeviceId;
 
 use crate::relay::Bucket;
 use crate::service::SyncHandle;
@@ -358,7 +358,7 @@ impl RelayUrl {
 
 /// Connects to the relay and runs the hello: the stream, after the relay's key was checked, and its nonce.
 async fn hello(url: &RelayUrl) -> io::Result<(TcpStream, [u8; 32], [u8; 32])> {
-    let mut tcp = trs_platform::net::connect_tcp(url.host_port.as_str()).await?;
+    let mut tcp = seedwell_platform::net::connect_tcp(url.host_port.as_str()).await?;
     let _ = tcp.set_nodelay(true);
     tcp.write_all(&Magic::Relay.bytes()).await?;
     let mut b = [0u8; 64];

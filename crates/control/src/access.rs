@@ -842,9 +842,9 @@ mod tests {
     fn an_expired_request_is_logged_told_and_cannot_be_answered() {
         use std::sync::atomic::{AtomicU64, Ordering};
         let dir = tempfile::tempdir().unwrap();
-        let mut cfg = trs_state::Config::default();
+        let mut cfg = seedwell_state::Config::default();
         cfg.agents.permission = Permission::ReadOnly;
-        trs_state::DocStore::<trs_state::Config>::new(dir.path()).save(&cfg).unwrap();
+        seedwell_state::DocStore::<seedwell_state::Config>::new(dir.path()).save(&cfg).unwrap();
         let activity = ActivityLog::new();
         let told = Arc::new(Mutex::new(Vec::new()));
         let t2 = told.clone();

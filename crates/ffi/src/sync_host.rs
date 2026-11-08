@@ -219,7 +219,7 @@ pub enum SyncHostText {
 pub fn sync_host_text(t: SyncHostText) -> String {
     match t {
         SyncHostText::Busy => "the app is busy; try again".into(),
-        SyncHostText::NoAnswer => concat!("the ", trs_platform::file_manager!(), " did not answer in time").into(),
+        SyncHostText::NoAnswer => concat!("the ", seedwell_platform::file_manager!(), " did not answer in time").into(),
     }
 }
 
@@ -244,7 +244,7 @@ pub(crate) fn unfinished_releases(state: &Path) -> Vec<SyncHostNotice> {
             text: format!(
                 concat!(
                     "Seedwell stopped while it removed “{}” from the ",
-                    trs_platform::file_manager!(),
+                    seedwell_platform::file_manager!(),
                     ". Changes made there that Seedwell had not taken in yet may have been kept by macOS, in a folder it ",
                     "names for the removal (look in ~/Library/CloudStorage); Seedwell was not told where."
                 ),
@@ -304,7 +304,7 @@ pub(crate) fn kept_dir(name: &str, place: Option<&Path>) -> Option<PathBuf> {
     let dir = place
         .and_then(Path::parent)
         .map(Path::to_path_buf)
-        .or_else(|| trs_platform::dirs::home().map(|h| h.join("Seedwell")))?;
+        .or_else(|| seedwell_platform::dirs::home().map(|h| h.join("Seedwell")))?;
     let _ = std::fs::create_dir_all(&dir);
     let base = format!("{name} (changes not synced)");
     let mut to = dir.join(&base);
@@ -323,7 +323,7 @@ pub(crate) fn kept_notice(name: &str, at: &Path) -> SyncHostNotice {
         text: format!(
             concat!(
                 "Files changed in the ",
-                trs_platform::file_manager!(),
+                seedwell_platform::file_manager!(),
                 " that Seedwell had not taken in yet are in {}. Look them over and copy back what you need."
             ),
             at.display()
@@ -409,14 +409,14 @@ pub(crate) fn copy_verified(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 
-/// The host as the core's [`trs_sync_net::OnDemandHost`]: asked to let go of a folder before it is removed or
+/// The host as the core's [`seedwell_sync_net::OnDemandHost`]: asked to let go of a folder before it is removed or
 /// switched to full, whoever asks; the folder is left out of the reported domains meanwhile.
 struct Release {
     host: Arc<Host>,
     listener: Arc<dyn SyncHostListener>,
 }
 
-impl trs_sync_net::OnDemandHost for Release {
+impl seedwell_sync_net::OnDemandHost for Release {
     fn release(&self, folder: &str, name: &str, place: &Path) -> Result<(), String> {
         // A domain per folder: left out of the reported domains at once. The hub keeps serving the folder while the
         // system hands over its pending changes; the host's `sync_host_let_go` drops it from the hub after that.
@@ -495,7 +495,7 @@ pub(crate) trait HostCore: Send + Sync {
     /// The on-demand folders, `None` while folder sync is not running (nothing is known then).
     fn folders(&self) -> Option<Vec<HostFolder>>;
     /// Who lets go of an on-demand folder before it is removed or switched to full.
-    fn set_release(&self, _host: Option<Arc<dyn trs_sync_net::OnDemandHost>>) {}
+    fn set_release(&self, _host: Option<Arc<dyn seedwell_sync_net::OnDemandHost>>) {}
     fn item(&self, f: &str, id: &str) -> Result<Option<SyncItem>, OdError>;
     fn children(&self, f: &str, id: &str, cursor: Option<&str>, limit: u32) -> Result<SyncItemPage, OdError>;
     fn changes(&self, f: &str, anchor: u64, limit: u32) -> Result<SyncChangePage, OdError>;
@@ -507,14 +507,14 @@ pub(crate) trait HostCore: Send + Sync {
     fn create(&self, f: &str, parent: &str, name: &str, dir: bool, contents: Option<&str>) -> Result<SyncItem, OdError>;
     fn modify(&self, f: &str, id: &str, parent: Option<&str>, name: Option<&str>, contents: Option<&str>, base: Option<&str>) -> Result<SyncItem, OdError>;
     /// `seen`: the folder's version the host saw (a folder's delete is refused when something below is newer).
-    fn delete(&self, f: &str, id: &str, seen: Option<trs_sync_net::DeleteSeen>) -> Result<SyncDeleted, OdError>;
+    fn delete(&self, f: &str, id: &str, seen: Option<seedwell_sync_net::DeleteSeen>) -> Result<SyncDeleted, OdError>;
     /// Why `path` is a name the folder does not sync, if it is.
     fn ignored(&self, _f: &str, _path: &str, _dir: bool) -> Result<Option<crate::sync::ondemand::SyncIgnored>, OdError> {
         Ok(None)
     }
     /// What the folder's changes wait for before they are reported (a delete a moment ago may be a save by replace;
     /// `writing`: the new file is being written at its name). `None`: nothing.
-    fn replace_hold(&self, _f: &str) -> Option<trs_sync::ondemand::Hold> {
+    fn replace_hold(&self, _f: &str) -> Option<seedwell_sync::ondemand::Hold> {
         None
     }
     /// Seedwell's entry in the sidebar ([`nav_pane`]); `None`: none to report (not running, or an isolated run).
@@ -616,7 +616,7 @@ impl HostCore for BackendCore {
                 .collect(),
         )
     }
-    fn set_release(&self, host: Option<Arc<dyn trs_sync_net::OnDemandHost>>) {
+    fn set_release(&self, host: Option<Arc<dyn seedwell_sync_net::OnDemandHost>>) {
         self.0.set_on_demand_host(host);
     }
     fn hub_folders(&self) -> Option<Vec<hub::HubFolder>> {
@@ -672,10 +672,10 @@ impl HostCore for BackendCore {
     fn ignored(&self, f: &str, path: &str, dir: bool) -> Result<Option<crate::sync::ondemand::SyncIgnored>, OdError> {
         self.0.od_ignored(f, path, dir)
     }
-    fn replace_hold(&self, f: &str) -> Option<trs_sync::ondemand::Hold> {
+    fn replace_hold(&self, f: &str) -> Option<seedwell_sync::ondemand::Hold> {
         self.0.od_replace_hold(f)
     }
-    fn delete(&self, f: &str, id: &str, seen: Option<trs_sync_net::DeleteSeen>) -> Result<SyncDeleted, OdError> {
+    fn delete(&self, f: &str, id: &str, seen: Option<seedwell_sync_net::DeleteSeen>) -> Result<SyncDeleted, OdError> {
         self.0.od_delete(f, id, seen)
     }
 }
@@ -753,7 +753,8 @@ pub(crate) fn kind_of(k: OdKind) -> ErrKind {
         OdKind::NoItem => ErrKind::NoSuchItem,
         OdKind::AnchorExpired => ErrKind::AnchorExpired,
         OdKind::NotOnDemand | OdKind::Gone | OdKind::NotRunning | OdKind::Unavailable | OdKind::NotHereYet => ErrKind::Unreachable,
-        OdKind::Other | OdKind::Changed => ErrKind::Failed,
+        // Busy for now: the system tries again later (`cannotSynchronize`), as it does with any failure.
+        OdKind::Other | OdKind::Changed | OdKind::Busy => ErrKind::Failed,
         // A name the folder does not sync: the system keeps the item here and stops asking (a rename: it downloads the
         // item first, if it has to, then deletes it; the core deleted it already when its content was here).
         OdKind::Ignored | OdKind::IgnoredNotHere => ErrKind::Excluded,
@@ -813,7 +814,7 @@ fn state_name(s: SyncItemState) -> &'static str {
 /// What the user may do with an item. A read-only member reads and deletes (a delete frees the content, and the item
 /// comes back online only); the folder itself is neither renamed, moved nor deleted from the Finder.
 pub(crate) fn caps_of(i: &SyncItem, writable: bool) -> Vec<&'static str> {
-    let root = i.id == trs_sync::ondemand::ROOT_ID;
+    let root = i.id == seedwell_sync::ondemand::ROOT_ID;
     let mut caps = vec!["read"];
     if writable {
         caps.push("write");
@@ -998,8 +999,8 @@ impl Host {
             nav_pane: Mutex::new(None),
             held_since: Mutex::new(HashMap::new()),
             keepalive: KEEPALIVE,
-            replace_cap: trs_sync::ondemand::REPLACE_WINDOW,
-            write_cap: trs_sync::ondemand::WRITE_HOLD_MAX,
+            replace_cap: seedwell_sync::ondemand::REPLACE_WINDOW,
+            write_cap: seedwell_sync::ondemand::WRITE_HOLD_MAX,
             request_wait: REQUEST_WAIT,
             send_wait: SEND_WAIT,
             max_connections: MAX_CONNECTIONS,
@@ -1071,7 +1072,7 @@ impl Host {
     /// below does, and a delete that carries it is refused by the core when something below is newer. Kept up from the
     /// change feed: serving a folder never walks what is below it.
     fn folder_version(&self, f: &str, i: &SyncItem) -> Option<String> {
-        if i.kind != SyncItemKind::Dir || i.id == trs_sync::ondemand::ROOT_ID {
+        if i.kind != SyncItemKind::Dir || i.id == seedwell_sync::ondemand::ROOT_ID {
             return None;
         }
         self.catch_up(f);
@@ -1088,7 +1089,7 @@ impl Host {
     fn seen_of(&self, f: &str, base: Option<&str>) -> u64 {
         let seen = base.and_then(|b| b.strip_prefix('d')).and_then(|n| n.parse::<u64>().ok());
         match (seen, self.core.anchor(f)) {
-            (Some(a), Ok(now)) if trs_sync::ondemand::anchor_index(a) == trs_sync::ondemand::anchor_index(now) => trs_sync::ondemand::anchor_sequence(a),
+            (Some(a), Ok(now)) if seedwell_sync::ondemand::anchor_index(a) == seedwell_sync::ondemand::anchor_index(now) => seedwell_sync::ondemand::anchor_sequence(a),
             _ => 0,
         }
     }
@@ -1126,7 +1127,7 @@ impl Host {
                     moved.insert(i.id.clone(), seq);
                 }
                 let mut parent = i.parent_id.clone();
-                while parent != trs_sync::ondemand::ROOT_ID {
+                while parent != seedwell_sync::ondemand::ROOT_ID {
                     moved.insert(parent.clone(), seq);
                     let next = match parents.get(&parent) {
                         Some(p) => p.clone(),
@@ -1313,7 +1314,7 @@ impl Host {
         for i in &items {
             let mut chain = Vec::new();
             let mut parent = i.parent_id.clone();
-            while parent != trs_sync::ondemand::ROOT_ID && seen.insert(parent.clone()) {
+            while parent != seedwell_sync::ondemand::ROOT_ID && seen.insert(parent.clone()) {
                 let Some(p) = self.core.item(f, &parent).ok().flatten() else { break };
                 parent = p.parent_id.clone();
                 chain.push(p);
@@ -1337,7 +1338,7 @@ impl Host {
             return Err(HostError::new(ErrKind::Unreachable, "This file is no longer on this computer; opening it downloads it."));
         }
         if i.state == SyncItemState::Unavailable {
-            return Err(HostError::new(ErrKind::Unreachable, trs_sync::ondemand::UNAVAILABLE));
+            return Err(HostError::new(ErrKind::Unreachable, seedwell_sync::ondemand::UNAVAILABLE));
         }
         loop {
             let got = self.core.fetch(f, id, PROGRESS_EVERY.as_millis() as u64)?;
@@ -1369,7 +1370,7 @@ impl Host {
     }
 
     fn create(&self, f: &str, r: &Request) -> Result<Value, HostError> {
-        let parent = r.parent.as_deref().unwrap_or(trs_sync::ondemand::ROOT_ID);
+        let parent = r.parent.as_deref().unwrap_or(seedwell_sync::ondemand::ROOT_ID);
         let name = r.name.as_deref().ok_or_else(|| HostError::new(ErrKind::BadRequest, "A new item needs a name."))?;
         let dir = match r.kind.as_deref() {
             Some("dir") => true,
@@ -1441,7 +1442,7 @@ impl Host {
     fn rename_aside(&self, f: &str, id: &str, r: &Request) -> Result<Aside, HostError> {
         let i = self.item_or_gone(f, id)?;
         let parent = match r.parent.as_deref() {
-            Some(p) if p != trs_sync::ondemand::ROOT_ID => self.item_or_gone(f, p)?.path,
+            Some(p) if p != seedwell_sync::ondemand::ROOT_ID => self.item_or_gone(f, p)?.path,
             Some(_) => String::new(),
             None => i.path.rsplit_once('/').map_or(String::new(), |(p, _)| p.to_string()),
         };
@@ -1490,8 +1491,8 @@ impl Host {
         // A file: the content version the user saw; a newer one is not deleted unseen. Both are checked on the
         // folder's core with the delete, and the item comes back as it is now.
         let seen = match i.kind {
-            SyncItemKind::Dir => Some(trs_sync_net::DeleteSeen::Folder(self.seen_of(f, r.base.as_deref()))),
-            _ => r.base.clone().map(trs_sync_net::DeleteSeen::File),
+            SyncItemKind::Dir => Some(seedwell_sync_net::DeleteSeen::Folder(self.seen_of(f, r.base.as_deref()))),
+            _ => r.base.clone().map(seedwell_sync_net::DeleteSeen::File),
         };
         let d = self.core.delete(f, id, seen).map_err(|e| {
             let changed = e.kind == OdKind::Changed;
@@ -2214,9 +2215,17 @@ impl Core {
         None
     }
 
-    /// The hub's domain (the Mac: one *Seedwell* in the Finder's sidebar for every synced folder).
+    /// The hub's domain (the Mac: one *Seedwell* in the Finder's sidebar for every synced folder). Its name is empty:
+    /// the Finder then shows the app's name alone ([`hub::hub_domain`]). A host registers it as it is, empty name
+    /// included, and renames a hub it has under another name in place (never by removing it).
     pub fn sync_host_hub_domain(&self) -> SyncHostDomain {
         hub::hub_domain()
+    }
+
+    /// The name a host gives a domain whose empty name the system refused: the app's. The sidebar then says
+    /// "Seedwell - Seedwell", as in 0.1.20, but the entry is there; a new install never ends up with none.
+    pub fn sync_host_domain_fallback_name(&self) -> String {
+        hub::DOMAIN_FALLBACK_NAME.into()
     }
 
     /// The hub's item for folder `id`: the folder an on-demand folder is, or the link a full folder is (the folder's
@@ -2375,7 +2384,7 @@ mod nav_pane_tests {
     use super::*;
 
     fn home() -> PathBuf {
-        trs_platform::dirs::home().expect("a home folder to resolve `~` against")
+        seedwell_platform::dirs::home().expect("a home folder to resolve `~` against")
     }
 
     /// Catches an entry that opens the wrong folder: `~` left unexpanded or a relative path (File Explorer opens

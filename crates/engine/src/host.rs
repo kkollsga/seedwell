@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use trs_state::doc::POLL_INTERVAL;
-use trs_state::{Config, DocStore, LoadSource, PollEvent, Poller, RuleSet, TrackerProfiles, WatchHandle, spawn_watcher};
+use seedwell_state::doc::POLL_INTERVAL;
+use seedwell_state::{Config, DocStore, LoadSource, PollEvent, Poller, RuleSet, TrackerProfiles, WatchHandle, spawn_watcher};
 
 use crate::api::{EngineError, EngineEvent, ShutdownReport};
 use crate::config::{ClockFn, EngineConfig};
@@ -63,7 +63,7 @@ pub struct Host {
     /// The runtime of [`Host::start_blocking`]; `None` when started on the caller's runtime.
     runtime: Option<tokio::runtime::Runtime>,
     /// What opening the database found (created, recovered, migrated).
-    pub open_report: trs_state::OpenReport,
+    pub open_report: seedwell_state::OpenReport,
     /// Problems found while loading the settings files (the files in force are valid anyway).
     pub warnings: Vec<String>,
 }
@@ -74,7 +74,7 @@ fn baseline_now() -> u64 {
     crate::util::unix_secs() + 1
 }
 
-fn msgs<'a, I: IntoIterator<Item = &'a trs_state::Warning>>(w: I) -> Vec<String> {
+fn msgs<'a, I: IntoIterator<Item = &'a seedwell_state::Warning>>(w: I) -> Vec<String> {
     w.into_iter().map(ToString::to_string).collect()
 }
 
@@ -83,7 +83,7 @@ impl Host {
     pub async fn start(dir: impl AsRef<Path>, opts: HostOptions) -> Result<Host, EngineError> {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir).map_err(|e| EngineError::Io(format!("{}: {e}", dir.display())))?;
-        let opened = trs_state::Store::open(&dir).map_err(|e| EngineError::Store(e.to_string()))?;
+        let opened = seedwell_state::Store::open(&dir).map_err(|e| EngineError::Store(e.to_string()))?;
         let report = opened.report.clone();
         let store = match opts.time_zone.clone() {
             Some(tz) => StateStore::with_time_zone(opened.store, move |t| tz(t)),
@@ -107,7 +107,7 @@ impl Host {
             && let Err(e) = cfg_docs.save(&docs.cfg) {
                 warnings.push(format!("config.toml: cannot save the watch folder baselines: {e}"));
             }
-        warnings.extend(msgs(&trs_state::cross_check(&docs.cfg, &docs.rules, &docs.profiles)));
+        warnings.extend(msgs(&seedwell_state::cross_check(&docs.cfg, &docs.rules, &docs.profiles)));
 
         let mut base = EngineConfig::default();
         // Under test (the real-home guard's rule) the engine listens on loopback only, never on the network.
@@ -177,7 +177,7 @@ impl Host {
                                 let mut d = shared.lock().unwrap_or_else(|e| e.into_inner());
                                 d.cfg = parsed.value.clone();
                                 let mut w = msgs(&parsed.warnings);
-                                w.extend(msgs(&trs_state::cross_check(&d.cfg, &d.rules, &d.profiles)));
+                                w.extend(msgs(&seedwell_state::cross_check(&d.cfg, &d.rules, &d.profiles)));
                                 (w, PolicyData::new(d.rules.clone(), d.profiles.clone(), d.cfg.transfers.private_min_seed_secs).with_idle(&d.cfg.transfers))
                             };
                             // The private floor lives in config.toml but acts through the policy.
@@ -209,7 +209,7 @@ impl Host {
                                 let mut d = shared.lock().unwrap_or_else(|e| e.into_inner());
                                 d.rules = parsed.value.clone();
                                 let mut w = msgs(&parsed.warnings);
-                                w.extend(msgs(&trs_state::cross_check(&d.cfg, &d.rules, &d.profiles)));
+                                w.extend(msgs(&seedwell_state::cross_check(&d.cfg, &d.rules, &d.profiles)));
                                 (PolicyData::new(d.rules.clone(), d.profiles.clone(), d.cfg.transfers.private_min_seed_secs).with_idle(&d.cfg.transfers), w)
                             };
                             h.apply_policy(policy);
@@ -233,7 +233,7 @@ impl Host {
                                 let mut d = shared.lock().unwrap_or_else(|e| e.into_inner());
                                 d.profiles = parsed.value.clone();
                                 let mut w = msgs(&parsed.warnings);
-                                w.extend(msgs(&trs_state::cross_check(&d.cfg, &d.rules, &d.profiles)));
+                                w.extend(msgs(&seedwell_state::cross_check(&d.cfg, &d.rules, &d.profiles)));
                                 (PolicyData::new(d.rules.clone(), d.profiles.clone(), d.cfg.transfers.private_min_seed_secs).with_idle(&d.cfg.transfers), w)
                             };
                             h.apply_policy(policy);

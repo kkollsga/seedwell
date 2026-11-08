@@ -1,10 +1,10 @@
-//! trs-ffi: the UniFFI surface between the Rust core and the Swift shell.
+//! seedwell-ffi: the UniFFI surface between the Rust core and the Swift shell.
 //!
 //! The UI *pulls* a compact [`Snapshot`] (about once a second, only while something is visible)
 //! and sends commands. The core pushes only rare events through [`CoreListener`]. Everything the
 //! UI needs about transfers goes through the internal [`Backend`] trait: the real engine
-//! (`trs_engine::Host`, in-process) in the app, a simulated library behind `--mock`. Settings,
-//! rules and tracker profiles are read and written straight through `trs-state`, in both modes.
+//! (`seedwell_engine::Host`, in-process) in the app, a simulated library behind `--mock`. Settings,
+//! rules and tracker profiles are read and written straight through `seedwell-state`, in both modes.
 
 mod agent_requests;
 mod app_commands;
@@ -15,6 +15,7 @@ mod battery;
 mod calls;
 mod chat_dialogs;
 mod chat_files;
+mod chat_groups;
 mod chat_images;
 mod chat_markdown;
 mod chat_page;
@@ -86,6 +87,7 @@ pub use agent_requests::{AgentRequestAnswer, AgentRequestRow, AgentRequestsModel
 pub use app_commands::*;
 pub use backend::{AttrRow, Backend, ShutdownInfo};
 pub use chat_dialogs::*;
+pub use chat_groups::{chat_group_failure_title, chat_group_icon_label, chat_new_group_dialog, chat_rename_group_dialog, ChatGroupIcon, SyncChatGroup};
 pub use chat_text::*;
 pub use chooser::*;
 pub use display::RateDirection;
@@ -125,15 +127,15 @@ pub use tracker_page::*;
 pub use types::*;
 pub use ui_watch::*;
 
-use trs_state::rules::TorrentAttrs;
+use seedwell_state::rules::TorrentAttrs;
 
 uniffi::setup_scaffolding!();
 
 /// Blocks of 128 KiB and more are mapped and unmapped directly, so the buffers of a start-up burst
 /// (hash scratch, piece buffers, grown tables) do not stay resident in the system allocator next to
-/// the small long-lived records: about 3.5 MB less footprint for a seeder (`trs_storage::MappedAlloc`).
+/// the small long-lived records: about 3.5 MB less footprint for a seeder (`seedwell_storage::MappedAlloc`).
 #[global_allocator]
-static ALLOC: trs_storage::MappedAlloc = trs_storage::MappedAlloc;
+static ALLOC: seedwell_storage::MappedAlloc = seedwell_storage::MappedAlloc;
 
 /// How to start the core.
 #[derive(Clone, Debug, uniffi::Record)]
@@ -167,14 +169,14 @@ pub const CORE_LOG: &str = "core.log";
 #[derive(uniffi::Object)]
 pub struct Core {
     backend: Arc<dyn Backend>,
-    settings: SettingsStore,
+    settings: Arc<SettingsStore>,
     dir: PathBuf,
     /// An isolated (test) run (`forbidden_root` set): it reaches no real tracker and no real update server.
     isolated: bool,
     /// "On battery" (SPEC §8.4), fed by `power_changed` and by changes of `config.toml`.
     battery: Arc<battery::Battery>,
     /// Where the control server finds the updater (`update.*`), once the host has made one.
-    builds: trs_control::BuildsSlot,
+    builds: seedwell_control::BuildsSlot,
     /// The File Provider extension's server, while the app runs it (`sync_host_start`).
     #[cfg(unix)]
     host: std::sync::Mutex<Option<sync_host::Server>>,
@@ -202,15 +204,17 @@ impl Core {
         // when it would go nowhere: a Windows app has no console, a Mac app started from the Finder writes to
         // /dev/null. A terminal or a test run keeps it.
         let log = dir.join("logs").join(CORE_LOG);
-        match trs_platform::proc::stderr_to_log(&log) {
+        match seedwell_platform::proc::stderr_to_log(&log) {
             Ok(true) => {
                 let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-                eprintln!("seedwell: {} Seedwell {} started (process {})", trs_devlog::iso_time(ms), env!("CARGO_PKG_VERSION"), std::process::id());
+                eprintln!("seedwell: {} Seedwell {} started (process {})", seedwell_devlog::iso_time(ms), env!("CARGO_PKG_VERSION"), std::process::id());
             }
             Ok(false) => {}
             Err(e) => eprintln!("seedwell: standard error could not go to {}: {e}", log.display()),
         }
-        let builds = trs_control::BuildsSlot::new();
+        // The app's updater registers once the host starts it (`Updates::new`), a moment after the socket answers.
+        let builds = seedwell_control::BuildsSlot::expected();
+        let proxy_slot = seedwell_control::ProxySlot::new();
         let backend: Arc<dyn Backend> = if options.mock {
             let _ = std::fs::create_dir_all(&dir);
             mock::MockBackend::start(options.config_dir.clone())
@@ -222,15 +226,18 @@ impl Core {
                 forbidden_root: options.forbidden_root.clone().map(PathBuf::from),
                 secret_vault: vault,
                 builds: builds.clone(),
+                proxy: proxy_slot.clone(),
             })?
         };
         // The Play entries of the first menu need the players: looked up now, in the background.
         player::look_up_players();
-        let battery = Arc::new(battery::Battery::new(backend.clone(), dir.clone()));
+        // One settings store for the core and the battery rule (it keeps what it read while the file stays the same).
+        let settings = Arc::new(SettingsStore::new(&dir));
+        let battery = Arc::new(battery::Battery::new(backend.clone(), settings.clone()));
         let isolated = options.forbidden_root.is_some();
         let core = Arc::new(Self {
             backend,
-            settings: SettingsStore::new(&dir),
+            settings,
             dir,
             isolated,
             battery,
@@ -246,6 +253,8 @@ impl Core {
         });
         // Whether a torrent proxy key is installed: read here, once, so the icon's poll never waits for the Keychain.
         core.proxy_has_key();
+        // `seedwell proxy` takes the same calls as Settings' proxy box.
+        proxy_slot.set(Arc::new(torrent_proxy::ControlHook(Arc::downgrade(&core))));
         Ok(core)
     }
 
@@ -715,7 +724,7 @@ impl Core {
     /// The newest lines of the tracker log that pass `query`, oldest first (a live tail: the shell
     /// calls it about once a second while the viewer is open).
     pub fn tracker_log(&self, query: TrackerLogQuery) -> Vec<TrackerLogRow> {
-        let q = trs_devlog::read::Query {
+        let q = seedwell_devlog::read::Query {
             torrent: None,
             tracker: (!query.tracker.is_empty()).then(|| query.tracker.clone()),
             event: (!query.event.is_empty()).then(|| query.event.clone()),
@@ -723,9 +732,9 @@ impl Core {
             text: (!query.text.is_empty()).then(|| query.text.clone()),
             limit: if query.limit == 0 { 300 } else { query.limit as usize },
         };
-        trs_devlog::read::tail(&self.dir.join("logs"), &q)
+        seedwell_devlog::read::tail(&self.dir.join("logs"), &q)
             .iter()
-            .filter_map(|l| trs_devlog::view::Row::parse(l))
+            .filter_map(|l| seedwell_devlog::view::Row::parse(l))
             .map(|r| TrackerLogRow {
                 ts_ms: r.ts_ms,
                 kind: r.kind,
@@ -792,8 +801,8 @@ impl Core {
     }
 }
 
-fn goal_change_note(g: &trs_state::rules::SeedingGoal) -> String {
-    use trs_state::rules::SeedingGoal as G;
+fn goal_change_note(g: &seedwell_state::rules::SeedingGoal) -> String {
+    use seedwell_state::rules::SeedingGoal as G;
     match g {
         G::StopWhenFinished => "they stop sharing as soon as the download finishes".into(),
         G::Ratio { ratio } => format!("they stay seeding until ratio {ratio:.1}"),
@@ -1027,6 +1036,11 @@ mod tests {
     /// A real core in temporary folders (HOME too: the engine's guard treats it as the real home), with
     /// no watch folder and no port mapping.
     fn real_core() -> (Arc<Core>, PathBuf, [tempfile::TempDir; 2]) {
+        real_core_with(|_| {})
+    }
+
+    /// The same, with `edit` applied to its settings before it starts.
+    fn real_core_with(edit: impl FnOnce(&mut AppSettings)) -> (Arc<Core>, PathBuf, [tempfile::TempDir; 2]) {
         let home = tempfile::tempdir().unwrap();
         let work = tempfile::tempdir().unwrap();
         // SAFETY: set before the core starts any thread; nextest runs every test in its own process.
@@ -1039,9 +1053,61 @@ mod tests {
         st.folders.watch.clear();
         st.network.port_mapping = false;
         st.transfers.start_delay_secs = 0;
+        edit(&mut st);
         store.save_settings(&st).unwrap();
         let options = CoreOptions { config_dir: dir.display().to_string(), mock: false, allow_loopback_trackers: false, forbidden_root: None };
         (Core::new(options).unwrap(), dir, [home, work])
+    }
+
+    /// Records which files the engine reloaded.
+    #[derive(Default)]
+    struct Reloads(std::sync::Mutex<Vec<String>>);
+    impl CoreListener for Reloads {
+        fn on_transfer_finished(&self, _: TransferRow) {}
+        fn on_error(&self, _: Option<String>, _: String) {}
+        fn on_goal_reached(&self, _: TransferRow) {}
+        fn on_needs_choice(&self, _: TransferRow) {}
+        fn on_auto_added(&self, _: AutoAdded) {}
+        fn on_duplicate(&self, _: String, _: String, _: u32) {}
+        fn on_add_request(&self, _: AddRequestInfo) {}
+        fn on_agent_activity(&self, _: AgentActivity) {}
+        fn on_settings_changed(&self, file: String, _: Vec<String>, _: Vec<String>) {
+            self.0.lock().unwrap().push(file);
+        }
+        fn on_settings_rejected(&self, _: String, _: String) {}
+        fn on_locations_changed(&self, _: u32, _: u64) {}
+        fn on_attention_changed(&self) {}
+        fn on_pending_changed(&self) {}
+    }
+
+    /// Failure: a setting an agent changes from the command line (`seedwell settings set`, over the control socket) is
+    /// written but not applied as the Settings window's change is: the host is not told (the Mac and Windows apps
+    /// apply launch at login, keeping the computer awake and the updater when `on_settings_changed` comes, and read
+    /// the settings again), or the engine keeps listening on the old port.
+    #[test]
+    fn a_setting_an_agent_changes_reaches_the_host_and_the_engine() {
+        let (core, dir, _tmp) = real_core_with(|st| st.agents.permission = AgentPermission::Full);
+        let seen = Arc::new(Reloads::default());
+        core.set_listener(seen.clone());
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let changes = serde_json::json!({"general.launch_at_login": true, "general.keep_awake_for_agents": false, "network.listen_port": port, "updates.auto_install": true});
+        rt.block_on(async {
+            let mut c = seedwell_control::Client::connect(dir.join("control.sock"), "agent-test").await.unwrap();
+            let req = seedwell_control::Request::SettingsSet(seedwell_control::proto::SettingsSetParams { changes: changes.as_object().unwrap().clone(), ..Default::default() });
+            c.call(&req).await.unwrap();
+        });
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let told = seen.0.lock().unwrap().iter().any(|f| f == "config.toml");
+            let s = core.settings_load();
+            if told && s.general.launch_at_login && !s.general.keep_awake_for_agents && s.updates.auto_install && core.listen_port() == port {
+                break;
+            }
+            assert!(std::time::Instant::now() < end, "told {told}, settings {:?}, listening on {}", s.general, core.listen_port());
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(core.shutdown(5).finished);
     }
 
     #[test]

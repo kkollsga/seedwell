@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use trs_fswatch::{ActiveBackend, Backend, watch};
+use seedwell_fswatch::{ActiveBackend, Backend, watch};
 
 use crate::common::*;
 
@@ -43,7 +43,7 @@ fn polling_reports_a_rename_as_two_halves() {
     let evs = wait_for(&w, |e| path_event(e, "old").is_some() && path_event(e, "new").is_some());
     // The poller pairs the halves by inode; Windows gives it none, so there it is a remove and a create
     // (hints either way: the consumer stats both paths).
-    use trs_fswatch::Hint::{Created, Removed, Renamed};
+    use seedwell_fswatch::Hint::{Created, Removed, Renamed};
     let (old, new) = if cfg!(unix) { (Renamed, Renamed) } else { (Removed, Created) };
     assert_eq!(path_event(&evs, "old").map(|(k, _)| *k), Some(old));
     assert_eq!(path_event(&evs, "new").map(|(k, _)| *k), Some(new));
@@ -55,9 +55,9 @@ fn polling_reports_the_root_coming_back() {
     let w = watch(&r, opts(FAST)).expect("watch");
     let aside = t.path().join("aside");
     std::fs::rename(&r, &aside).expect("move root away");
-    wait_for(&w, |e| e.contains(&trs_fswatch::RawEvent::RootChanged));
+    wait_for(&w, |e| e.contains(&seedwell_fswatch::RawEvent::RootChanged));
     std::fs::rename(&aside, &r).expect("move root back");
-    wait_for(&w, |e| e.contains(&trs_fswatch::RawEvent::RootChanged));
+    wait_for(&w, |e| e.contains(&seedwell_fswatch::RawEvent::RootChanged));
     // Watching goes on from a fresh baseline.
     std::fs::write(r.join("after"), b"x").expect("write");
     wait_for(&w, |e| covers(e, "after"));

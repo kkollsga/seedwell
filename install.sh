@@ -11,6 +11,8 @@
 #                                     update. --developer-id: it must be signed with Seedwell's Developer ID (team
 #                                     below) and be the installed app's bundle id (a build from a watched folder)
 #   install.sh --rollback --state-dir DIR   put back the app kept in DIR/previous (see below)
+#   install.sh --restart --pid PID    quit the app running as process PID (it must be the installed app) and open it
+#                                     again, as an install does, replacing nothing (`seedwell restart`)
 #
 # With a state folder (--state-dir, or SEEDWELL_INSTALL_STATE_DIR from the app's updater) an install keeps the app it
 # replaces in DIR/previous (a zip, its own installer, its version), when DIR/launch-ok says that app started fine;
@@ -41,7 +43,7 @@ EXE_NAME="SeedwellApp"
 # SEEDWELL_INSTALL_DIR: install somewhere else (tests); default /Applications, else ~/Applications.
 INSTALL_DIR="${SEEDWELL_INSTALL_DIR:-}"
 
-version=""; cli=0; launch=1; uninstall=0; local_zip=""; want_sha=; rollback=0; developer_id=0
+version=""; cli=0; launch=1; uninstall=0; local_zip=""; want_sha=; rollback=0; developer_id=0; restart=0; restart_pid=""
 STATE_DIR="${SEEDWELL_INSTALL_STATE_DIR:-}"
 WATCHDOG_SECS="${SEEDWELL_WATCHDOG_SECS:-120}"
 relaunch_args=()
@@ -59,7 +61,9 @@ while [ $# -gt 0 ]; do
     --zip) local_zip="${2:?--zip needs a file}"; shift ;;
     --sha256) want_sha="${2:?--sha256 needs a value}"; shift ;;
     --developer-id) developer_id=1 ;;
-    -h|--help) sed -n '2,23p' "$0" 2>/dev/null || true; exit 0 ;;
+    --restart) restart=1 ;;
+    --pid) restart_pid="${2:?--pid needs a process id}"; shift ;;
+    -h|--help) sed -n '2,25p' "$0" 2>/dev/null || true; exit 0 ;;
     *) echo "seedwell-install: unknown option $1" >&2; exit 2 ;;
   esac
   shift
@@ -93,13 +97,19 @@ installed_app() {
   done
 }
 
-# A proper quit: Seedwell handles SIGTERM like ⌘Q (engine shutdown, trackers told `stopped`).
+# A proper quit: Seedwell handles SIGTERM like ⌘Q (engine shutdown, trackers told `stopped`). With a second argument,
+# only that process, and only when it is the app at `app` (else nothing is quit and the script stops).
 quit_running() {
-  local app="$1" pid
+  local app="$1" only="${2:-}" pid
   [ -n "$app" ] || return 0
   # -a: include our ancestors. When the app itself runs this script (its updater), the app is our parent,
   # and pgrep leaves out ancestors by default.
-  pid=$(pgrep -a -f "^$app/Contents/MacOS/$EXE_NAME" | head -1 || true)
+  if [ -n "$only" ]; then
+    pgrep -a -f "^$app/Contents/MacOS/$EXE_NAME" | grep -qx -- "$only" || die "process $only is not $app"
+    pid="$only"
+  else
+    pid=$(pgrep -a -f "^$app/Contents/MacOS/$EXE_NAME" | head -1 || true)
+  fi
   [ -n "$pid" ] || return 0
   say "Quitting the running $APP_NAME (trackers are told 'stopped', up to two minutes)"
   kill -TERM "$pid" 2>/dev/null || true
@@ -187,6 +197,20 @@ if [ "$rollback" = 1 ]; then
   [ -n "$app" ] || app="${INSTALL_DIR:-/Applications}/$APP_NAME.app"
   restore_previous "$app"
   say "Done."
+  exit 0
+fi
+
+# `seedwell restart`: the app's own updater starts this; the app quits and opens again, nothing is replaced.
+if [ "$restart" = 1 ]; then
+  case "$restart_pid" in ''|*[!0-9]*) die "--restart needs --pid with the app's process id" ;; esac
+  app=$(installed_app || true)
+  [ -n "$app" ] || die "no $APP_NAME.app in ${INSTALL_DIR:-/Applications}"
+  # The app answers the agent before it is asked to quit.
+  sleep 1
+  say "Restarting $app (process $restart_pid)"
+  quit_running "$app" "$restart_pid"
+  open_app "$app"
+  say "Opened $APP_NAME again"
   exit 0
 fi
 

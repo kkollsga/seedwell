@@ -3,7 +3,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
@@ -27,6 +27,30 @@ static class Choosing
 
     internal static bool? QaShift { get; set; }
 
+    // The Shift captions shown, and the one timer that looks at Shift for them all: the notifier draws its buttons at every tick,
+    // and a timer for each draw was never let go (see Timers).
+    static readonly List<TextBlock> shiftCaptions = [];
+    static Microsoft.UI.Dispatching.DispatcherQueueTimer? shiftTimer;
+
+    static void ShiftCaptionShown(TextBlock caption)
+    {
+        caption.Opacity = ShiftDown ? 1 : 0;
+        shiftCaptions.Add(caption);
+        if (shiftTimer is null)
+        {
+            shiftTimer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
+            shiftTimer.Interval = TimeSpan.FromMilliseconds(100);
+            shiftTimer.Tick += (_, _) => { var shown = ShiftDown ? 1 : 0; foreach (var c in shiftCaptions) c.Opacity = shown; };
+        }
+        shiftTimer.Start();
+    }
+
+    static void ShiftCaptionGone(TextBlock caption)
+    {
+        shiftCaptions.Remove(caption);
+        if (shiftCaptions.Count == 0) shiftTimer?.Stop();
+    }
+
     /// <summary>Start and Cancel, right-aligned, in the Windows order (the primary first: the user's decision); Start the accent button.</summary>
     internal static FrameworkElement HeldButtons(HeldActions a, Action<bool> cancel, Action start)
     {
@@ -46,11 +70,8 @@ static class Choosing
             // "Keep .torrent file" under Cancel while Shift is down (looked at every 100 ms while shown).
             var caption = new TextBlock { Text = keep.Caption, FontSize = Theme.Caption, Foreground = Res("TextFillColorSecondaryBrush"), HorizontalAlignment = HorizontalAlignment.Right, Opacity = 0 };
             cancelColumn.Children.Add(caption);
-            var timer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
-            timer.Interval = TimeSpan.FromMilliseconds(100);
-            timer.Tick += (_, _) => caption.Opacity = ShiftDown ? 1 : 0;
-            cancelColumn.Loaded += (_, _) => { caption.Opacity = ShiftDown ? 1 : 0; timer.Start(); };
-            cancelColumn.Unloaded += (_, _) => timer.Stop();
+            cancelColumn.Loaded += (_, _) => ShiftCaptionShown(caption);
+            cancelColumn.Unloaded += (_, _) => ShiftCaptionGone(caption);
             if (keep.Keys.Contains(HeldKey.ShiftEscape))
             {
                 var shiftEscape = new KeyboardAccelerator { Key = Windows.System.VirtualKey.Escape, Modifiers = Windows.System.VirtualKeyModifiers.Shift };

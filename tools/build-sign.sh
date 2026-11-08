@@ -12,7 +12,7 @@
 #                                      SHA-256) as its system's build; the other system's build stays
 #   tools/build-sign.sh verify <folder>   check <folder>/build.json against the trusted keys, and the zips against it
 #
-# Run it through tools/sysguard/heavy.sh: it builds the signer (trs-buildsig) when it is missing or older than its
+# Run it through tools/sysguard/heavy.sh: it builds the signer (seedwell-buildsig) when it is missing or older than its
 # sources. tools/dev-build.sh --to calls `add` for the Mac's build. A Windows build (app-windows/dev-build.ps1 on the
 # PC) arrives in the folder unsigned; its SHA-256, as the PC's agent posted it in the agent channel, is what `add`
 # signs: never sign a zip whose checksum did not come from its builder.
@@ -28,7 +28,7 @@ die() { echo "build-sign: $*" >&2; exit 1; }
 
 signer() {
   if [ ! -x "$SIGNER" ] || [ -n "$(find "$REPO/crates/buildsig" -newer "$SIGNER" -type f 2>/dev/null | head -1)" ]; then
-    (cd "$REPO" && cargo build --release --locked --quiet -p trs-buildsig --bin seedwell-build-sign) >&2
+    (cd "$REPO" && cargo build --release --locked --quiet -p seedwell-buildsig --bin seedwell-build-sign) >&2
   fi
   "$SIGNER" "$@"
 }

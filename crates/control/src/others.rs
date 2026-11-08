@@ -1,10 +1,10 @@
 //! Another Seedwell on this computer: an app or a daemon with a state folder of its own, found in the process list
-//! (`trs_platform::running`), said in one line for `seedwell status` and the app's Advanced settings. A forgotten one
+//! (`seedwell_platform::running`), said in one line for `seedwell status` and the app's Advanced settings. A forgotten one
 //! keeps its own torrents, folders and chats running, and holds ports: the user should know. Nothing is stopped.
 
 use std::path::Path;
 
-use trs_platform::running::{OtherSeedwell, SeedwellKind};
+use seedwell_platform::running::{OtherSeedwell, SeedwellKind};
 
 /// One line about the other Seedwells; `None` when there are none.
 pub fn line(others: &[OtherSeedwell]) -> Option<String> {
@@ -14,15 +14,15 @@ pub fn line(others: &[OtherSeedwell]) -> Option<String> {
             SeedwellKind::Daemon => "a daemon",
         };
         match &o.state_dir {
-            Some(d) => format!("{what} (process {}) with the state folder {}", o.pid, trs_platform::dirs::shown(d)),
+            Some(d) => format!("{what} (process {}) with the state folder {}", o.pid, seedwell_platform::dirs::shown(d)),
             None => format!("{what} (process {}, its state folder unknown)", o.pid),
         }
     };
     let list: Vec<String> = others.iter().map(one).collect();
     let head = match list.len() {
         0 => return None,
-        1 => concat!("Another Seedwell is running on this ", trs_platform::computer!(), ": ").to_owned(),
-        n => format!(concat!("{} other Seedwells are running on this ", trs_platform::computer!(), ": "), n),
+        1 => concat!("Another Seedwell is running on this ", seedwell_platform::computer!(), ": ").to_owned(),
+        n => format!(concat!("{} other Seedwells are running on this ", seedwell_platform::computer!(), ": "), n),
     };
     let them = if list.len() == 1 { "It keeps" } else { "Each keeps" };
     Some(format!(
@@ -33,7 +33,7 @@ pub fn line(others: &[OtherSeedwell]) -> Option<String> {
 
 /// [`line`] for this process, whose state folder is `mine`, from the process list now.
 pub fn line_now(mine: &Path) -> Option<String> {
-    line(&trs_platform::running::other_seedwells_now(mine))
+    line(&seedwell_platform::running::other_seedwells_now(mine))
 }
 
 #[cfg(test)]
@@ -47,7 +47,7 @@ mod tests {
 
     #[test]
     fn one_line_names_each_other_seedwell_and_its_state_folder() {
-        let pc = trs_platform::computer!();
+        let pc = seedwell_platform::computer!();
         assert_eq!(line(&[]), None);
         assert_eq!(
             line(&[other(4120, SeedwellKind::Daemon, Some("/srv/old"))]).unwrap(),

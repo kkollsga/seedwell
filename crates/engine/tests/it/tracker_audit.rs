@@ -3,7 +3,7 @@ use crate::common;
 use std::time::Duration;
 
 use common::*;
-use trs_engine::*;
+use seedwell_engine::*;
 
 fn param<'a>(a: &'a Announce, k: &str) -> Option<&'a str> {
     a.raw_query.split('&').find_map(|kv| kv.strip_prefix(&format!("{k}=")))
@@ -77,7 +77,7 @@ async fn announce_sequence_counters_and_identity() {
     assert_eq!((log[4].uploaded, log[4].downloaded, log[4].left), (0, 0, 0));
     // identity: one key and one peer id for the whole process, across pause/resume
     assert!(log.iter().all(|a| a.key == log[0].key && a.peer_id == log[0].peer_id));
-    assert!(log[0].peer_id.starts_with(&trs_metainfo::PEER_ID_PREFIX));
+    assert!(log[0].peer_id.starts_with(&seedwell_metainfo::PEER_ID_PREFIX));
     assert!(log[0].peer_id[8..].iter().all(u8::is_ascii_alphanumeric));
     // wire format (SPEC 12 #18): Transmission-style order, nothing exotic
     let o = order(&log[0]);
@@ -139,7 +139,7 @@ async fn regular_announce_follows_the_interval() {
 
 /// The `network.encryption` policy reaches the HTTP announce: prefer = `supportcrypto=1`,
 /// require = `supportcrypto=1&requirecrypto=1`, off = neither, always between `compact` and `event`.
-async fn started_query(policy: trs_engine::config::EncryptionPolicy, seed: u64) -> String {
+async fn started_query(policy: seedwell_engine::config::EncryptionPolicy, seed: u64) -> String {
     let tracker = MockTracker::start(60).await;
     let t = standard_torrent(0, Some(tracker.url()), false, seed);
     let mut n = node(|c| {
@@ -157,7 +157,7 @@ async fn started_query(policy: trs_engine::config::EncryptionPolicy, seed: u64) 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn encryption_policy_is_advertised_to_http_trackers() {
-    use trs_engine::config::EncryptionPolicy as Enc;
+    use seedwell_engine::config::EncryptionPolicy as Enc;
     let q = started_query(Enc::Prefer, 231).await;
     assert!(q.contains("&compact=1&supportcrypto=1&event=started"), "{q}");
     assert!(!q.contains("requirecrypto"), "{q}");
@@ -170,7 +170,7 @@ async fn encryption_policy_is_advertised_to_http_trackers() {
 /// A settings change is picked up by the next announce without causing one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn encryption_change_applies_from_the_next_announce_without_an_extra_one() {
-    use trs_engine::config::EncryptionPolicy as Enc;
+    use seedwell_engine::config::EncryptionPolicy as Enc;
     let tracker = MockTracker::start(60).await;
     let t = standard_torrent(0, Some(tracker.url()), false, 234);
     let mut n = node(|c| {

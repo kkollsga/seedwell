@@ -4,15 +4,15 @@
 //! These calls are the app's own: no method of the agent interface reaches them (an agent never pairs, confirms,
 //! removes, follows, leaves or starts over, at any level), and nothing here shows the user key.
 
-use trs_platform::computer;
-use trs_sync_net::SyncHandle;
-use trs_sync_net::devices::{DevicesState, DevicesStatus, FollowState, RemovePlan};
-use trs_sync_proto::ids::{DeviceId, FolderId};
-use trs_sync_proto::members::{InviteLink, Role};
+use seedwell_platform::computer;
+use seedwell_sync_net::SyncHandle;
+use seedwell_sync_net::devices::{DevicesState, DevicesStatus, FollowState, RemovePlan};
+use seedwell_sync_proto::ids::{DeviceId, FolderId};
+use seedwell_sync_proto::members::{InviteLink, Role};
 
 use crate::backend::Backend;
 use crate::Core;
-use trs_control::display as d;
+use seedwell_control::display as d;
 use crate::sync::readable;
 use crate::types::CoreError;
 
@@ -163,7 +163,8 @@ pub(crate) fn follow_line_for(backend: &dyn Backend, id: &str) -> FollowLine {
     let hidden = follow(false, false, false, String::new());
     let Some((h, _)) = backend.sync().service() else { return hidden };
     let Ok(fid) = id.parse::<FolderId>() else { return hidden };
-    let channel = h.channel_status(&fid).is_some();
+    // (Not the channel's status: that counts its messages, and the Share dialog draws this line on the UI thread.)
+    let channel = h.share_brief(&fid).is_some_and(|b| b.channel);
     h.follow_state(&fid).map(|f| follow_line_of(&f, channel)).unwrap_or(hidden)
 }
 
@@ -360,10 +361,10 @@ pub(crate) fn follow_line_new(others: &[String], channel: bool) -> FollowLine {
     follow(shown, shown && channel, shown, line)
 }
 
-fn devices_err(e: trs_sync_net::SyncError) -> CoreError {
+fn devices_err(e: seedwell_sync_net::SyncError) -> CoreError {
     match e {
-        trs_sync_net::SyncError::NotFound => CoreError::Failed { message: "That device is no longer one of your devices.".into() },
-        other => CoreError::Failed { message: readable(&trs_control::redact::scrub_keys(&other.to_string())) },
+        seedwell_sync_net::SyncError::NotFound => CoreError::Failed { message: "That device is no longer one of your devices.".into() },
+        other => CoreError::Failed { message: readable(&seedwell_control::redact::scrub_keys(&other.to_string())) },
     }
 }
 
@@ -504,7 +505,7 @@ impl Core {
 
 #[cfg(test)]
 mod tests {
-    use trs_sync_net::devices::{OwnDevice, PairRequestInfo, Place};
+    use seedwell_sync_net::devices::{OwnDevice, PairRequestInfo, Place};
 
     use super::*;
 

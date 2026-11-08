@@ -1,5 +1,5 @@
 [package]
-name = "trs-sync-proto-fuzz"
+name = "seedwell-sync-proto-fuzz"
 version = "0.0.0"
 edition = "2024"
 publish = false
@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-trs-sync-proto = { path = ".." }
+seedwell-sync-proto = { path = ".." }
 
 # Standalone: not part of the Seedwell workspace (fuzzers need nightly and libFuzzer).
 [workspace]

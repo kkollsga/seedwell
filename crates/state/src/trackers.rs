@@ -24,7 +24,7 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use trs_classify::Category;
+use seedwell_classify::Category;
 
 use crate::config::{CategoryLocations, LocationOverride, check_path, check_range};
 use crate::doc::{Document, Parsed, parse_toml, render_table};

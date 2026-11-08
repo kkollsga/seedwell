@@ -249,6 +249,24 @@ pub struct ChannelEntry {
     /// The devices met in it.
     #[serde(rename = "device")]
     pub devices: Vec<SpaceDevice>,
+    /// The sidebar group it is listed under on this device (a [`ChatGroupEntry::id`]; empty: none). This device's
+    /// own, like `muted`: never signed into the channel or sent to another device.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub group: String,
+}
+
+/// A group of channels in this device's sidebar (`[[chat_group]]`, in the user's order): a name and an icon the
+/// channels with its id in [`ChannelEntry::group`] are listed under. This device's own; deleting it only returns its
+/// channels to the plain list.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatGroupEntry {
+    /// Its id (hex, made here).
+    pub id: String,
+    /// Its name.
+    pub name: String,
+    /// Its icon's name ([`crate::chat_groups::GROUP_ICONS`]; one this version does not know is drawn as the default).
+    pub icon: String,
 }
 
 /// This device's group of the user's own devices (`[my_devices]`, 0.1.13): the group, the devices met in it, and what
@@ -269,7 +287,7 @@ pub struct MyDevicesEntry {
     /// joined again by themselves.
     pub skip: Vec<String>,
     /// How a folder that follows is joined here: `full` (written for 0.1.13; since 0.1.14 a folder joins on demand when
-    /// it is on demand on the device that put it on all devices, [`trs_sync_proto::members::FOLLOW_ON_DEMAND`]).
+    /// it is on demand on the device that put it on all devices, [`seedwell_sync_proto::members::FOLLOW_ON_DEMAND`]).
     pub mode: String,
     /// The groups this one moved on from (its key changed after a removal), oldest first, at most
     /// [`MAX_PREVIOUS_GROUPS`]: their memberships stay (without their keys) to tell a device that was away where the
@@ -352,6 +370,9 @@ pub struct SyncConfig {
     /// The channels.
     #[serde(rename = "channel")]
     pub channels: Vec<ChannelEntry>,
+    /// The sidebar's groups of channels, in the user's order (none in a file written before them).
+    #[serde(rename = "chat_group", skip_serializing_if = "Vec::is_empty")]
+    pub chat_groups: Vec<ChatGroupEntry>,
     /// The private conversations.
     #[serde(rename = "conversation")]
     pub conversations: Vec<ConversationEntry>,
@@ -375,6 +396,7 @@ impl Default for SyncConfig {
             direct: DirectEntry::default(),
             folders: Vec::new(),
             channels: Vec::new(),
+            chat_groups: Vec::new(),
             conversations: Vec::new(),
             my_devices: None,
             devices: Vec::new(),
@@ -522,6 +544,33 @@ mod tests {
         // Removing the folder forgets Bo there; the channel keeps its own record.
         c.folders.clear();
         assert_eq!(c.all_devices().count(), 1);
+    }
+
+    /// Catches the sidebar's groups being lost by a save and load (or written into a file without any), and a file
+    /// written before them failing to load or gaining a group.
+    #[test]
+    fn chat_groups_survive_a_save_and_a_file_without_them_loads_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sync.toml");
+        // As 0.1.20 wrote it: channels, no groups.
+        std::fs::write(&p, "[[channel]]\nid = \"C\"\nname = \"Team\"\nmuted = true\n").unwrap();
+        let old = SyncConfig::load(&p).unwrap();
+        assert!(old.chat_groups.is_empty() && old.channels[0].group.is_empty() && old.channels[0].muted);
+        old.save(&p).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(!text.contains("chat_group") && !text.contains("group ="), "nothing written for no groups:\n{text}");
+        assert_eq!(SyncConfig::load(&p).unwrap(), old);
+
+        let mut c = old;
+        c.chat_groups = vec![
+            ChatGroupEntry { id: "a1".into(), name: "Agents".into(), icon: "sparkles".into() },
+            ChatGroupEntry { id: "b2".into(), name: "Home".into(), icon: "house".into() },
+        ];
+        c.channels[0].group = "a1".into();
+        c.save(&p).unwrap();
+        let back = SyncConfig::load(&p).unwrap();
+        assert_eq!(back, c, "the groups, their order and the channel's group");
+        assert_eq!(back.chat_groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(), ["Agents", "Home"]);
     }
 
     #[test]

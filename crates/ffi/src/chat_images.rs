@@ -16,9 +16,9 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use trs_sync_net::SyncHandle;
-use trs_sync_net::chat::AttachmentInfo;
-use trs_sync_net::room::Place;
+use seedwell_sync_net::SyncHandle;
+use seedwell_sync_net::chat::AttachmentInfo;
+use seedwell_sync_net::room::Place;
 
 use crate::Core;
 use crate::chat_files::ChatFileIcon;
@@ -142,20 +142,20 @@ fn failed(msg: impl Into<String>) -> CoreError {
     CoreError::Failed { message: msg.into() }
 }
 
-fn kind_of(k: Option<trs_media::Kind>) -> ChatImageKind {
+fn kind_of(k: Option<seedwell_media::Kind>) -> ChatImageKind {
     match k {
-        Some(trs_media::Kind::Png) => ChatImageKind::Png,
-        Some(trs_media::Kind::Jpeg) => ChatImageKind::Jpeg,
-        Some(trs_media::Kind::Gif) => ChatImageKind::Gif,
-        Some(trs_media::Kind::Webp) => ChatImageKind::Webp,
-        Some(trs_media::Kind::Svg) => ChatImageKind::Svg,
+        Some(seedwell_media::Kind::Png) => ChatImageKind::Png,
+        Some(seedwell_media::Kind::Jpeg) => ChatImageKind::Jpeg,
+        Some(seedwell_media::Kind::Gif) => ChatImageKind::Gif,
+        Some(seedwell_media::Kind::Webp) => ChatImageKind::Webp,
+        Some(seedwell_media::Kind::Svg) => ChatImageKind::Svg,
         None => ChatImageKind::Other,
     }
 }
 
 /// "name · W × H · size".
 fn caption(name: &str, width: u32, height: u32, size: u64) -> String {
-    format!("{name} · {width} × {height} · {}", trs_media::size_text(size))
+    format!("{name} · {width} × {height} · {}", seedwell_media::size_text(size))
 }
 
 /// An image of a message for the host. `waiting`: no other member of the channel is connected now.
@@ -173,7 +173,7 @@ pub(crate) fn image_of(a: &AttachmentInfo, waiting: bool) -> ChatImage {
         ChatImageState::Fetching if waiting => "Waiting for a device that has this image to come online".into(),
         ChatImageState::Fetching => "Downloading…".into(),
         ChatImageState::NotDownloaded => "Not downloaded".into(),
-        ChatImageState::TooLarge => format!("Too large to show ({})", trs_media::size_text(a.size)),
+        ChatImageState::TooLarge => format!("Too large to show ({})", seedwell_media::size_text(a.size)),
         ChatImageState::Failed if kind.is_none() => "This image needs a newer Seedwell".into(),
         ChatImageState::Failed => format!("Cannot be shown: {}", a.problem.as_deref().unwrap_or("it is damaged")),
     };
@@ -193,7 +193,7 @@ pub(crate) fn image_of(a: &AttachmentInfo, waiting: bool) -> ChatImage {
 
 /// The labels (the same on every host).
 pub(crate) fn texts() -> ChatImageTexts {
-    let max = trs_sync_proto::attach::MAX_ATTACHMENTS as u32;
+    let max = seedwell_sync_proto::attach::MAX_ATTACHMENTS as u32;
     ChatImageTexts {
         attach: "Attach Files…".into(),
         attach_help: "Attach files of any kind and size, also by pasting or dragging them here. Images are shown in the conversation; other files are shared from where they are, and others download them when they choose.".into(),
@@ -225,9 +225,9 @@ fn bytes_of(i: &ChatImageInput) -> Result<Option<Vec<u8>>, CoreError> {
         (None, Some(p)) => {
             let m = std::fs::metadata(p).map_err(|e| failed(format!("{shown}: {e}")))?;
             if m.is_dir() {
-                return Err(failed(trs_sync_net::attachments::folder_refused(&shown)));
+                return Err(failed(seedwell_sync_net::attachments::folder_refused(&shown)));
             }
-            if m.len() > trs_media::MAX_IMAGE as u64 {
+            if m.len() > seedwell_media::MAX_IMAGE as u64 {
                 return Ok(None);
             }
             std::fs::read(p).map(Some).map_err(|e| failed(format!("{shown}: {e}")))
@@ -238,9 +238,9 @@ fn bytes_of(i: &ChatImageInput) -> Result<Option<Vec<u8>>, CoreError> {
 
 /// A file's chip: it goes as a file of `size` bytes, under its own name.
 fn file_draft(name: &str, size: u64) -> ChatImageDraft {
-    let name = trs_sync_proto::attach::safe_name(&shown(name));
+    let name = seedwell_sync_proto::attach::safe_name(&shown(name));
     ChatImageDraft {
-        caption: format!("{name} · {}", trs_media::size_text(size)),
+        caption: format!("{name} · {}", seedwell_media::size_text(size)),
         icon: crate::chat_files::icon_of(&name),
         name,
         file: true,
@@ -259,13 +259,13 @@ fn check(image: &ChatImageInput) -> Result<ChatImageDraft, CoreError> {
         Ok(file_draft(&image.name, size))
     };
     let Some(bytes) = bytes_of(image)? else { return as_file(image.path.as_deref().unwrap_or_default()) };
-    let p = match (trs_media::prepare(&image.name, &bytes), image.path.as_deref()) {
+    let p = match (seedwell_media::prepare(&image.name, &bytes), image.path.as_deref()) {
         (Ok(p), _) => p,
         // A file that is no image (or none this version sends as one) goes as a file.
         (Err(_), Some(path)) => return as_file(path),
         (Err(e), None) => return Err(failed(format!("{}: {e}", shown(&image.name)))),
     };
-    let preview_png = trs_media::thumb_png(&p.thumb).map(|v| v.bytes).unwrap_or_default();
+    let preview_png = seedwell_media::thumb_png(&p.thumb).map(|v| v.bytes).unwrap_or_default();
     Ok(ChatImageDraft {
         caption: caption(&p.name, p.width, p.height, p.bytes.len() as u64),
         icon: ChatFileIcon::Image,
@@ -318,12 +318,12 @@ pub(crate) const SAMPLE_SVG: &str = concat!(
 /// [`Core::chat_image_view`] for them (0: as large as they are, up to 4096).
 #[uniffi::export]
 pub fn chat_image_samples(max_side: u32) -> ChatImageSamples {
-    let picture = trs_media::prepare("Fjord.svg", SAMPLE_SVG.as_bytes()).ok();
-    let preview = picture.as_ref().and_then(|p| trs_media::thumb_png(&p.thumb).ok()).map(view_of);
-    let view = picture.as_ref().and_then(|p| trs_media::render(p.kind, &p.bytes, max_side).ok()).map(view_of);
+    let picture = seedwell_media::prepare("Fjord.svg", SAMPLE_SVG.as_bytes()).ok();
+    let preview = picture.as_ref().and_then(|p| seedwell_media::thumb_png(&p.thumb).ok()).map(view_of);
+    let view = picture.as_ref().and_then(|p| seedwell_media::render(p.kind, &p.bytes, max_side).ok()).map(view_of);
     let thumb = picture.as_ref().map(|p| p.thumb.clone()).unwrap_or_default();
     let info = |name: &str, kind: &str, size: u64, state: &str, problem: Option<&str>, thumb: &[u8]| AttachmentInfo {
-        hash: trs_sync_proto::members::hex(&trs_sync_net::blobs::sha256(format!("{name}/{state}").as_bytes())),
+        hash: seedwell_sync_proto::members::hex(&seedwell_sync_net::blobs::sha256(format!("{name}/{state}").as_bytes())),
         kind: kind.into(),
         name: name.into(),
         size,
@@ -413,9 +413,9 @@ pub fn chat_image_layout_samples(max_side: u32) -> Vec<ChatImageSample> {
         .map(|(n, &(label, w, h))| {
             let svg = layout_svg(w, h, n);
             let name = format!("{}.svg", label.replace('-', " "));
-            let picture = trs_media::prepare(&name, svg.as_bytes()).ok();
+            let picture = seedwell_media::prepare(&name, svg.as_bytes()).ok();
             let a = AttachmentInfo {
-                hash: trs_sync_proto::members::hex(&trs_sync_net::blobs::sha256(format!("layout/{label}").as_bytes())),
+                hash: seedwell_sync_proto::members::hex(&seedwell_sync_net::blobs::sha256(format!("layout/{label}").as_bytes())),
                 kind: "svg".into(),
                 name,
                 size: svg.len() as u64,
@@ -432,7 +432,7 @@ pub fn chat_image_layout_samples(max_side: u32) -> Vec<ChatImageSample> {
             let side = max_side.min(w.max(h));
             ChatImageSample {
                 label: label.into(),
-                view: picture.as_ref().and_then(|p| trs_media::render(p.kind, &p.bytes, side).ok()).map(view_of),
+                view: picture.as_ref().and_then(|p| seedwell_media::render(p.kind, &p.bytes, side).ok()).map(view_of),
                 preview: None,
                 image: image_of(&a, false),
             }
@@ -446,7 +446,7 @@ pub fn chat_gallery_counter(active: u32, count: u32) -> String {
     format!("{active} / {count}")
 }
 
-fn view_of(v: trs_media::View) -> ChatImageView {
+fn view_of(v: seedwell_media::View) -> ChatImageView {
     ChatImageView { bytes: v.bytes, mime: v.mime.into(), width: v.width, height: v.height }
 }
 
@@ -484,8 +484,8 @@ fn channel(id: &str) -> Result<Place, CoreError> {
     crate::chat_files::place(id)
 }
 
-fn sync_failed(e: trs_sync_net::SyncError) -> CoreError {
-    failed(trs_control::redact::scrub_keys(&e.to_string()))
+fn sync_failed(e: seedwell_sync_net::SyncError) -> CoreError {
+    failed(seedwell_control::redact::scrub_keys(&e.to_string()))
 }
 
 impl Core {
@@ -502,7 +502,7 @@ impl Core {
     pub fn chat_image_preview(&self, channel_id: String, hash: String) -> Option<ChatImageView> {
         let (h, _) = self.chat_service().ok()?;
         let jpeg = h.chat_attachment_preview(channel(&channel_id).ok()?, &hash).ok()?;
-        (!jpeg.is_empty()).then(|| trs_media::thumb_png(&jpeg).ok().map(view_of)).flatten()
+        (!jpeg.is_empty()).then(|| seedwell_media::thumb_png(&jpeg).ok().map(view_of)).flatten()
     }
 
     /// The picture of an image that is here, at most `max_side` pixels on its longest side (0: as large as it is, up
@@ -516,7 +516,7 @@ impl Core {
         }
         let (h, _) = self.chat_service().ok()?;
         let (info, bytes) = h.chat_attachment(channel(&channel_id).ok()?, &hash).ok()?;
-        let view = Arc::new(view_of(trs_media::render(info.media_kind()?, &bytes?, max_side).ok()?));
+        let view = Arc::new(view_of(seedwell_media::render(info.media_kind()?, &bytes?, max_side).ok()?));
         remember(key, view.clone());
         Some((*view).clone())
     }
@@ -534,8 +534,8 @@ impl Core {
         let (h, _) = self.chat_service()?;
         let (info, bytes) = h.chat_attachment(channel(&channel_id)?, &hash).map_err(sync_failed)?;
         let bytes = bytes.ok_or_else(|| failed("The image is not on this computer yet."))?;
-        let out = if as_png && info.media_kind() == Some(trs_media::Kind::Svg) {
-            trs_media::render(trs_media::Kind::Svg, &bytes, 0).map_err(|e| failed(e.to_string()))?.bytes
+        let out = if as_png && info.media_kind() == Some(seedwell_media::Kind::Svg) {
+            seedwell_media::render(seedwell_media::Kind::Svg, &bytes, 0).map_err(|e| failed(e.to_string()))?.bytes
         } else {
             bytes.to_vec()
         };
@@ -628,13 +628,13 @@ mod tests {
         }
         for i in &s.images[..6] {
             let p = i.preview.as_ref().unwrap_or_else(|| panic!("{} has a preview", i.label));
-            assert!(p.bytes.starts_with(b"\x89PNG") && p.width <= trs_media::THUMB_SIDE * 2, "{}", i.label);
+            assert!(p.bytes.starts_with(b"\x89PNG") && p.width <= seedwell_media::THUMB_SIDE * 2, "{}", i.label);
         }
         assert_eq!((s.images[6].preview.as_ref(), s.images[6].image.status.as_str()), (None, "This image needs a newer Seedwell"));
         assert_eq!(s.images[2].image.status, "Waiting for a device that has this image to come online");
         assert_eq!(s.images[4].image.status, "Too large to show (48 MB)");
         let chips: Vec<(bool, &str)> = s.drafts.iter().map(|d| (d.file, d.caption.as_str())).collect();
-        assert_eq!(chips, [(false, format!("Fjord.svg · 1200 × 800 · {}", trs_media::size_text(SAMPLE_SVG.len() as u64)).as_str()), (true, "Film.mov · 1.2 GB")]);
+        assert_eq!(chips, [(false, format!("Fjord.svg · 1200 × 800 · {}", seedwell_media::size_text(SAMPLE_SVG.len() as u64)).as_str()), (true, "Film.mov · 1.2 GB")]);
         assert!(s.drafts[0].preview_png.starts_with(b"\x89PNG"));
         assert_eq!(s.texts, texts());
     }
@@ -657,7 +657,7 @@ mod tests {
     fn a_file_larger_than_any_image_is_left_unread_and_a_folder_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("big.png");
-        std::fs::File::create(&p).unwrap().set_len(trs_media::MAX_IMAGE as u64 + 1).unwrap();
+        std::fs::File::create(&p).unwrap().set_len(seedwell_media::MAX_IMAGE as u64 + 1).unwrap();
         assert_eq!(bytes_of(&ChatImageInput { name: "big.png".into(), path: Some(p.display().to_string()), bytes: None }).unwrap(), None, "it goes as a file");
         let e = bytes_of(&ChatImageInput { name: "Photos".into(), path: Some(dir.path().display().to_string()), bytes: None }).unwrap_err();
         assert_eq!(e.to_string(), "Photos is a folder. Only files can be attached; to share a folder, use Folder Sync.");

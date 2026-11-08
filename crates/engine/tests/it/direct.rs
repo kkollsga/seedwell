@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use common::*;
-use trs_engine::config::DetectionConfig;
-use trs_engine::*;
+use seedwell_engine::config::DetectionConfig;
+use seedwell_engine::*;
 
 /// Books finish in the plain folder `<lib>/Books`.
 fn organizer(lib: &Path) -> impl FnOnce(&mut EngineConfig) + use<> {
@@ -61,7 +61,7 @@ async fn a_direct_download_completes_goes_to_its_categorys_folder_and_is_not_sha
 /// when the new category has none. The row follows, and nothing is copied or left behind.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_finished_direct_download_in_a_plain_folder_follows_a_category_change() {
-    use trs_engine::config::CategoryLocation;
+    use seedwell_engine::config::CategoryLocation;
     let body = pattern_bytes(300_000, 7);
     let srv = serve_files(vec![ServedFile::new("/report.bin", body.clone())]).await;
     let (state, dl, books, soft) =

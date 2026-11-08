@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use trs_state::{ResumeData, TorrentRecord};
+use seedwell_state::{ResumeData, TorrentRecord};
 
 // Binary records read from state.redb: decoding must not panic, and what decodes must re-encode stably.
 fuzz_target!(|data: &[u8]| {

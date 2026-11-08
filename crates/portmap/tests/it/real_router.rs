@@ -1,5 +1,5 @@
 //! Talks to the real local router. `#[ignore]`d: run with
-//! `cargo test -p trs-portmap --test real_router -- --ignored --nocapture`.
+//! `cargo test -p seedwell-portmap --test real_router -- --ignored --nocapture`.
 //!
 //! It only *reads*: NAT-PMP external-address request, a PCP ANNOUNCE (opcode 0, creates
 //! nothing) and UPnP `GetExternalIPAddress`. No mapping is ever created here.
@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
-use trs_portmap::{gateway, http, natpmp, pcp, ssdp, upnp};
+use seedwell_portmap::{gateway, http, natpmp, pcp, ssdp, upnp};
 
 async fn udp_exchange(
     sock: &UdpSocket,

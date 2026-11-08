@@ -4,12 +4,12 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use trs_metainfo::Metainfo;
-use trs_storage::{
+use seedwell_metainfo::Metainfo;
+use seedwell_storage::{
     FileFingerprint, FilePath, FileSpec, FileStatus, Layout, Location, Mode, RecheckOptions,
     TorrentConfig,
 };
-use trs_wire::Bitfield;
+use seedwell_wire::Bitfield;
 
 use super::{Meta, ReadyInfo, Torrent, TorrentCmd, TorrentMsg, TorrentReport};
 use crate::peer::{DiskCtx, SharedHave};
@@ -69,7 +69,7 @@ pub(crate) fn build_layout(mi: &Metainfo, placement: Option<&Placement>) -> Resu
 }
 
 /// Zero-length files get no piece and so no write; create them so the folder is complete.
-fn create_empty_files(mi: &Metainfo, handle: &trs_storage::TorrentHandle) -> std::io::Result<()> {
+fn create_empty_files(mi: &Metainfo, handle: &seedwell_storage::TorrentHandle) -> std::io::Result<()> {
     for f in mi.files() {
         if f.length != 0 || f.is_padding() || f.is_symlink() {
             continue;
@@ -380,7 +380,7 @@ impl Torrent {
         if !complete || !staged {
             if !complete {
                 handle.ensure_root().map_err(|e| match e {
-                    trs_storage::StorageError::MissingRoot => {
+                    seedwell_storage::StorageError::MissingRoot => {
                         Fail::Missing("the save location is not available".into())
                     }
                     other => Fail::Error(other.to_string()),
@@ -443,7 +443,7 @@ impl Torrent {
     /// Resume data accepted? `Ok(None)` means "recheck instead".
     async fn validate_resume(
         &mut self,
-        handle: &trs_storage::TorrentHandle,
+        handle: &seedwell_storage::TorrentHandle,
         layout: &Arc<Layout>,
         r: &ResumeRecord,
         piece_count: u32,
@@ -526,7 +526,7 @@ pub(crate) fn space_shortfall(override_free: Option<u64>, dest: &std::path::Path
     if need == 0 {
         return None;
     }
-    let free = override_free.or_else(|| trs_storage::available_space(dest).ok())?;
+    let free = override_free.or_else(|| seedwell_storage::available_space(dest).ok())?;
     (need > free).then(|| {
         format!("Not enough space: {} still to download, {} free", human_bytes(need), human_bytes(free))
     })
@@ -549,6 +549,6 @@ fn piece_size(mi: &Metainfo, i: u32) -> u32 {
 
 pub(super) fn display_path(layout: &Layout, i: usize) -> String {
     match layout.file_path(i) {
-        trs_storage::PathRef::Relative(p) | trs_storage::PathRef::Absolute(p) => p.to_string_lossy().into_owned(),
+        seedwell_storage::PathRef::Relative(p) | seedwell_storage::PathRef::Absolute(p) => p.to_string_lossy().into_owned(),
     }
 }

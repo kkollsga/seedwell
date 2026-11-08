@@ -84,14 +84,14 @@ On B (the PC, in place), with A full:
 
 ## Tests (Mac, in-process)
 
-- `trs-sync-net` `ondemand::a_folder_deleted_elsewhere_that_the_host_kept_stays_out_until_a_synced_file_comes`: the
+- `seedwell-sync-net` `ondemand::a_folder_deleted_elsewhere_that_the_host_kept_stays_out_until_a_synced_file_comes`: the
   host's steps in its order (placeholders filled, the temp file in a folder below, A's delete, the placeholders
   removed, a restart, the sweep's offer twice, a later change that reaches A while the kept folder never does, a
   synced file adopted with its folder and then again, the folder below still kept with its issue, a new folder and a
   re-made one of this device's own, the folder below made anew by A, whose issue goes, then deleted for real, whose
   issue does not come back). It fails on master (the folder is recorded), without the second-adoption rule (a
   conflict copy), and with the issue pruned only in the snapshot's copy (a stale issue).
-- `trs-sync-net` `ondemand::a_kept_folder_stays_out_empty_and_a_new_one_at_a_deleted_name_is_synced`: the issue goes
+- `seedwell-sync-net` `ondemand::a_kept_folder_stays_out_empty_and_a_new_one_at_a_deleted_name_is_synced`: the issue goes
   once the temp file does (no offer from the host), the emptied kept folder still stays out, and an empty folder made
   later at a deleted name reaches A. Fails before the follow-up fixes (the issue stays; the new folder is `Ignored`).
-- `trs-sync-net` `shared::tests::a_kept_folders_issue_is_one_and_goes_alone`: another issue at the same path stays.
+- `seedwell-sync-net` `shared::tests::a_kept_folders_issue_is_one_and_goes_alone`: another issue at the same path stays.

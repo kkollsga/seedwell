@@ -6,16 +6,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
-use trs_sync::clock::Clock;
-use trs_sync::folder::{FolderConfig, FolderCore, RemoteIndex};
-use trs_sync::fs::{FileHandle, Fs, Listing, MemFs, MemFsOptions, Meta, read_all, write_all};
-use trs_sync::ignore::Ignore;
-use trs_sync::index::MemStore;
-use trs_sync::pull::{ChunkRequest, ChunkSource, FetchError, PullReport};
-use trs_sync_proto::device::DeviceKey;
+use seedwell_sync::clock::Clock;
+use seedwell_sync::folder::{FolderConfig, FolderCore, RemoteIndex};
+use seedwell_sync::fs::{FileHandle, Fs, Listing, MemFs, MemFsOptions, Meta, read_all, write_all};
+use seedwell_sync::ignore::Ignore;
+use seedwell_sync::index::MemStore;
+use seedwell_sync::pull::{ChunkRequest, ChunkSource, FetchError, PullReport};
+use seedwell_sync_proto::device::DeviceKey;
 
 use crate::flow::{Key, learn_writers};
-use trs_sync_proto::ids::ShortId;
+use seedwell_sync_proto::ids::ShortId;
 
 const S: i64 = 1_000_000_000;
 
@@ -176,8 +176,8 @@ fn contents(fs: &MemFs) -> Vec<Vec<u8>> {
                 continue;
             }
             match fs.lstat(&p).unwrap().unwrap().kind {
-                trs_sync_proto::model::FileKind::Dir => stack.push(p),
-                trs_sync_proto::model::FileKind::File => out.push(read_all(fs, &p).unwrap()),
+                seedwell_sync_proto::model::FileKind::Dir => stack.push(p),
+                seedwell_sync_proto::model::FileKind::File => out.push(read_all(fs, &p).unwrap()),
                 _ => {}
             }
         }
@@ -536,9 +536,9 @@ fn a_save_right_after_the_swap_is_not_taken_for_the_pulled_version() {
 /// for an extension).
 #[test]
 fn a_conflict_copy_of_a_conflict_copy_reads_well() {
-    let p = trs_sync::conflict::conflict_path("f (conflict, A, 2026-01-01 00.28)", "B", "2026-01-01 00.30", 1);
+    let p = seedwell_sync::conflict::conflict_path("f (conflict, A, 2026-01-01 00.28)", "B", "2026-01-01 00.30", 1);
     assert_eq!(p, "f (conflict, A, 2026-01-01 00.28) (conflict, B, 2026-01-01 00.30)");
-    assert_eq!(trs_sync::conflict::conflict_path("a.txt", "B", "t", 1), "a (conflict, B, t).txt");
+    assert_eq!(seedwell_sync::conflict::conflict_path("a.txt", "B", "t", 1), "a (conflict, B, t).txt");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -757,7 +757,7 @@ fn the_folder_reports_totals_conflicts_and_prunes_its_archive() {
     send(&a, &mut b);
     pull(&mut b, &[&a]);
     assert_eq!(b.fs.read_dir(".seedwell/Archive").unwrap().entries.len(), 1);
-    let r = trs_sync::archive::Retention { max_age_s: 30 * 86_400, max_percent: 0 };
+    let r = seedwell_sync::archive::Retention { max_age_s: 30 * 86_400, max_percent: 0 };
     assert_eq!(b.core.prune_archive(Utc.now_ns(), r).unwrap(), 0);
     assert_eq!(b.core.prune_archive(Utc.now_ns() + 31 * 86_400 * S, r).unwrap(), 1);
     assert!(b.fs.read_dir(".seedwell/Archive").unwrap().entries.is_empty());

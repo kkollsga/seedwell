@@ -1,5 +1,5 @@
 [package]
-name = "trs-classify"
+name = "seedwell-classify"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

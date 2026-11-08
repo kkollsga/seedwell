@@ -4,7 +4,7 @@ use crate::common;
 use std::time::Duration;
 
 use common::*;
-use trs_engine::*;
+use seedwell_engine::*;
 
 async fn seeded_node(t: &TestTorrent, cfg: impl FnOnce(&mut EngineConfig)) -> Node {
     let n = node(cfg).await;

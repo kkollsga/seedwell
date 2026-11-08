@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use trs_control::display as d;
+use seedwell_control::display as d;
 
 use crate::host::{has, HostWindow};
 use crate::row_text::{
@@ -503,7 +503,8 @@ fn shows_sync(s: &SyncSnapshot) -> bool {
     !s.folders.is_empty()
 }
 
-/// The menu's Folder Sync line: "3 folders · Up to date", "Syncing 2 · 12 MB/s", "1 conflict", "1 folder missing".
+/// The menu's Folder Sync line: "3 folders · Up to date", "Syncing 2 · 12 MB/s · 4 min left", "1 conflict", "1 folder
+/// missing".
 /// The thing that needs the user wins.
 pub(crate) fn sync_summary_of(s: &SyncSnapshot) -> String {
     if !s.running && s.folders.is_empty() {
@@ -529,7 +530,11 @@ pub(crate) fn sync_summary_of(s: &SyncSnapshot) -> String {
     let syncing: Vec<_> = f.iter().filter(|x| x.state == SyncState::Syncing).collect();
     if !syncing.is_empty() {
         let rate: u64 = syncing.iter().map(|x| x.rate_in).sum();
-        let tail = if rate > 0 { format!(" · {}", d::rate(rate)) } else { String::new() };
+        let mut tail = if rate > 0 { format!(" · {}", d::rate(rate)) } else { String::new() };
+        // Until the last of them is done: only when every syncing folder has its time (one unknown could be longer).
+        if let Some(eta) = syncing.iter().map(|x| x.eta_secs).collect::<Option<Vec<_>>>().and_then(|e| e.into_iter().max()) {
+            tail.push_str(&format!(" · {}", d::remaining(Some(eta), true)));
+        }
         return format!("Syncing {}{tail}", syncing.len());
     }
     let all = d::count(f.len() as u64, "folder");
@@ -1164,6 +1169,7 @@ mod tests {
             can_reshare: false,
             removes_everywhere: false,
             scan: None,
+            eta_secs: None,
         }
     }
 
@@ -1181,6 +1187,20 @@ mod tests {
 
     fn up(name: &str) -> SyncFolder {
         folder(name, SyncState::UpToDate, 0, 0)
+    }
+
+    /// The menu's Folder Sync line says how long until the last syncing folder is done: the longest of their times, in
+    /// torrents' words. Fails if it shows the shortest (or any one folder's) time, or a time while one syncing folder's
+    /// is unknown (that one could take longer).
+    #[test]
+    fn the_sync_line_says_the_longest_time_left_only_when_all_are_known() {
+        let timed = |name: &str, eta: Option<u64>| SyncFolder { eta_secs: eta, ..folder(name, SyncState::Syncing, 6_000_000, 0) };
+        let both = vec![timed("A", Some(90)), timed("B", Some(1_500)), up("C")];
+        let line = sync_summary_of(&sync_snap(both, true));
+        assert!(line.ends_with(&format!(" · {}", d::remaining(Some(1_500), true))), "the longest, in torrents' words: {line}");
+        let one_unknown = vec![timed("A", Some(90)), timed("B", None)];
+        let line = sync_summary_of(&sync_snap(one_unknown, true));
+        assert!(!line.contains("left"), "no time while one is unknown: {line}");
     }
 
     #[test]

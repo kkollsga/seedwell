@@ -1,5 +1,5 @@
 [package]
-name = "trs-sync-proto"
+name = "seedwell-sync-proto"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -16,7 +16,7 @@
 //! `vec![0; n]` of a big buffer free of the memset. On other platforms the type is the system allocator
 //! unchanged (glibc already serves such blocks with `mmap` and `malloc_trim` returns the rest).
 //!
-//! Install it in a binary with `#[global_allocator] static A: trs_storage::MappedAlloc = trs_storage::MappedAlloc;`.
+//! Install it in a binary with `#[global_allocator] static A: seedwell_storage::MappedAlloc = seedwell_storage::MappedAlloc;`.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 

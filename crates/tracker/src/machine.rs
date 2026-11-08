@@ -171,9 +171,10 @@ pub enum Input {
     /// "Announce anyway": like [`Input::ManualReannounce`] but also past the tracker's minimum
     /// interval, at most once per [`FORCE_INTERVAL`].
     ManualForce,
-    /// The network path changed.
+    /// The network path changed. A retry waiting after a network-class failure is pulled in,
+    /// once per failure series (shared with [`Input::Wake`]).
     NetworkChanged,
-    /// The machine woke from sleep.
+    /// The machine woke from sleep. Same rule as [`Input::NetworkChanged`].
     Wake,
     /// Another announce to this tracker's host just succeeded. A retry waiting after a host-level
     /// failure (5xx, timeout, connection refused or reset) is pulled forward, once per recovery.
@@ -551,6 +552,11 @@ pub struct AnnounceMachine {
     last_failure_host: bool,
     /// The retry was pulled forward because the host recovered; not again until an announce works.
     recovery_pulled: bool,
+    /// A network change or wake already brought this failure series' retry forward: not again in
+    /// the series (one early "are we back?" try per outage, not one per flap). A series begins
+    /// with the first failure counted from zero (`count_failure`), so this is meaningful only
+    /// while `failures > 0` and needs no clearing anywhere else.
+    network_pulled: bool,
     role: TorrentRole,
     /// 0 = fine, n = `TRIP_REASONS[n - 1]`.
     tripped: u8,
@@ -602,6 +608,7 @@ impl AnnounceMachine {
             last_failure_slow: false,
             last_failure_host: false,
             recovery_pulled: false,
+            network_pulled: false,
             role: TorrentRole::Downloading,
             tripped: 0,
             session: None,
@@ -1084,6 +1091,9 @@ impl AnnounceMachine {
     /// been acknowledged yet) are rescheduled; a healthy machine waits for its
     /// interval exactly as before (SPEC 7C.3 #1: a non-event announce never
     /// happens before `max(interval, min interval)`, whatever the network does).
+    /// A network-class retry is pulled in at most once per failure series
+    /// (`network_pulled`, shared by network changes and wakes): a flapping
+    /// interface gets one early try, then the normal backoff grows.
     fn on_network(&mut self, s: &mut Session, now: Millis) {
         if s.want_stop || self.halted {
             return;
@@ -1104,11 +1114,15 @@ impl AnnounceMachine {
             s.not_before = s.not_before.max(now + Duration::from_millis(jitter));
             s.jitter_armed_at = Some(now);
         }
-        if self.failures > 0 && self.last_failure_network
+        if self.failures > 0 && self.last_failure_network && !self.network_pulled
             && let Some(r) = self.retry_at.get() {
                 let quick = now + Duration::from_millis(1000 + self.rng_for(3, now).below(15_000));
                 let floor = self.fail_at.get().map_or(now, |t| t + NETWORK_RETRY_FLOOR);
-                self.retry_at.set(Some(r.min(quick.max(floor))));
+                let at = quick.max(floor);
+                if at < r {
+                    self.retry_at.set(Some(at));
+                    self.network_pulled = true;
+                }
             }
     }
 
@@ -1356,6 +1370,16 @@ impl AnnounceMachine {
         });
     }
 
+    /// Count one more failure. The first one counted from zero begins a new failure series, which
+    /// may have its retry pulled in by a network change or wake once (`network_pulled`).
+    fn count_failure(&mut self, now: Millis) {
+        self.note_previous_failure(now);
+        if self.failures == 0 {
+            self.network_pulled = false;
+        }
+        self.failures = self.failures.saturating_add(1);
+    }
+
     /// Remember how long before `now` the failure about to be counted was preceded by another.
     fn note_previous_failure(&mut self, now: Millis) {
         self.prev_gap_s = match (self.failures > 0, self.fail_at.get()) {
@@ -1562,8 +1586,7 @@ impl AnnounceMachine {
                 // (maintenance, "try later"): keep trying on the slow schedule
                 // and tell the user. Seeding must not stop for years because
                 // of a transient message.
-                self.note_previous_failure(now);
-                self.failures = self.failures.saturating_add(1);
+                self.count_failure(now);
                 let hint = match &err {
                     AnnounceError::Rejected {
                         retry_in: Some(crate::response::RetryIn::Minutes(m)),
@@ -1592,8 +1615,7 @@ impl AnnounceMachine {
                 }));
             }
             FailureClass::Backoff { hint } => {
-                self.note_previous_failure(now);
-                self.failures = self.failures.saturating_add(1);
+                self.count_failure(now);
                 let mut rng = self.rng_for(7, now);
                 let d = retry_delay_for(self.role, u32::from(self.failures), hint, &mut rng);
                 let at = now + d;

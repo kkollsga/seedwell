@@ -1,4 +1,4 @@
-# trs-dht
+# seedwell-dht
 
 Mainline DHT (BEP 5) for Seedwell, with BEP 42 secure node ids and BEP 43 read-only mode.
 A **sans-I/O core** (`DhtCore`) does all the protocol work deterministically; a **thin tokio UDP
@@ -24,7 +24,7 @@ for it. A private hash is never sent in any datagram, as `get_peers`, `announce_
 Driver (what the engine uses):
 
 ```rust
-let dht = trs_dht::spawn(DriverConfig { saved_state, ..Default::default() }).await?; // DhtHandle: Clone
+let dht = seedwell_dht::spawn(DriverConfig { saved_state, ..Default::default() }).await?; // DhtHandle: Clone
 let mut s = dht.get_peers(PublicInfoHash::new(ih, false).unwrap()).await?  // io::Result<Result<PeerStream, Refused>>
     .map_err(|why| /* Cooldown{retry_after} | InProgress | Busy | Forbidden */ why)?;
 while let Some(u) = s.next().await {            // LookupUpdate::Peers(Vec<SocketAddrV4>) | Finished(LookupStats)
@@ -45,7 +45,7 @@ sees the datagrams that are not theirs.
 let io = SharedIo { incoming: rx /* mpsc::Receiver<(SocketAddrV4, Box<[u8]>)> */,
                     send: Arc::new(|to, data| { /* best effort, never blocks */ }),
                     local: socket_addr };
-let dht = trs_dht::spawn_shared(DriverConfig { saved_state, ..Default::default() }, io);   // DhtHandle, no bind
+let dht = seedwell_dht::spawn_shared(DriverConfig { saved_state, ..Default::default() }, io);   // DhtHandle, no bind
 ```
 
 Sans-I/O core (what tests, simulations and the fuzzers drive):
@@ -116,7 +116,7 @@ part of the network does not.
 
 ## Memory
 
-All numbers from tests in this crate (`cargo test -p trs-dht -- --nocapture`):
+All numbers from tests in this crate (`cargo test -p seedwell-dht -- --nocapture`):
 
 | Item | Size |
 |---|---|
@@ -138,15 +138,15 @@ they answer. Wrong version, wrong length or more than 200 nodes is `StateError::
 
 ## Testing
 
-* `cargo test -p trs-dht` runs 95 tests (+1 ignored): BEP 5 byte-exact vectors for every message and BEP 42
+* `cargo test -p seedwell-dht` runs 95 tests (+1 ignored): BEP 5 byte-exact vectors for every message and BEP 42
   vectors (unit tests), proptests (routing-table invariants, `closest()` equals brute force, codec vs
-  `trs-bencode` in both directions), core behaviour with hand-driven clocks (27 tests), a
+  `seedwell-bencode` in both directions), core behaviour with hand-driven clocks (27 tests), a
   deterministic virtual-time simulation (2,000 nodes, loss, dead nodes, idle hour, transcript hash
   equality across runs) and the tokio driver over loopback UDP.
-* Real network, `#[ignore]`: `cargo test -p trs-dht --test real_world -- --ignored --nocapture` joins
+* Real network, `#[ignore]`: `cargo test -p seedwell-dht --test real_world -- --ignored --nocapture` joins
   the real DHT and does a single `get_peers` for the current Debian netinst amd64 info hash (taken
   from the official `.torrent`, SHA-1 of the original `info` bytes). No `announce_peer`.
-  `cargo run -p trs-dht --example lookup -- <hex>` does the same for any hash.
+  `cargo run -p seedwell-dht --example lookup -- <hex>` does the same for any hash.
 * Fuzz: `fuzz/` (own `[workspace]`) has `krpc_parse` (parser) and `core_packets` (whole state
   machine, with well-formed fuzz-derived responses to its own queries). `cargo +nightly fuzz run
   krpc_parse fuzz/seeds`; seeds are the BEP 5 examples.
@@ -158,12 +158,12 @@ a deterministic event queue with 20-200 ms latency, optional loss and dead nodes
 
 * `tokio` (`net`, `time`, `sync`, `rt`, `macros`; default features off): UDP socket, one timer, channels.
   Only `driver.rs` uses it; the core compiles without any I/O.
-* dev: `proptest` (properties), `sha1` (real-world test derives the info hash), `trs-bencode`
+* dev: `proptest` (properties), `sha1` (real-world test derives the info hash), `seedwell-bencode`
   (interop tests).
 * No `rand`: a 40-line xoshiro256** (`rng.rs`) keeps the core reproducible; production seeds it from
   the OS-seeded `RandomState`. No `siphash`/crc crates: SipHash-2-4 (reference vectors tested) and
   CRC-32C (check value tested) are ~40 lines each.
-* The codec (`codec.rs`) does not use `trs-bencode`: KRPC needs allocation-free, tolerant (unknown
+* The codec (`codec.rs`) does not use `seedwell-bencode`: KRPC needs allocation-free, tolerant (unknown
   keys, unsorted dicts, trailing bytes) parsing of tiny flat dicts from hostile UDP, and a writer
   that emits sorted keys in a fixed order. Interop is enforced by tests instead.
 
@@ -177,7 +177,7 @@ a deterministic event queue with 20-200 ms latency, optional loss and dead nodes
   rather than half-tested.
 * BEP 33 (scrape), BEP 44 (storage) and `sample_infohashes` (BEP 51) are not implemented; the
   methods are answered with error 204.
-* No port mapping in this crate (see `trs-portmap`): whether the node is reachable from outside is the engine's business. A node
+* No port mapping in this crate (see `seedwell-portmap`): whether the node is reachable from outside is the engine's business. A node
   behind NAT with no mapping still works as a client but receives no queries.
 * After a bootstrap the sparse far buckets get up to 3 rounds of filling lookups (≤12 queries each);
   that is the only unsolicited traffic besides stale refreshes.

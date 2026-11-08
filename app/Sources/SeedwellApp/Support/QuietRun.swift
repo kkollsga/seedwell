@@ -27,6 +27,15 @@ enum QuietRun {
         QuietHooks.install()
     }
 
+    /// Materials (the sidebar's glass, menus, popovers) drawn in the app, as with "Reduce transparency": the window
+    /// server composites them from what is behind a window on a screen, so a window drawn in-process off every screen
+    /// showed its glass sidebar as one flat colour, its rows missing. A QA-control run has it from `start()`; the
+    /// snapshot renderer (`--render-snapshots`) turns it on before its first window. `false` puts the system's answer
+    /// back (a test that turned it on).
+    @MainActor static func drawMaterialsInApp(_ on: Bool) {
+        QuietHooks.reduceTransparency(on)
+    }
+
     /// `frame` moved off every screen when it touches one of `screens`; else as it is.
     static func offscreen(_ frame: NSRect, screens: [NSRect]) -> NSRect {
         guard frame.width > 0, frame.height > 0, screens.contains(where: { $0.intersects(frame) }) else { return frame }
@@ -159,8 +168,7 @@ enum QuietRun {
         // Materials (the sidebar's glass, menus, popovers) are composited by the window server from what is behind a
         // window on screen, which a window off every screen does not have: they draw as with "Reduce transparency",
         // a solid colour drawn in the app, and their content without vibrancy.
-        let reduce: @convention(block) (NSWorkspace) -> Bool = { _ in true }
-        replace(NSWorkspace.self, #selector(getter: NSWorkspace.accessibilityDisplayShouldReduceTransparency), reduce)
+        reduceTransparency(true)
         let ignoring: @convention(block) (NSApplication, Bool) -> Void = { _, _ in }
         replace(a, NSSelectorFromString("activateIgnoringOtherApps:"), ignoring)
         let plain: @convention(block) (NSApplication) -> Void = { _ in }
@@ -176,6 +184,19 @@ enum QuietRun {
             unsafeBitCast(original(show), to: F.self)(p, show, r, v, e)
         }
         replace(NSPopover.self, show, showBlock)
+    }
+
+    /// "Reduce transparency" answered yes (`on`), or the system's answer again.
+    static func reduceTransparency(_ on: Bool) {
+        let sel = #selector(getter: NSWorkspace.accessibilityDisplayShouldReduceTransparency)
+        guard let m = class_getInstanceMethod(NSWorkspace.self, sel) else { return }
+        if on {
+            guard originals[sel] == nil else { return }
+            let reduce: @convention(block) (NSWorkspace) -> Bool = { _ in true }
+            originals[sel] = method_setImplementation(m, imp_implementationWithBlock(reduce))
+        } else if let system = originals.removeValue(forKey: sel) {
+            method_setImplementation(m, system)
+        }
     }
 
     private static func replace(_ cls: AnyClass, _ sel: Selector, _ block: Any) {

@@ -4,10 +4,10 @@
 
 use crate::types::*;
 
-/// Measure this process (trs_platform::proc::self_stats). Run it on a blocking thread: on Unix it
+/// Measure this process (seedwell_platform::proc::self_stats). Run it on a blocking thread: on Unix it
 /// spawns `ps`.
 pub fn process_stats() -> ProcessDto {
-    let s = trs_platform::proc::self_stats();
+    let s = seedwell_platform::proc::self_stats();
     ProcessDto { pid: std::process::id(), rss_bytes: s.rss_bytes, cpu_percent: s.cpu_percent, threads: s.threads, open_fds: s.open_files }
 }
 

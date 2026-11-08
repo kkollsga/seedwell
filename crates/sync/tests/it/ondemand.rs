@@ -4,17 +4,17 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use trs_sync::clock::Clock;
-use trs_sync::folder::{FolderConfig, FolderCore, HostError, RemoteIndex, Requested};
-use trs_sync::fs::{Fs, MemFs, MemFsOptions, read_all, write_all};
-use trs_sync::ignore::Ignore;
-use trs_sync::index::MemStore;
-use trs_sync::ondemand::{Deleted, Evicted, ItemState, ROOT_ID};
-use trs_sync::pull::{ChunkRequest, ChunkSource, FetchError, PullReport};
-use trs_sync_proto::device::DeviceKey;
-use trs_sync_proto::ids::ShortId;
-use trs_sync_proto::model::{FileInfo, FileKind};
-use trs_sync_proto::msg::HeldFile;
+use seedwell_sync::clock::Clock;
+use seedwell_sync::folder::{FolderConfig, FolderCore, HostError, RemoteIndex, Requested};
+use seedwell_sync::fs::{Fs, MemFs, MemFsOptions, read_all, write_all};
+use seedwell_sync::ignore::Ignore;
+use seedwell_sync::index::MemStore;
+use seedwell_sync::ondemand::{Deleted, Evicted, ItemState, ROOT_ID};
+use seedwell_sync::pull::{ChunkRequest, ChunkSource, FetchError, PullReport};
+use seedwell_sync_proto::device::DeviceKey;
+use seedwell_sync_proto::ids::ShortId;
+use seedwell_sync_proto::model::{FileInfo, FileKind};
+use seedwell_sync_proto::msg::HeldFile;
 
 use crate::flow::{Key, learn_writers};
 
@@ -66,7 +66,7 @@ fn dev_on(name: &'static str, seed: u8, key: &Key, on_demand: bool, case_insensi
 }
 
 /// A device's core on `fs` and `store` (opened again on the same ones, as after a restart).
-fn core_on(fs: &MemFs, seed: u8, key: &Key, on_demand: bool, case_insensitive: bool, store: Box<dyn trs_sync::index::IndexStore>) -> FolderCore {
+fn core_on(fs: &MemFs, seed: u8, key: &Key, on_demand: bool, case_insensitive: bool, store: Box<dyn seedwell_sync::index::IndexStore>) -> FolderCore {
     let dk = Arc::new(DeviceKey::from_seed(&[seed; 32]));
     let cfg = FolderConfig {
         me: dk.device_id(),
@@ -176,11 +176,11 @@ fn full_with_files() -> Dev {
     a
 }
 
-fn names(items: &[trs_sync::ondemand::Item]) -> Vec<&str> {
+fn names(items: &[seedwell_sync::ondemand::Item]) -> Vec<&str> {
     items.iter().map(|i| i.name.as_str()).collect()
 }
 
-fn item(d: &mut Dev, path: &str) -> trs_sync::ondemand::Item {
+fn item(d: &mut Dev, path: &str) -> seedwell_sync::ondemand::Item {
     d.core.item_at(path).unwrap().unwrap_or_else(|| panic!("no item at {path}"))
 }
 
@@ -523,7 +523,7 @@ fn the_change_feed_reports_exactly_what_changed() {
     assert_eq!(ch.deleted, vec![gone_id]);
     assert_eq!(b.core.changes(ch.anchor, 1000).unwrap().items, vec![]);
     // An anchor of another index (one made anew since), or from the future, has expired.
-    let other = trs_sync::ondemand::anchor_of(0xbeef, 3);
+    let other = seedwell_sync::ondemand::anchor_of(0xbeef, 3);
     assert_eq!(b.core.changes(other, 10).unwrap_err().kind(), std::io::ErrorKind::NotFound);
     assert!(b.core.changes(ch.anchor + 1000, 10).is_err());
     // In pages.
@@ -616,7 +616,7 @@ fn content_missing_from_the_cache_is_online_only_never_a_delete_and_a_read_only_
 }
 
 /// Every item of a feed comes after its parent (known before the feed, or reported earlier in it).
-fn parents_first(d: &mut Dev, feed: &[trs_sync::ondemand::Item], known: &[String]) {
+fn parents_first(d: &mut Dev, feed: &[seedwell_sync::ondemand::Item], known: &[String]) {
     let mut seen: Vec<String> = known.to_vec();
     seen.push(ROOT_ID.into());
     for i in feed {
@@ -644,7 +644,7 @@ fn a_file_is_evicted_only_while_another_device_holds_it() {
     let (ea, eb) = (a.core.evict("x.txt", &ca).unwrap(), b.core.evict("x.txt", &cb).unwrap());
     let (lo, hi) = if a.core.me().0 < b.core.me().0 { (&ea, &eb) } else { (&eb, &ea) };
     assert_eq!((lo.files, hi.files, hi.kept), (1, 0, 1), "{ea:?} {eb:?}");
-    assert_eq!(hi.kept_why[0].1, trs_sync::ondemand::NOT_HELD_ELSEWHERE);
+    assert_eq!(hi.kept_why[0].1, seedwell_sync::ondemand::NOT_HELD_ELSEWHERE);
     assert!(read_all(&a.fs, "x.txt").is_ok() || read_all(&b.fs, "x.txt").is_ok(), "a copy is left");
     sync(&mut a, &mut b);
     let (holder, other) = if a.fs.lstat("x.txt").unwrap().is_some() { (&mut a, &mut b) } else { (&mut b, &mut a) };
@@ -672,7 +672,7 @@ fn a_file_is_evicted_only_while_a_device_that_has_it_is_connected() {
     // A holds it, but is not connected (or its announcement is from an earlier session): kept, and why.
     let e = evict(&mut b, "top.txt", &[]);
     assert_eq!((e.files, e.kept), (0, 1));
-    assert_eq!(e.kept_why, vec![("top.txt".to_string(), trs_sync::ondemand::NOT_HELD_ELSEWHERE.to_string())]);
+    assert_eq!(e.kept_why, vec![("top.txt".to_string(), seedwell_sync::ondemand::NOT_HELD_ELSEWHERE.to_string())]);
     // A full device holding it, connected: always enough.
     assert_eq!(evict(&mut b, "top.txt", &[&a]).files, 1);
 }
@@ -787,7 +787,7 @@ fn identifiers_do_not_depend_on_the_order_records_are_read_in() {
     assert_eq!(on_b, on_c, "the same identifiers on both");
     assert_eq!(on_b.0, x, "the first path keeps the file id's identifier (the versions are concurrent)");
     assert_eq!(on_b.1, "p:z.txt");
-    let mut fresh = trs_sync::ondemand::Items::default();
+    let mut fresh = seedwell_sync::ondemand::Items::default();
     let pins = Default::default();
     assert_eq!(fresh.item_at(c.core.store(), &pins, "y.txt").unwrap().unwrap().id, x, "the same after a restart");
     // C's feed tells its host that the identifier moved: x's item is at y.txt now, z.txt is a new one.
@@ -1043,7 +1043,7 @@ fn an_edit_of_a_version_that_moved_on_is_a_conflict_copy() {
     pull(&mut b, &[&a]);
     let to = b.core.host_target("docs/b.txt", Some(&v1), "Beta").unwrap();
     assert_ne!(to, "docs/b.txt");
-    assert!(trs_sync::conflict::looks_like_conflict(&to), "{to}");
+    assert!(seedwell_sync::conflict::looks_like_conflict(&to), "{to}");
     assert!(to.contains("Beta"), "{to}");
     write_all(&b.fs, &to, b"bravo, the user's edit of v1").unwrap();
     b.core.host_written_copy(&to, "docs/b.txt").unwrap();
@@ -1085,7 +1085,7 @@ fn the_copy_a_hosts_edit_was_written_as_is_found_by_its_content() {
         pull(&mut b, &[&a]);
         let found = |b: &Dev| {
             let holds = &mut |i: &FileInfo| Ok(read_all(&b.fs, &i.path).ok().as_deref() == Some(&edit[..]));
-            trs_sync::ondemand::copy_holding(b.core.store(), path, holds).unwrap().map(|r| r.file.info.path)
+            seedwell_sync::ondemand::copy_holding(b.core.store(), path, holds).unwrap().map(|r| r.file.info.path)
         };
         assert!(found(&b).is_none(), "no copy yet");
         let to = b.core.host_target(path, Some(&v1), device).unwrap();
@@ -1103,45 +1103,45 @@ fn the_copy_a_hosts_edit_was_written_as_is_found_by_its_content() {
     write_all(&b.fs, "docs/a (conflict, Beta, 2026-01-01 10.00z).txt", edit).unwrap();
     b.core.scan("").unwrap();
     let holds = &mut |i: &FileInfo| Ok(read_all(&b.fs, &i.path).ok().as_deref() == Some(&edit[..]));
-    assert!(trs_sync::ondemand::copy_holding(b.core.store(), "docs/a.txt", holds).unwrap().is_none());
+    assert!(seedwell_sync::ondemand::copy_holding(b.core.store(), "docs/a.txt", holds).unwrap().is_none());
 }
 
 /// An index store that counts the records read.
 struct Counting(MemStore, std::sync::atomic::AtomicUsize);
 
-impl trs_sync::index::IndexStore for Counting {
-    fn meta(&self) -> std::io::Result<trs_sync::index::Meta> {
+impl seedwell_sync::index::IndexStore for Counting {
+    fn meta(&self) -> std::io::Result<seedwell_sync::index::Meta> {
         self.0.meta()
     }
-    fn local(&self, path: &str) -> std::io::Result<Option<trs_sync::index::LocalRecord>> {
+    fn local(&self, path: &str) -> std::io::Result<Option<seedwell_sync::index::LocalRecord>> {
         self.1.fetch_add(1, Ordering::SeqCst);
         self.0.local(path)
     }
-    fn local_since(&self, after: u64, limit: usize) -> std::io::Result<Vec<trs_sync::index::LocalRecord>> {
+    fn local_since(&self, after: u64, limit: usize) -> std::io::Result<Vec<seedwell_sync::index::LocalRecord>> {
         self.0.local_since(after, limit)
     }
     fn local_paths(&self, prefix: &str, after: Option<&str>, limit: usize) -> std::io::Result<Vec<String>> {
         self.0.local_paths(prefix, after, limit)
     }
-    fn remote(&self, path: &str) -> std::io::Result<Vec<(ShortId, trs_sync_proto::model::IndexEntry)>> {
+    fn remote(&self, path: &str) -> std::io::Result<Vec<(ShortId, seedwell_sync_proto::model::IndexEntry)>> {
         self.0.remote(path)
     }
     fn remote_paths(&self, device: ShortId, after: Option<&str>, limit: usize) -> std::io::Result<Vec<String>> {
         self.0.remote_paths(device, after, limit)
     }
-    fn peer(&self, device: ShortId) -> std::io::Result<Option<trs_sync::index::PeerState>> {
+    fn peer(&self, device: ShortId) -> std::io::Result<Option<seedwell_sync::index::PeerState>> {
         self.0.peer(device)
     }
     fn peer_ids(&self) -> std::io::Result<Vec<ShortId>> {
         self.0.peer_ids()
     }
-    fn writers(&self) -> std::io::Result<Vec<(ShortId, trs_sync_proto::sign::Writer)>> {
+    fn writers(&self) -> std::io::Result<Vec<(ShortId, seedwell_sync_proto::sign::Writer)>> {
         self.0.writers()
     }
-    fn need(&self, path: &str) -> std::io::Result<Option<trs_sync::index::NeedRecord>> {
+    fn need(&self, path: &str) -> std::io::Result<Option<seedwell_sync::index::NeedRecord>> {
         self.0.need(path)
     }
-    fn needs(&self, after: Option<&str>, limit: usize) -> std::io::Result<Vec<(String, trs_sync::index::NeedRecord)>> {
+    fn needs(&self, after: Option<&str>, limit: usize) -> std::io::Result<Vec<(String, seedwell_sync::index::NeedRecord)>> {
         self.0.needs(after, limit)
     }
     fn need_totals(&self) -> std::io::Result<(u64, u64)> {
@@ -1171,7 +1171,7 @@ impl trs_sync::index::IndexStore for Counting {
     fn chunk_sources(&self, hash: &[u8; 32], limit: usize) -> std::io::Result<Vec<(String, u64)>> {
         self.0.chunk_sources(hash, limit)
     }
-    fn apply(&mut self, _ops: Vec<trs_sync::index::Op>) -> std::io::Result<()> {
+    fn apply(&mut self, _ops: Vec<seedwell_sync::index::Op>) -> std::io::Result<()> {
         unreachable!("read only")
     }
 }
@@ -1188,12 +1188,12 @@ fn looking_for_a_copy_never_reads_a_folder_beside_the_file() {
     }
     let mut a = a;
     a.core.scan("").unwrap();
-    use trs_sync::index::IndexStore;
+    use seedwell_sync::index::IndexStore;
     let mut copy = MemStore::new(1);
     let all = a.core.store().local_paths("", None, 10_000).unwrap();
-    copy.apply(all.iter().map(|p| trs_sync::index::Op::PutLocal(a.core.store().local(p).unwrap().unwrap())).collect()).unwrap();
+    copy.apply(all.iter().map(|p| seedwell_sync::index::Op::PutLocal(a.core.store().local(p).unwrap().unwrap())).collect()).unwrap();
     let counting = Counting(copy, std::sync::atomic::AtomicUsize::new(0));
-    assert!(trs_sync::ondemand::copy_holding(&counting, "docs/b.txt", &mut |_| Ok(true)).unwrap().is_none());
+    assert!(seedwell_sync::ondemand::copy_holding(&counting, "docs/b.txt", &mut |_| Ok(true)).unwrap().is_none());
     let read = counting.1.load(Ordering::SeqCst);
     assert!(read < 5, "{read} records read");
 }
@@ -1323,7 +1323,7 @@ fn the_feed_log_and_retired_identifiers_survive_a_restart() {
     a.core.scan("").unwrap();
     let fs = MemFs::new();
     fs.create_dir(".seedwell").unwrap();
-    let store = Box::new(trs_sync::store_redb::RedbStore::open(&db, 2).unwrap());
+    let store = Box::new(seedwell_sync::store_redb::RedbStore::open(&db, 2).unwrap());
     let mut b = Dev { core: core_on(&fs, 2, &rw(), true, false, store), fs, name: "B" };
     sync(&mut a, &mut b);
     let old = item(&mut b, "top.txt").id;
@@ -1338,7 +1338,7 @@ fn the_feed_log_and_retired_identifiers_survive_a_restart() {
     // Opened again (a restart; a new handle): the feed still has both.
     let Dev { fs, core, .. } = b;
     drop(core);
-    let store = Box::new(trs_sync::store_redb::RedbStore::open(&db, 2).unwrap());
+    let store = Box::new(seedwell_sync::store_redb::RedbStore::open(&db, 2).unwrap());
     let mut b = Dev { core: core_on(&fs, 2, &rw(), true, false, store), fs, name: "B" };
     b.core.set_pins(["docs".to_string()]);
     let ch = b.core.changes(anchor, 1000).unwrap();
@@ -1667,7 +1667,7 @@ fn a_full_folder_keeps_no_feed_rows_and_a_switched_one_is_readable_by_0_1_11() {
     let db = dir.path().join("a.redb");
     let fs = MemFs::new();
     fs.create_dir(".seedwell").unwrap();
-    let mut a = Dev { core: core_on(&fs, 1, &rw(), false, false, Box::new(trs_sync::store_redb::RedbStore::open(&db, 1).unwrap())), fs, name: "A" };
+    let mut a = Dev { core: core_on(&fs, 1, &rw(), false, false, Box::new(seedwell_sync::store_redb::RedbStore::open(&db, 1).unwrap())), fs, name: "A" };
     let mut z = dev("Z", 5, &rw(), false);
     write_all(&z.fs, "f.txt", b"one").unwrap();
     z.core.scan("").unwrap();
@@ -1687,18 +1687,18 @@ fn a_full_folder_keeps_no_feed_rows_and_a_switched_one_is_readable_by_0_1_11() {
     let db = dir.path().join("b.redb");
     let fs = MemFs::new();
     fs.create_dir(".seedwell").unwrap();
-    let mut b = Dev { core: core_on(&fs, 2, &rw(), true, false, Box::new(trs_sync::store_redb::RedbStore::open(&db, 2).unwrap())), fs, name: "B" };
+    let mut b = Dev { core: core_on(&fs, 2, &rw(), true, false, Box::new(seedwell_sync::store_redb::RedbStore::open(&db, 2).unwrap())), fs, name: "B" };
     sync(&mut src, &mut b);
     b.core.request("docs/a.txt").unwrap();
     pull(&mut b, &[&src]);
     b.core.set_on_demand(false).unwrap();
     let Dev { fs, core, .. } = b;
     drop(core);
-    let store = trs_sync::store_redb::RedbStore::open(&db, 2).unwrap();
-    let rows = trs_sync::store_redb::raw_local_rows(&store).unwrap();
+    let store = seedwell_sync::store_redb::RedbStore::open(&db, 2).unwrap();
+    let rows = seedwell_sync::store_redb::raw_local_rows(&store).unwrap();
     assert!(!rows.is_empty());
     for (p, bytes) in &rows {
-        assert!(trs_sync::store_redb::in_released_format(bytes), "{p} is not in the released format");
+        assert!(seedwell_sync::store_redb::in_released_format(bytes), "{p} is not in the released format");
     }
     // And it fetches what it had online only, as a full folder.
     let mut b = Dev { core: core_on(&fs, 2, &rw(), false, false, Box::new(store)), fs, name: "B" };
@@ -1715,14 +1715,14 @@ fn a_full_folders_index_never_has_the_on_demand_tables() {
     let db = dir.path().join("f.redb");
     let fs = MemFs::new();
     fs.create_dir(".seedwell").unwrap();
-    let mut f = Dev { core: core_on(&fs, 3, &rw(), false, false, Box::new(trs_sync::store_redb::RedbStore::open(&db, 3).unwrap())), fs, name: "F" };
+    let mut f = Dev { core: core_on(&fs, 3, &rw(), false, false, Box::new(seedwell_sync::store_redb::RedbStore::open(&db, 3).unwrap())), fs, name: "F" };
     sync(&mut a, &mut f);
     write_all(&f.fs, "docs/b.txt", b"changed on F").unwrap();
     f.core.scan("").unwrap();
     sync(&mut a, &mut f);
     drop(f);
-    let store = trs_sync::store_redb::RedbStore::open(&db, 3).unwrap();
-    let names = trs_sync::store_redb::table_names(&store).unwrap();
+    let store = seedwell_sync::store_redb::RedbStore::open(&db, 3).unwrap();
+    let names = seedwell_sync::store_redb::table_names(&store).unwrap();
     assert!(names.contains(&"local".to_string()), "{names:?}");
     for t in ["shown", "shown_at", "retired", "unavailable"] {
         assert!(!names.contains(&t.to_string()), "{t} in {names:?}");
@@ -1731,15 +1731,15 @@ fn a_full_folders_index_never_has_the_on_demand_tables() {
 
 #[test]
 fn an_anchor_from_before_the_kept_feed_has_expired() {
-    use trs_sync::index::{IndexStore, Op};
+    use seedwell_sync::index::{IndexStore, Op};
     let mut store = MemStore::new(7);
     store.set_feeds_host(true);
-    store.apply(vec![Op::SetMeta(trs_sync::index::Meta { index_id: 7, sequence: 100 }), Op::PruneRetired(50)]).unwrap();
-    let mut items = trs_sync::ondemand::Items::default();
+    store.apply(vec![Op::SetMeta(seedwell_sync::index::Meta { index_id: 7, sequence: 100 }), Op::PruneRetired(50)]).unwrap();
+    let mut items = seedwell_sync::ondemand::Items::default();
     let pins = Default::default();
-    let old = trs_sync::ondemand::anchor_of(7, 40);
+    let old = seedwell_sync::ondemand::anchor_of(7, 40);
     assert_eq!(items.changes(&store, &pins, old, 10).unwrap_err().kind(), std::io::ErrorKind::NotFound);
-    assert!(items.changes(&store, &pins, trs_sync::ondemand::anchor_of(7, 60), 10).is_ok());
+    assert!(items.changes(&store, &pins, seedwell_sync::ondemand::anchor_of(7, 60), 10).is_ok());
     assert!(items.changes(&store, &pins, 0, 10).is_ok(), "from the start");
 }
 
@@ -1810,7 +1810,7 @@ fn the_holders_of_a_rename_are_the_devices_with_every_file_full_ones_first() {
 fn the_files_only_a_device_holds_are_counted_for_its_removal_question() {
     let mut a = full_with_files();
     a.core.scan("").unwrap();
-    let only = |d: &Dev| trs_sync::ondemand::files_only_here(d.core.store(), &Default::default()).unwrap();
+    let only = |d: &Dev| seedwell_sync::ondemand::files_only_here(d.core.store(), &Default::default()).unwrap();
     assert_eq!(only(&a), 5, "no other device yet");
     let mut b = dev("B", 2, &rw(), true);
     sync(&mut a, &mut b);
@@ -1868,7 +1868,7 @@ fn a_device_no_longer_a_member_is_no_source_or_holder_and_which_version_is_curre
     let rec = b.core.store().local("docs/a.txt").unwrap().unwrap().file.info;
     let q = HeldFile { content: rec.content_digest(), version: rec.version.clone(), path: rec.path.clone() };
     assert_eq!(b.core.holders_of(&q).unwrap(), [a.core.me()], "only A is asked");
-    assert_eq!(trs_sync::ondemand::files_only_here(a.core.store(), b.core.not_members()).unwrap(), 0, "B and the rest");
+    assert_eq!(seedwell_sync::ondemand::files_only_here(a.core.store(), b.core.not_members()).unwrap(), 0, "B and the rest");
 
     // R is removed too: on F, R's edit is still the current version (needed, from nobody now: unavailable), and
     // top.txt stays on F as it was. Nothing on F changes.
@@ -2037,7 +2037,7 @@ fn a_new_file_where_the_host_just_deleted_one_is_that_item_changed() {
     assert!(b.core.replacing().hold().is_none(), "nothing waits once the save is in");
     let rec = b.core.store().local("docs/b.txt").unwrap().unwrap();
     let old = a.core.store().local("docs/b.txt").unwrap().unwrap();
-    assert_eq!(rec.file.info.version.compare(&old.file.info.version), trs_sync_proto::model::Causality::Greater, "it follows the deleted version");
+    assert_eq!(rec.file.info.version.compare(&old.file.info.version), seedwell_sync_proto::model::Causality::Greater, "it follows the deleted version");
     let ch = b.core.changes(anchor, 1000).unwrap();
     assert!(!ch.deleted.contains(&before.id), "{ch:?}");
     assert!(ch.items.iter().any(|i| i.id == before.id && i.path == "docs/b.txt"));
@@ -2181,9 +2181,9 @@ fn a_temp_file_renamed_over_a_just_deleted_name_continues_its_history() {
     assert_eq!(item(&mut b, "docs/b.txt").id, temp, "the renamed item's own identifier");
     assert!(b.core.replacing().hold().is_none(), "the name is taken: nothing waits any more");
     let rec = b.core.store().local("docs/b.txt").unwrap().unwrap();
-    assert_eq!(rec.file.info.version.compare(&tomb.file.info.version), trs_sync_proto::model::Causality::Greater, "it follows the delete");
+    assert_eq!(rec.file.info.version.compare(&tomb.file.info.version), seedwell_sync_proto::model::Causality::Greater, "it follows the delete");
     let rec = b.core.store().local("docs/b.txt").unwrap().unwrap();
-    assert_eq!(rec.file.info.version.compare(&old.file.info.version), trs_sync_proto::model::Causality::Greater);
+    assert_eq!(rec.file.info.version.compare(&old.file.info.version), seedwell_sync_proto::model::Causality::Greater);
     sync(&mut a, &mut b);
     assert_eq!(read_all(&a.fs, "docs/b.txt").unwrap(), b"bravo, the new version");
     assert!(a.core.conflicts().unwrap().is_empty());

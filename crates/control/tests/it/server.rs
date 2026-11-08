@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use common::*;
 use serde_json::{Value, json};
-use trs_control::client::ClientError;
-use trs_control::proto::*;
-use trs_control::types::*;
-use trs_control::{Permission, ServerOptions};
+use seedwell_control::client::ClientError;
+use seedwell_control::proto::*;
+use seedwell_control::types::*;
+use seedwell_control::{Permission, ServerOptions};
 
 fn api(e: ClientError) -> ApiError {
     match e {
@@ -19,7 +19,7 @@ fn api(e: ClientError) -> ApiError {
     }
 }
 
-async fn call(c: &mut trs_control::Client, method: &str, params: Value) -> Result<Value, ApiError> {
+async fn call(c: &mut seedwell_control::Client, method: &str, params: Value) -> Result<Value, ApiError> {
     let r = Request::decode(method, params).expect("params decode");
     c.call(&r).await.map_err(api)
 }
@@ -99,6 +99,8 @@ async fn permission_matrix_every_method_every_level() {
             Method::AwakeSet => json!({"key": "matrix", "secs": 60}),
             Method::UpdateInstall => json!({"path": "/tmp/Seedwell-0.0.1.1.zip"}),
             Method::UpdateDevBuilds => json!({"on": false}),
+            Method::ProxySet => json!({"on": false}),
+            Method::ProxyKey => json!({"kind": "nordvpn", "user": "u", "pass": "p"}),
             Method::AgentsRequest => json!({"what": "full", "why": "the matrix"}),
             Method::SyncStatus
             | Method::SyncShare
@@ -149,6 +151,10 @@ async fn permission_matrix_every_method_every_level() {
             Method::ChatCancelDownload | Method::ChatStopSharing => json!({"channel": "Plans", "hash": "0a1b2c3d"}),
             Method::ChatMute => json!({"channel": "Plans", "muted": true}),
             Method::ChatRename => json!({"channel": "Plans", "name": "Trips"}),
+            Method::ChatGroupNew => json!({"name": "Agents", "icon": "sparkles"}),
+            Method::ChatGroupEdit => json!({"group": "Agents", "icon": "star"}),
+            Method::ChatGroupDelete => json!({"group": "Agents"}),
+            Method::ChatSetGroup => json!({"channel": "Plans", "group": "Agents"}),
             Method::ChatAddAddress => json!({"channel": "Plans", "address": "127.0.0.1:9"}),
             Method::ChatTopics => json!({"channel": "Plans"}),
             Method::ChatNewTopic => json!({"channel": "Plans", "title": "Dinner"}),
@@ -246,7 +252,7 @@ async fn permission_is_checked_before_params() {
 #[tokio::test]
 async fn off_refuses_connections_and_cuts_open_ones() {
     let rig = Rig::new(Permission::Off).await;
-    let e = trs_control::Client::connect(rig.path(), "x").await.err().unwrap();
+    let e = seedwell_control::Client::connect(rig.path(), "x").await.err().unwrap();
     assert_eq!(api(e).code, ErrorCode::AgentAccessOff);
 
     // A level lowered to off while connected: the next call is refused and the connection closes.
@@ -477,7 +483,7 @@ async fn limits_are_applied_and_persisted() {
     assert_eq!((l.down_limit, l.up_limit, l.alt_active), (Some(5_000_000), Some(1_000_000), true));
     assert_eq!(call(&mut c, "set_limits", json!({})).await.unwrap_err().code, ErrorCode::InvalidParams);
     assert_eq!(call(&mut c, "set_limits", json!({"down_limit": u64::MAX})).await.unwrap_err().code, ErrorCode::InvalidParams);
-    let cfg = trs_state::DocStore::<trs_state::Config>::new(rig.state_dir()).load().value;
+    let cfg = seedwell_state::DocStore::<seedwell_state::Config>::new(rig.state_dir()).load().value;
     assert_eq!(cfg.transfers.download_limit, 5_000_000);
     assert!(cfg.transfers.alt.enabled);
     // Status shows them.
@@ -493,15 +499,15 @@ async fn settings_get_set_full_only_and_validated() {
     assert_eq!(g.settings["transfers.max_active_downloads"], 3);
     let s: SettingsDto = serde_json::from_value(call(&mut c, "settings_set", json!({"changes": {"transfers.max_active_downloads": 7}})).await.unwrap()).unwrap();
     assert_eq!(s.changed, vec!["transfers.max_active_downloads"]);
-    let cfg = trs_state::DocStore::<trs_state::Config>::new(rig.state_dir()).load().value;
+    let cfg = seedwell_state::DocStore::<seedwell_state::Config>::new(rig.state_dir()).load().value;
     assert_eq!(cfg.transfers.max_active_downloads, 7);
     let e = call(&mut c, "settings_set", json!({"changes": {"transfers.max_active_downloads": 0}})).await.unwrap_err();
     assert_eq!(e.code, ErrorCode::Invalid);
     assert!(e.message.contains("max_active_downloads"));
     let e = call(&mut c, "settings_set", json!({"changes": {"agents.permission": "full"}})).await.unwrap_err();
     assert_eq!(e.code, ErrorCode::InvalidParams);
-    let cfg = trs_state::DocStore::<trs_state::Config>::new(rig.state_dir()).load().value;
-    assert_eq!(cfg.agents.permission, trs_state::config::Permission::Off, "an agent cannot change its own permission");
+    let cfg = seedwell_state::DocStore::<seedwell_state::Config>::new(rig.state_dir()).load().value;
+    assert_eq!(cfg.agents.permission, seedwell_state::config::Permission::Off, "an agent cannot change its own permission");
 }
 
 #[tokio::test]
@@ -648,12 +654,12 @@ async fn max_connections_is_enforced() {
     for i in 0..8 {
         held.push(rig.client(&format!("c{i}")).await);
     }
-    let e = trs_control::Client::connect(rig.path(), "ninth").await.err().unwrap();
+    let e = seedwell_control::Client::connect(rig.path(), "ninth").await.err().unwrap();
     assert_eq!(api(e).code, ErrorCode::TooManyConnections);
     assert!(rig.server.connections() <= 8);
     drop(held.pop());
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(trs_control::Client::connect(rig.path(), "ninth").await.is_ok());
+    assert!(seedwell_control::Client::connect(rig.path(), "ninth").await.is_ok());
 }
 
 #[tokio::test]
@@ -717,7 +723,7 @@ async fn many_concurrent_clients() {
     for n in 0..8 {
         let path = path.clone();
         tasks.push(tokio::spawn(async move {
-            let mut c = trs_control::Client::connect(&path, &format!("worker-{n}")).await.unwrap();
+            let mut c = seedwell_control::Client::connect(&path, &format!("worker-{n}")).await.unwrap();
             for i in 0..60u32 {
                 match i % 4 {
                     0 => {
@@ -747,28 +753,28 @@ async fn many_concurrent_clients() {
 
 #[tokio::test]
 async fn tracker_profiles_and_statistics() {
-    use trs_state::{Day, StatsBucket, StatsScope};
+    use seedwell_state::{Day, StatsBucket, StatsScope};
     let rig = Rig::new(Permission::ReadOnly).await;
     // A real database and a profile file in the state dir.
     let dir = rig.state_dir();
     std::fs::write(dir.join("trackers.toml"), "version = 1\n\n[[tracker]]\nid = \"tl\"\nname = \"Example Tracker\"\nurls = [\"https://tracker.example.org/a/*/announce\"]\n").unwrap();
-    let opened = trs_state::Store::open(&dir).unwrap();
+    let opened = seedwell_state::Store::open(&dir).unwrap();
     let today = Day::from_unix(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64, 0);
     opened.store.record_stats(&StatsScope::Profile("tl".into()), today, &StatsBucket { uploaded: 4_000_000, downloaded: 1_000_000, torrents_completed: 1, ..Default::default() }).unwrap();
     opened.store.record_stats(&StatsScope::Profile("tl".into()), today.minus(3), &StatsBucket { uploaded: 2_000_000, ..Default::default() }).unwrap();
     opened.store.flush_now().unwrap();
-    let store: std::sync::Arc<dyn trs_control::state::StoreRef> = std::sync::Arc::new(opened.store);
+    let store: std::sync::Arc<dyn seedwell_control::state::StoreRef> = std::sync::Arc::new(opened.store);
     let rig2 = {
         // A second server on the same state dir, with the store attached.
         let mut other = row(3, "c", "seeding");
         other.tracker_host = "bttracker.debian.org".into();
         let mock = Mock::new(vec![row(1, "a", "seeding"), row(2, "b", "downloading"), other]);
-        let (src, perm) = trs_control::PermissionSource::shared(Permission::ReadOnly);
-        let state = trs_control::StateAccess::new(&dir, Some(store));
-        let server = trs_control::serve_backend(mock.clone(), state, rig.dir.path().join("s2.sock"), src, ServerOptions::default()).await.unwrap();
+        let (src, perm) = seedwell_control::PermissionSource::shared(Permission::ReadOnly);
+        let state = seedwell_control::StateAccess::new(&dir, Some(store));
+        let server = seedwell_control::serve_backend(mock.clone(), state, rig.dir.path().join("s2.sock"), src, ServerOptions::default()).await.unwrap();
         (mock, server, perm)
     };
-    let mut c = trs_control::Client::connect(rig2.1.path(), "stats").await.unwrap();
+    let mut c = seedwell_control::Client::connect(rig2.1.path(), "stats").await.unwrap();
 
     let t: TrackersDto = serde_json::from_value(call(&mut c, "trackers", json!({})).await.unwrap()).unwrap();
     assert_eq!(t.profiles.len(), 1);
@@ -820,7 +826,7 @@ async fn tracker_log_is_read_only_and_serves_the_masked_lines() {
     std::fs::remove_dir_all(&logs).unwrap();
     assert_eq!(call(&mut c, "tracker_log", json!({})).await.unwrap()["entries"].as_array().unwrap().len(), 0);
     // the method is allowed at read_only (the permission table test covers the other levels)
-    assert!(trs_control::proto::Method::from_name("tracker_log").is_some());
+    assert!(seedwell_control::proto::Method::from_name("tracker_log").is_some());
 }
 
 #[tokio::test]
@@ -842,7 +848,7 @@ async fn socket_file_goes_away_with_the_server() {
     let Rig { server, dir, .. } = rig;
     server.shutdown().await;
     assert!(!path.exists());
-    assert!(trs_control::Client::connect(&path, "late").await.is_err());
+    assert!(seedwell_control::Client::connect(&path, "late").await.is_err());
     drop(dir);
 }
 
@@ -861,7 +867,7 @@ async fn save_path_needs_full_and_never_targets_sensitive_folders() {
     assert_eq!(e.code, ErrorCode::InvalidParams, "{e}");
     // The system's own sensitive folders (a folder below each) and the settings folder of the user.
     let mut bad: Vec<String> = ["~/.ssh", "~"].map(String::from).into();
-    bad.extend(trs_platform::dirs::sensitive_dirs().iter().map(|d| d.join("sub").display().to_string()));
+    bad.extend(seedwell_platform::dirs::sensitive_dirs().iter().map(|d| d.join("sub").display().to_string()));
     for bad in bad {
         let e = call(&mut c, "add", json!({"source": "magnet:?xt=urn:btih:abcdef", "save_path": bad})).await.unwrap_err();
         assert_eq!(e.code, ErrorCode::Invalid, "{bad}: {e}");
@@ -948,7 +954,7 @@ async fn move_needs_full_and_refuses_sensitive_folders() {
     let mut c = rig.client("claude").await;
     let mut bad: Vec<String> = ["relative/dir"].map(String::from).into();
     bad.push(abs("/a/../b"));
-    bad.extend(trs_platform::dirs::sensitive_dirs().iter().map(|d| d.join("x").display().to_string()));
+    bad.extend(seedwell_platform::dirs::sensitive_dirs().iter().map(|d| d.join("x").display().to_string()));
     for bad in bad {
         let e = call(&mut c, "move", json!({"ids": ["aaaaaa"], "path": bad})).await.unwrap_err();
         assert!(matches!(e.code, ErrorCode::Invalid | ErrorCode::InvalidParams), "{bad}: {e}");
@@ -1035,7 +1041,7 @@ impl FakeBuilds {
     }
 }
 
-impl trs_control::Builds for FakeBuilds {
+impl seedwell_control::Builds for FakeBuilds {
     fn status(&self) -> UpdateStatusDto {
         UpdateStatusDto { version: "0.1.10.3".into(), development: true, dev_builds: self.on(), status: "fine".into(), ..Default::default() }
     }
@@ -1058,6 +1064,10 @@ impl trs_control::Builds for FakeBuilds {
     fn update_now(&self) -> Result<String, String> {
         self.asked.lock().unwrap().push("update now".into());
         Ok("Installing Seedwell 0.1.11".into())
+    }
+    fn restart(&self) -> Result<RestartDto, String> {
+        self.asked.lock().unwrap().push("restart".into());
+        Ok(RestartDto { note: "Restarting Seedwell".into(), ..Default::default() })
     }
 }
 
@@ -1150,4 +1160,218 @@ async fn development_builds_are_switched_at_full_and_logged() {
     );
     let seen = call(&mut c, "activity", json!({})).await.unwrap().to_string();
     assert!(seen.contains("turn development builds on") && seen.contains("turn development builds off"), "{seen}");
+}
+
+/// Failure: an agent with permission full cannot reach a setting of the Settings window (the network, watch folders,
+/// launch at login: the old allow-list left them out), or reaches its own permission.
+#[tokio::test]
+async fn an_agent_at_full_changes_any_setting_but_its_own_access() {
+    let rig = Rig::new(Permission::Full).await;
+    let mut c = rig.client("claude").await;
+    let all: SettingsDto = serde_json::from_value(call(&mut c, "settings_get", json!({})).await.unwrap()).unwrap();
+    assert!(all.settings.contains_key("network.listen_port") && !all.settings.keys().any(|k| k.starts_with("agents.")), "{:?}", all.settings.keys());
+    let watch = if cfg!(windows) { "C:/Torrents" } else { "/tmp/torrents" };
+    call(&mut c, "settings_set", json!({"changes": {"network.listen_port": 51515, "general.launch_at_login": true, "folders.watch": [{"path": watch}], "updates.auto_install": true}}))
+        .await
+        .unwrap();
+    let cfg = seedwell_state::DocStore::<seedwell_state::Config>::new(rig.state_dir()).load().value;
+    assert_eq!((cfg.network.listen_port, cfg.general.launch_at_login, cfg.updates.auto_install), (51515, true, true));
+    assert_eq!(cfg.folders.watch.len(), 1);
+    assert_eq!(cfg.folders.watch[0].path, watch);
+    assert_eq!((cfg.folders.watch[0].mode, cfg.folders.watch[0].after_add), (seedwell_state::config::WatchMode::Ask, seedwell_state::config::AfterAdd::Leave));
+    // Routed keys name their command and change nothing.
+    let e = call(&mut c, "settings_set", json!({"changes": {"network.proxy.enabled": true, "transfers.download_limit": 5}})).await.unwrap_err();
+    assert!(e.message.contains("seedwell proxy"), "{e}");
+    let after = seedwell_state::DocStore::<seedwell_state::Config>::new(rig.state_dir()).load().value;
+    assert_eq!((after.network.proxy.enabled, after.transfers.download_limit), (false, cfg.transfers.download_limit));
+    // Logged with the keys.
+    let log = rig.server.activity().recent(10);
+    assert!(log.iter().any(|e| e.summary.contains("network.listen_port") && e.outcome == "ok"), "{log:?}");
+}
+
+/// Failure: an agent edits the Rules tab or the favourite trackers and a document that does not validate is saved,
+/// or the rules it wrote are not the ones saved.
+#[tokio::test]
+async fn rules_and_trackers_are_read_and_replaced_whole() {
+    let rig = Rig::new(Permission::Full).await;
+    let mut c = rig.client("claude").await;
+    let g: SettingsDto = serde_json::from_value(call(&mut c, "settings_get", json!({"file": "rules"})).await.unwrap()).unwrap();
+    let mut doc = g.settings["rules"].clone();
+    let mut rule = doc["default"].clone();
+    rule["id"] = json!("linux");
+    rule["name"] = json!("Linux ISOs");
+    doc["rule"] = json!([rule]);
+    let s: SettingsDto = serde_json::from_value(call(&mut c, "settings_set", json!({"file": "rules", "doc": doc})).await.unwrap()).unwrap();
+    assert_eq!(s.changed, ["rules.toml"]);
+    let rules = seedwell_state::DocStore::<seedwell_state::RuleSet>::new(rig.state_dir()).load().value;
+    assert_eq!(rules.rules.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["Linux ISOs"]);
+    let mut bad = g.settings["rules"].clone();
+    bad["version"] = json!(99);
+    assert_eq!(call(&mut c, "settings_set", json!({"file": "rules", "doc": bad})).await.unwrap_err().code, ErrorCode::Invalid);
+    assert_eq!(seedwell_state::DocStore::<seedwell_state::RuleSet>::new(rig.state_dir()).load().value.rules.len(), 1, "unchanged");
+    for p in [json!({"file": "config", "doc": {}}), json!({"file": "rules"}), json!({"file": "rules", "doc": {}, "changes": {"a": 1}})] {
+        assert_eq!(call(&mut c, "settings_set", p.clone()).await.unwrap_err().code, ErrorCode::InvalidParams, "{p}");
+    }
+    let t: SettingsDto = serde_json::from_value(call(&mut c, "settings_get", json!({"file": "trackers"})).await.unwrap()).unwrap();
+    call(&mut c, "settings_set", json!({"file": "trackers", "doc": t.settings["trackers"]})).await.unwrap();
+    let log = rig.server.activity().recent(10);
+    assert!(log.iter().any(|e| e.summary.starts_with("replace rules.toml (1 rule)")), "{log:?}");
+}
+
+struct FakeProxy {
+    on: std::sync::atomic::AtomicBool,
+    key: std::sync::Mutex<Option<(String, String)>>,
+    country: std::sync::Mutex<String>,
+    /// The next switch fails (a key test running).
+    busy: std::sync::atomic::AtomicBool,
+}
+
+impl seedwell_control::ProxyControl for FakeProxy {
+    fn status(&self) -> ProxyDto {
+        let on = self.on.load(std::sync::atomic::Ordering::SeqCst);
+        ProxyDto {
+            enabled: on,
+            kind: "nordvpn".into(),
+            has_key: self.key.lock().unwrap().is_some(),
+            country: self.country.lock().unwrap().clone(),
+            status: if on { "On" } else { "Off" }.into(),
+            ..Default::default()
+        }
+    }
+    fn switch(&self, on: bool) -> Result<String, String> {
+        if self.key.lock().unwrap().is_none() {
+            return Err("No proxy key is installed.".into());
+        }
+        if self.busy.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err("Wait for the test to end.".into());
+        }
+        self.on.store(on, std::sync::atomic::Ordering::SeqCst);
+        Ok(format!("The proxy is {}.", if on { "on" } else { "off" }))
+    }
+    fn country(&self, code: &str) -> Result<String, String> {
+        *self.country.lock().unwrap() = code.to_owned();
+        Ok(format!("Servers in {code} first."))
+    }
+    fn nordvpn(&self, user: String, pass: String) -> Result<String, String> {
+        if pass == "wrong" {
+            return Err("NordVPN refused the key.".into());
+        }
+        *self.key.lock().unwrap() = Some((user, pass));
+        self.on.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok("NordVPN is on.".into())
+    }
+    fn custom(&self, _host: String, _port: u16, key: Option<(String, String)>) -> Result<String, String> {
+        *self.key.lock().unwrap() = Some(key.unwrap_or_default());
+        Ok("The proxy is on.".into())
+    }
+    fn remove_key(&self) -> Result<String, String> {
+        *self.key.lock().unwrap() = None;
+        self.on.store(false, std::sync::atomic::Ordering::SeqCst);
+        Ok("The key was removed.".into())
+    }
+    fn faster(&self) -> Result<String, String> {
+        Ok("Already on the best server.".into())
+    }
+}
+
+/// Failure: the proxy's key (username or password) comes back in an answer, an error, `settings get`, a printed
+/// request or the activity log; or the proxy calls do not reach the app's proxy; or a daemon pretends to have one.
+#[tokio::test]
+async fn the_proxy_key_is_set_from_the_cli_and_never_echoed() {
+    let rig = Rig::new(Permission::Full).await;
+    let mut c = rig.client("claude").await;
+    assert_eq!(call(&mut c, "proxy.status", json!({})).await.unwrap_err().code, ErrorCode::Unsupported);
+
+    let fake = std::sync::Arc::new(FakeProxy { on: false.into(), key: Default::default(), country: Default::default(), busy: false.into() });
+    let opts = ServerOptions::default();
+    opts.proxy.set(fake.clone());
+    let rig = Rig::with(Permission::Full, opts, vec![]).await;
+    let mut c = rig.client("claude").await;
+    let (user, pass) = ("nord-SECRETUSER", "SECRETPASS");
+    let mut answers = Vec::new();
+    answers.push(call(&mut c, "proxy.key", json!({"kind": "nordvpn", "user": user, "pass": "wrong"})).await.unwrap_err().to_string());
+    let on: ProxyDto = serde_json::from_value(call(&mut c, "proxy.key", json!({"kind": "nordvpn", "user": user, "pass": pass})).await.unwrap()).unwrap();
+    assert!(on.enabled && on.has_key && on.note == "NordVPN is on.", "{on:?}");
+    answers.push(serde_json::to_string(&on).unwrap());
+    let got = call(&mut c, "settings_get", json!({})).await.unwrap();
+    assert_eq!(got["settings"]["network.proxy.key"], "installed");
+    answers.push(got.to_string());
+    let off: ProxyDto = serde_json::from_value(call(&mut c, "proxy.set", json!({"on": false, "country": "NL"})).await.unwrap()).unwrap();
+    assert!(!off.enabled && off.note.contains("NL"), "{off:?}");
+    answers.push(call(&mut c, "proxy.status", json!({})).await.unwrap().to_string());
+    answers.push(format!("{:?}", Request::decode("proxy.key", json!({"kind": "nordvpn", "user": user, "pass": pass})).unwrap()));
+    for e in rig.server.activity().recent(50) {
+        answers.push(format!("{} {}", e.method, e.summary));
+    }
+    for a in &answers {
+        assert!(!a.contains("SECRET"), "the key leaked: {a}");
+    }
+    assert_eq!(*fake.key.lock().unwrap(), Some((user.to_owned(), pass.to_owned())), "the app got the key");
+    let log = rig.server.activity().recent(50);
+    assert!(log.iter().any(|e| e.method == "proxy.key" && e.summary.contains("key not logged")), "{log:?}");
+    // Below full: refused.
+    rig.perm.set(Permission::Control);
+    assert_eq!(call(&mut c, "proxy.set", json!({"on": true})).await.unwrap_err().code, ErrorCode::PermissionDenied);
+}
+
+fn fake_proxy_rig_opts() -> (std::sync::Arc<FakeProxy>, ServerOptions) {
+    let fake = std::sync::Arc::new(FakeProxy { on: false.into(), key: Default::default(), country: Default::default(), busy: false.into() });
+    let opts = ServerOptions::default();
+    opts.proxy.set(fake.clone());
+    (fake, opts)
+}
+
+/// Failure: `proxy.set` with a country and a switch that cannot be made (no key; a key test running) saves the
+/// country anyway, so the call fails but half of it happened.
+#[tokio::test]
+async fn proxy_set_is_all_or_nothing() {
+    let (fake, opts) = fake_proxy_rig_opts();
+    let rig = Rig::with(Permission::Full, opts, vec![]).await;
+    let mut c = rig.client("claude").await;
+    assert!(call(&mut c, "proxy.set", json!({"country": "NL", "on": true})).await.is_err(), "no key");
+    assert_eq!(*fake.country.lock().unwrap(), "", "the country stays");
+    *fake.key.lock().unwrap() = Some(("u".into(), "p".into()));
+    fake.busy.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(call(&mut c, "proxy.set", json!({"country": "SE", "on": true})).await.is_err(), "a test runs");
+    assert_eq!(*fake.country.lock().unwrap(), "", "the country went back");
+    let ok: ProxyDto = serde_json::from_value(call(&mut c, "proxy.set", json!({"country": "SE", "on": true})).await.unwrap()).unwrap();
+    assert!(ok.enabled && ok.country == "SE", "{ok:?}");
+}
+
+/// Failure: `settings get network.proxy.key` answers "unknown setting" (or `network` leaves it out), though help and
+/// SPEC say it shows whether a key is installed; or the key itself appears.
+#[tokio::test]
+async fn the_proxy_key_line_is_answered_by_name_and_in_its_tables() {
+    let (fake, opts) = fake_proxy_rig_opts();
+    *fake.key.lock().unwrap() = Some(("SECRETUSER".into(), "SECRETPASS".into()));
+    let rig = Rig::with(Permission::Full, opts, vec![]).await;
+    let mut c = rig.client("claude").await;
+    let g = call(&mut c, "settings_get", json!({"keys": ["network.proxy.key", "network", "network.proxy", "transfers.download_limit"]})).await.unwrap();
+    let s = &g["settings"];
+    assert_eq!((&s["network.proxy.key"], &s["network"]["proxy"]["key"], &s["network.proxy"]["key"]), (&json!("installed"), &json!("installed"), &json!("installed")), "{g}");
+    assert!(s["transfers.download_limit"].is_number() && s["network"]["dht"].is_boolean(), "{g}");
+    assert!(!g.to_string().contains("SECRET"));
+    // Without the app's proxy (a daemon) it is no setting there.
+    let rig = Rig::new(Permission::Full).await;
+    let mut c = rig.client("claude").await;
+    assert!(call(&mut c, "settings_get", json!({"keys": ["network.proxy.key"]})).await.is_err());
+    assert!(call(&mut c, "settings_get", json!({"keys": ["network"]})).await.is_ok());
+}
+
+/// Failure: a `settings set` that changes nothing (a value already in force, an empty table) or a `--file` document
+/// identical to the file is reported and logged as a change.
+#[tokio::test]
+async fn a_call_that_changes_nothing_says_so() {
+    let rig = Rig::new(Permission::Full).await;
+    let mut c = rig.client("claude").await;
+    let s: SettingsDto = serde_json::from_value(call(&mut c, "settings_set", json!({"changes": {"transfers": {}, "transfers.max_active_downloads": 3}})).await.unwrap()).unwrap();
+    assert!(s.changed.is_empty() && s.note.contains("nothing changed"), "{s:?}");
+    let g: SettingsDto = serde_json::from_value(call(&mut c, "settings_get", json!({"file": "rules"})).await.unwrap()).unwrap();
+    let s: SettingsDto = serde_json::from_value(call(&mut c, "settings_set", json!({"file": "rules", "doc": g.settings["rules"]})).await.unwrap()).unwrap();
+    assert!(s.changed.is_empty(), "{s:?}");
+    let s: SettingsDto = serde_json::from_value(call(&mut c, "settings_set", json!({"changes": {"transfers": {"max_active_downloads": 4, "upload_limit": 0}}})).await.unwrap()).unwrap();
+    assert_eq!(s.changed, ["transfers.max_active_downloads"]);
+    let log = rig.server.activity().recent(10);
+    assert!(log.iter().any(|e| e.summary == "change settings -> nothing changed"), "{log:?}");
+    assert!(log.iter().any(|e| e.summary == "change settings -> transfers.max_active_downloads"), "{log:?}");
 }

@@ -1,4 +1,4 @@
-//! trs-wire: the BitTorrent peer wire protocol (sans-I/O).
+//! seedwell-wire: the BitTorrent peer wire protocol (sans-I/O).
 //!
 //! Covers the handshake, all BEP 3 messages, BEP 6 Fast, the BEP 10 extension
 //! protocol with BEP 9 `ut_metadata` and BEP 11 `ut_pex`. Nothing here touches a
@@ -34,7 +34,7 @@ pub use bitfield::Bitfield;
 pub use codec::{Decoder, Encoder, Limits, MAX_FRAME_LEN, MAX_REQUEST_LEN};
 pub use error::{Error, Result};
 pub use extended::{
-    ExtPolicy, ExtendedHandshake, ExtendedMessage, LOCAL_UT_METADATA_ID, LOCAL_UT_PEX_ID,
+    ExtPolicy, ExtendedHandshake, ExtendedMessage, LOCAL_UPLOAD_ONLY_ID, LOCAL_UT_METADATA_ID, LOCAL_UT_PEX_ID,
     LocalExtendedHandshake,
 };
 pub use fast::allowed_fast_set;

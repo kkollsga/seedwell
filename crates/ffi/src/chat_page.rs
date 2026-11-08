@@ -15,10 +15,11 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-use trs_platform::computer;
+use seedwell_platform::computer;
 
 use crate::chat_dialogs::{chat_delete_conversation_dialog, chat_leave_dialog, chat_new_topic_dialog, chat_rename_dialog, chat_wake_command_dialog, ChatDialog};
 use crate::chat_files::ChatPendingSend;
+use crate::chat_groups::{chat_new_group_dialog, SyncChatGroup};
 use crate::chat_images::ChatImage;
 use crate::chat_markdown::{blocks, plain, ChatBlock, ChatRun};
 use crate::chat_text::{agent_tag, agents_menu, chat_agents_label, general_unread, named, UNNAMED_DEVICE};
@@ -80,6 +81,11 @@ pub enum ChatPageCommand {
     /// Your tags on the message are now `tags` (the whole set): send `chat_tag_note(message_id, tags)` to the
     /// conversation as a message (`Core::chat_send` / `Core::chat_send_direct`, no reply); others keep theirs.
     SetTags { message_id: String, tags: Vec<String> },
+    /// `Core::chat_set_group(channel, group_id)`: the channel listed under a sidebar group (`None`: under none); a
+    /// failure under `chat_group_failure_title(true)`.
+    MoveToGroup { group_id: Option<String> },
+    /// The item's dialog (`chat_new_group_dialog`), then `Core::chat_group_new(value, None, Some(channel))`.
+    NewGroup,
 }
 
 /// One line of a menu of the page.
@@ -425,6 +431,9 @@ pub struct ChatPageRead {
     /// A channel's devices in the order they joined, also those that left: each person's colour.
     #[uniffi(default = [])]
     pub joined: Vec<SyncJoined>,
+    /// The sidebar's groups of channels, in order (a channel's Move to Group).
+    #[uniffi(default = [])]
+    pub groups: Vec<SyncChatGroup>,
 }
 
 /// What the page is built from.
@@ -668,8 +677,23 @@ fn tidy(entries: Vec<ChatPageMenuEntry>) -> Vec<ChatPageMenuEntry> {
     out
 }
 
-/// A channel's ⋯ menu: Mute, Agents: Yes/No, On All My Devices, Wake Command…; New Topic…, Rename…; Leave Channel….
-fn channel_menu(c: &SyncChannel, follow: Option<&FollowLine>, host: &[HostWindow]) -> ChatPageMenu {
+/// Move to Group ▸ of a channel's ⋯ menu: each group (checked on the channel's), New Group… (asks, then makes it with
+/// the channel), Remove from Group while it is in one.
+fn group_submenu(c: &SyncChannel, groups: &[SyncChatGroup], host: &[HostWindow]) -> ChatPageMenuEntry {
+    let current = c.group.as_deref().filter(|g| groups.iter().any(|x| x.id == *g));
+    let mut entries: Vec<ChatPageMenuEntry> =
+        groups.iter().map(|g| it(g.name.clone(), ChatPageCommand::MoveToGroup { group_id: Some(g.id.clone()) }).checked(current == Some(g.id.as_str())).entry()).collect();
+    entries.push(ChatPageMenuEntry::Separator);
+    entries.extend(asking("New Group…", ChatPageCommand::NewGroup, chat_new_group_dialog(), true, host));
+    if current.is_some() {
+        entries.push(item("Remove from Group", ChatPageCommand::MoveToGroup { group_id: None }));
+    }
+    ChatPageMenuEntry::Submenu { title: "Move to Group".into(), entries: tidy(entries) }
+}
+
+/// A channel's ⋯ menu: Mute, Agents: Yes/No, On All My Devices, Wake Command…; New Topic…, Rename…, Move to Group ▸;
+/// Leave Channel….
+fn channel_menu(c: &SyncChannel, follow: Option<&FollowLine>, groups: &[SyncChatGroup], host: &[HostWindow]) -> ChatPageMenu {
     let agents = agents_menu(c);
     let mut choices: Vec<ChatPageMenuEntry> = agents
         .choices
@@ -689,6 +713,12 @@ fn channel_menu(c: &SyncChannel, follow: Option<&FollowLine>, host: &[HostWindow
     v.push(ChatPageMenuEntry::Separator);
     v.extend(asking("New Topic…", ChatPageCommand::NewTopic, chat_new_topic_dialog(c.clone()), c.role != SyncRole::ReadOnly, host));
     v.extend(asking("Rename…", ChatPageCommand::Rename, chat_rename_dialog(c.clone()), true, host));
+    if has(host, Some(HostWindow::ChatGroups))
+        && let ChatPageMenuEntry::Submenu { entries, .. } = group_submenu(c, groups, host)
+        && !entries.is_empty()
+    {
+        v.push(ChatPageMenuEntry::Submenu { title: "Move to Group".into(), entries });
+    }
     v.push(ChatPageMenuEntry::Separator);
     v.extend(asking("Leave Channel…", ChatPageCommand::Leave, chat_leave_dialog(c.clone()), true, host));
     ChatPageMenu { title: String::new(), help: "More".into(), entries: tidy(v) }
@@ -818,7 +848,7 @@ fn message_meta(m: &SyncMessage, who: ChatAuthorKind, clock: &dyn LocalClock, no
 fn tag_menu(id: &str, owners: &[ChatTagOwner]) -> ChatPageMenu {
     let yours: Vec<String> = owners.iter().find(|o| o.is_you).map(|o| o.tags.clone()).unwrap_or_default();
     let set = |tags: Vec<String>| ChatPageCommand::SetTags { message_id: id.to_owned(), tags };
-    let mut entries: Vec<ChatPageMenuEntry> = trs_control::mail::KNOWN
+    let mut entries: Vec<ChatPageMenuEntry> = seedwell_control::mail::KNOWN
         .iter()
         .map(|&t| {
             let on = yours.iter().any(|y| y == t);
@@ -968,7 +998,7 @@ pub fn chat_page_model(input: ChatPageInput, clock: std::sync::Arc<dyn LocalCloc
                     members: Some(button("Members", "Members", ChatPageCommand::ShowMembers)),
                     share: (sync_can_share(c.role) && has(&host, Some(HostWindow::ChannelShare)))
                         .then(|| button("Share…", concat!("Share: invite another ", computer!(), " to this channel"), ChatPageCommand::Share)),
-                    menu: channel_menu(c, input.read.follow.as_ref(), &host),
+                    menu: channel_menu(c, input.read.follow.as_ref(), &input.read.groups, &host),
                 },
                 empty: messages.is_empty().then(|| "No messages yet".into()),
                 messages,
@@ -1019,6 +1049,7 @@ impl Core {
             direct_agents: sync.chat_direct_agents(),
             own_devices: sync.own_devices(),
             joined: Vec::new(),
+            groups: sync.chat_groups(),
         };
         match place {
             LibraryPlace::Chat { channel_id, topic_id } => {

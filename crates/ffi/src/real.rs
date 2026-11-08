@@ -1,4 +1,4 @@
-//! The real backend: `trs_engine::Host` in-process on its own runtime, the control server for
+//! The real backend: `seedwell_engine::Host` in-process on its own runtime, the control server for
 //! agents, and the mapping of engine rows and events onto the FFI records.
 
 use std::path::{Path, PathBuf};
@@ -6,14 +6,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use trs_control::{AppServerConfig, PermissionSource, ServerHandle, ServerOptions};
-use trs_engine::api::{
+use seedwell_control::{AppServerConfig, PermissionSource, ServerHandle, ServerOptions};
+use seedwell_engine::api::{
     self as eng, AddOptions, EngineEvent, RowKind, SeedGoal, TorrentRow, TorrentState,
 };
-use trs_engine::{EngineHandle, Host, HostOptions, StateStore};
-use trs_state::rules::RuleSet;
-use trs_state::stats::{Day, StatsScope};
-use trs_state::trackers::TrackerProfiles;
+use seedwell_engine::{EngineHandle, Host, HostOptions, StateStore};
+use seedwell_state::rules::RuleSet;
+use seedwell_state::stats::{Day, StatsScope};
+use seedwell_state::trackers::TrackerProfiles;
 
 use crate::backend::{AttrRow, Backend, ShutdownInfo};
 use crate::rows::{self, Totals};
@@ -46,7 +46,7 @@ fn now_secs() -> u64 {
 }
 
 fn hex(id: &[u8; 20]) -> String {
-    trs_engine::util::hex(id)
+    seedwell_engine::util::hex(id)
 }
 
 fn parse_id(s: &str) -> Option<[u8; 20]> {
@@ -191,7 +191,7 @@ fn ui_wait_note(engine: &EngineHandle, what: &str, waited: Duration) {
     let note = format!("{what}: the engine did not answer within {} ms; the last read was shown", waited.as_millis());
     eprintln!("seedwell: {note}");
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-    engine.devlog().log(&trs_devlog::Entry { ts_ms: now, kind: trs_devlog::Kind::Decision, event: "ui-wait", note: Some(note), ..Default::default() });
+    engine.devlog().log(&seedwell_devlog::Entry { ts_ms: now, kind: seedwell_devlog::Kind::Decision, event: "ui-wait", note: Some(note), ..Default::default() });
 }
 
 /// The library reads of [`RealBackend::loaded`], made on a thread of their own (`seedwell-library`) so a caller
@@ -289,7 +289,7 @@ pub struct RealBackend {
     /// Folder sync (SPEC 7G), started next to the engine.
     sync: Arc<crate::sync::RealSync>,
     /// The keys' store (shared with folder sync): the torrent proxy's key is kept there (SPEC §7H).
-    secrets: Arc<dyn trs_sync_net::secrets::SecretStore>,
+    secrets: Arc<dyn seedwell_sync_net::secrets::SecretStore>,
     /// An isolated run's own Trash (`Trash` in its state folder): whatever would go to the Trash goes there.
     trash: Option<PathBuf>,
 }
@@ -304,19 +304,21 @@ pub struct StartOptions {
     /// The Keychain for folder sync's keys (`None`: a 0600 file in the state folder).
     pub secret_vault: Option<Arc<dyn crate::sync::SecretVault>>,
     /// Where the control server finds the app's updater (`update.*`).
-    pub builds: trs_control::BuildsSlot,
+    pub builds: seedwell_control::BuildsSlot,
+    /// Where the control server finds the torrent proxy (`proxy.*`).
+    pub proxy: seedwell_control::ProxySlot,
 }
 
 /// A folder an isolated run must not use: inside `forbidden` (the real home) and not in a temporary folder (Windows
 /// keeps those in the user's profile, under the home it forbids). Folder Sync applies the same rule.
 fn inside_forbidden(p: &Path, forbidden: &Path) -> bool {
-    trs_sync_net::service::inside_forbidden(p, forbidden)
+    seedwell_sync_net::service::inside_forbidden(p, forbidden)
 }
 
 /// The folders Folder Sync keeps in `sync.toml` (synced folders, where joined ones go), `~` expanded. An unreadable
 /// file names none: the service refuses it itself.
 fn sync_folders(dir: &Path) -> Vec<PathBuf> {
-    let Ok(c) = trs_sync_net::config::SyncConfig::load(&dir.join("sync.toml")) else { return Vec::new() };
+    let Ok(c) = seedwell_sync_net::config::SyncConfig::load(&dir.join("sync.toml")) else { return Vec::new() };
     let mut out: Vec<PathBuf> = c.folders.iter().map(|f| f.path.clone()).collect();
     if !c.settings.default_location.trim().is_empty() {
         out.push(crate::settings::expand_home(&c.settings.default_location));
@@ -330,7 +332,7 @@ fn profile_folders(p: &TrackerProfiles) -> Vec<PathBuf> {
 }
 
 /// Every folder `config.toml` makes the engine touch, `~` expanded.
-fn config_folders(c: &trs_state::Config) -> Vec<PathBuf> {
+fn config_folders(c: &seedwell_state::Config) -> Vec<PathBuf> {
     use crate::settings::expand_home;
     let f = &c.folders;
     let mut v = vec![expand_home(&f.download_dir), expand_home(&f.incomplete_dir)];
@@ -339,7 +341,7 @@ fn config_folders(c: &trs_state::Config) -> Vec<PathBuf> {
         v.push(expand_home(&w.path));
         v.extend(w.archive_dir.iter().map(|d| expand_home(d)));
     }
-    for cat in trs_classify::Category::ALL {
+    for cat in seedwell_classify::Category::ALL {
         let o = f.categories.get(cat);
         v.extend(o.incomplete_dir.iter().map(|d| expand_home(d)));
         v.extend(o.finished_dir.iter().map(|d| expand_home(d)));
@@ -365,7 +367,7 @@ impl RealBackend {
                 )));
             }
         }
-        let rt = trs_engine::build_runtime().map_err(|e| failed(e.to_string()))?;
+        let rt = seedwell_engine::build_runtime().map_err(|e| failed(e.to_string()))?;
         // An isolated run (QA: `--state-dir` with `--home-root`) never puts anything in the user's Trash: a `.torrent`
         // file a watch folder or an add finishes with "trash", a held torrent's Cancel and a removed synced folder go to
         // `Trash` in its state folder.
@@ -393,7 +395,7 @@ impl RealBackend {
                 }
                 ec.tracker_destinations.allow_lan_trackers = allow_lan;
                 if allow_loopback {
-                    ec.tracker_destinations = trs_tracker_policy_local();
+                    ec.tracker_destinations = seedwell_tracker_policy_local();
                     ec.dht_allow_local = true;
                 }
                 // An isolated (test) run never reaches a real tracker, whatever torrent it is given: only loopback or
@@ -403,7 +405,7 @@ impl RealBackend {
                 }
                 ec.proxy = start_proxy;
             })),
-            time_zone: Some(Arc::new(trs_engine::util::local_utc_offset)),
+            time_zone: Some(Arc::new(seedwell_engine::util::local_utc_offset)),
             ..HostOptions::default()
         };
         let host = rt
@@ -418,7 +420,7 @@ impl RealBackend {
         let secret_store = secrets.0.clone();
         let sync = crate::sync::RealSync::start(rt.handle(), &engine, &o.dir, secrets, o.forbidden_root.clone(), o.builds.clone());
         // The control server for agents (SPEC 9A) lives on the engine's runtime.
-        let server = trs_control::start_for_app_with_sync(
+        let server = seedwell_control::start_for_app_with_sync(
             rt.handle(),
             engine.clone(),
             AppServerConfig {
@@ -429,10 +431,12 @@ impl RealBackend {
                 // The user's app looks for other Seedwells; an isolated (test) run does not (it would find the user's).
                 options: ServerOptions {
                     builds: o.builds.clone(),
-                    others: o.forbidden_root.is_none().then_some(trs_control::others::line_now as fn(&std::path::Path) -> Option<String>),
+                    proxy: o.proxy.clone(),
+                    others: o.forbidden_root.is_none().then_some(seedwell_control::others::line_now as fn(&std::path::Path) -> Option<String>),
+                    activity_file: Some(o.dir.join(seedwell_control::ACTIVITY_FILE)),
                     ..ServerOptions::default().with_config(&cfg)
                 },
-                tz_offset: Some(Arc::new(|| trs_engine::util::local_utc_offset(trs_engine::util::unix_secs() as i64))),
+                tz_offset: Some(Arc::new(|| seedwell_engine::util::local_utc_offset(seedwell_engine::util::unix_secs() as i64))),
             },
             sync.slot(),
         );
@@ -571,7 +575,7 @@ impl RealBackend {
                                     };
                                     l.on_auto_added(AutoAdded {
                                         id: hex(&id),
-                                        name: if title.is_empty() { trs_classify::clean_name(&name) } else { title },
+                                        name: if title.is_empty() { seedwell_classify::clean_name(&name) } else { title },
                                         category: category_to_ffi(category),
                                         tracker,
                                         destination: destination.map(|d| d.display().to_string()),
@@ -775,7 +779,7 @@ impl RealBackend {
                     .iter()
                     .filter(|r| r.kind == RowKind::Torrent && r.tracker_profile.is_none())
                     .filter_map(|r| {
-                        let g = trs_state::trackers::group_of_host(&r.tracker_host)?;
+                        let g = seedwell_state::trackers::group_of_host(&r.tracker_host)?;
                         Some(GroupFact { group: g.key, host: r.tracker_host.clone() })
                     })
                     .collect();
@@ -787,7 +791,7 @@ impl RealBackend {
                         id: hex(&r.id),
                         profile: r.tracker_profile.clone(),
                         private: r.private,
-                        category: category_to_ffi(r.category.unwrap_or(trs_classify::Category::Other)),
+                        category: category_to_ffi(r.category.unwrap_or(seedwell_classify::Category::Other)),
                     })
                     .collect();
                 let recent = self.recent_of(&s.rows, &rows, now);
@@ -879,7 +883,7 @@ impl RealBackend {
     /// The statistics scopes whose sum is this sidebar tracker's history (SPEC 7E.2).
     fn scopes(&self, tracker_id: &str) -> Vec<StatsScope> {
         let pol = lock(&self.policy);
-        trs_state::stats::scopes_for(&pol.profiles, tracker_id)
+        seedwell_state::stats::scopes_for(&pol.profiles, tracker_id)
     }
 
     fn row_by_id(&self, id: &str) -> Option<TransferRow> {
@@ -900,8 +904,8 @@ fn reload_policy(policy: &Arc<Mutex<Policy>>, dir: &Path) {
     *lock(policy) = Policy { rules: s.load_rules_set(), profiles: s.load_profiles_set() };
 }
 
-fn trs_tracker_policy_local() -> trs_tracker::policy::DestinationPolicy {
-    trs_tracker::policy::DestinationPolicy::LOCAL
+fn seedwell_tracker_policy_local() -> seedwell_tracker::policy::DestinationPolicy {
+    seedwell_tracker::policy::DestinationPolicy::LOCAL
 }
 
 /// Engine row to FFI row.
@@ -919,7 +923,7 @@ fn convert(r: &TorrentRow, pol: &Policy, now: u64) -> TransferRow {
         match &r.tracker_profile {
             Some(p) => (p.clone(), pol.profile_name(p).unwrap_or(p).to_string()),
             // Automatically identified: the registrable domain of the primary announce host.
-            None => match trs_state::trackers::group_of_host(&r.tracker_host) {
+            None => match seedwell_state::trackers::group_of_host(&r.tracker_host) {
                 Some(g) => (g.key, g.name),
                 None if r.private => ("other-private".to_string(), "Private tracker".to_string()),
                 None => ("public".to_string(), "Public".to_string()),
@@ -963,7 +967,7 @@ fn convert(r: &TorrentRow, pol: &Policy, now: u64) -> TransferRow {
     }
     let note = r.waiting_note();
     let seed_secs = r.seeded_secs;
-    let category = r.category.unwrap_or(trs_classify::Category::Other);
+    let category = r.category.unwrap_or(seedwell_classify::Category::Other);
     let id = hex(&r.id);
     TransferRow {
         display_name: r.display_title(),
@@ -1111,7 +1115,7 @@ fn choice_info(id: &str, row: Option<&TransferRow>, c: &eng::ChoicePreview) -> C
         selected_bytes: c.selected_bytes,
         free_bytes: c.free_bytes,
         destination: c.destination.as_ref().map(|d| d.display().to_string()),
-        category: category_to_ffi(c.category.unwrap_or(trs_classify::Category::Other)),
+        category: category_to_ffi(c.category.unwrap_or(seedwell_classify::Category::Other)),
         confidence: c.confidence,
         library_checked: c.library_checked,
         rule_name: c.rule_name.clone(),
@@ -1144,7 +1148,7 @@ impl Drop for RealBackend {
 impl Backend for RealBackend {
     fn note_decision(&self, event: &'static str, note: String) {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-        self.engine.devlog().log(&trs_devlog::Entry { ts_ms: now, kind: trs_devlog::Kind::Decision, event, note: Some(note), ..Default::default() });
+        self.engine.devlog().log(&seedwell_devlog::Entry { ts_ms: now, kind: seedwell_devlog::Kind::Decision, event, note: Some(note), ..Default::default() });
     }
 
     #[cfg(test)]
@@ -1211,7 +1215,7 @@ impl Backend for RealBackend {
 
     fn tracker_stats(&self, tracker_id: &str) -> TrackerStats {
         let scopes = self.scopes(tracker_id);
-        let mut b = trs_state::StatsBucket::default();
+        let mut b = seedwell_state::StatsBucket::default();
         for sc in &scopes {
             b.add(&self.store.state().stats_total(sc).unwrap_or_default());
         }
@@ -1226,7 +1230,7 @@ impl Backend for RealBackend {
 
     fn tracker_daily(&self, tracker_id: &str, days: u32) -> Vec<DailyStat> {
         let now = now_secs();
-        let today = Day::from_unix(now as i64, trs_engine::util::local_utc_offset(now as i64));
+        let today = Day::from_unix(now as i64, seedwell_engine::util::local_utc_offset(now as i64));
         let mut out: Vec<DailyStat> = Vec::new();
         for sc in self.scopes(tracker_id) {
             let series = self.store.state().stats_series(&sc, today, days).unwrap_or_default();
@@ -1517,14 +1521,14 @@ impl Backend for RealBackend {
             .unwrap_or_default()
     }
 
-    fn agent_requests(&self) -> Vec<trs_control::access::Entry> {
+    fn agent_requests(&self) -> Vec<seedwell_control::access::Entry> {
         let desk = lock(&self.server).as_ref().map(|s| s.access().clone());
         desk.map(|d| d.for_user()).unwrap_or_default()
     }
 
     fn agent_request_decide(&self, id: &str, approve: bool) -> Result<String, String> {
         let desk = lock(&self.server).as_ref().map(|s| s.access().clone()).ok_or("Agents are not connected to this Seedwell")?;
-        desk.decide(id, approve, trs_control::access::How::App)
+        desk.decide(id, approve, seedwell_control::access::How::App)
     }
 
     fn agents_awake(&self) -> Option<crate::types::AgentsAwake> {
@@ -1720,7 +1724,7 @@ impl Backend for RealBackend {
     }
 
     fn reachability(&self) -> Option<ReachabilityInfo> {
-        let r = trs_control::reachability_dto(&self.engine.reachability());
+        let r = seedwell_control::reachability_dto(&self.engine.reachability());
         Some(ReachabilityInfo { state: r.state, summary: r.summary })
     }
 
@@ -1810,11 +1814,11 @@ impl Backend for RealBackend {
         files.into_iter().map(|p| p.display().to_string()).collect()
     }
 
-    fn secrets(&self) -> Option<Arc<dyn trs_sync_net::secrets::SecretStore>> {
+    fn secrets(&self) -> Option<Arc<dyn seedwell_sync_net::secrets::SecretStore>> {
         Some(self.secrets.clone())
     }
 
-    fn set_torrent_proxy(&self, proxy: Option<trs_engine::ProxyConfig>) {
+    fn set_torrent_proxy(&self, proxy: Option<seedwell_engine::ProxyConfig>) {
         self.engine.set_proxy(proxy);
     }
 
@@ -1822,7 +1826,7 @@ impl Backend for RealBackend {
         self.engine.proxy_rank_now();
     }
 
-    fn torrent_proxy_status(&self) -> trs_engine::ProxyStatus {
+    fn torrent_proxy_status(&self) -> seedwell_engine::ProxyStatus {
         self.engine.proxy_status()
     }
 
@@ -1846,8 +1850,8 @@ impl Backend for RealBackend {
 struct DocStoreSave;
 
 impl DocStoreSave {
-    fn save_config(dir: &Path, c: &trs_state::Config) -> Result<(), trs_state::DocError> {
-        trs_state::DocStore::<trs_state::Config>::new(dir).save(c)
+    fn save_config(dir: &Path, c: &seedwell_state::Config) -> Result<(), seedwell_state::DocError> {
+        seedwell_state::DocStore::<seedwell_state::Config>::new(dir).save(c)
     }
 }
 
@@ -1986,9 +1990,9 @@ mod isolation_tests {
             let work = tempfile::tempdir().unwrap();
             let dir = work.path().join("state");
             std::fs::create_dir_all(&dir).unwrap();
-            let mut cfg = trs_sync_net::config::SyncConfig::default();
+            let mut cfg = seedwell_sync_net::config::SyncConfig::default();
             if let Some(f) = &folder {
-                cfg.folders.push(trs_sync_net::config::FolderEntry::new("x".into(), f.clone()));
+                cfg.folders.push(seedwell_sync_net::config::FolderEntry::new("x".into(), f.clone()));
             }
             if let Some(p) = &place {
                 cfg.settings.default_location = p.display().to_string();
@@ -2001,7 +2005,8 @@ mod isolation_tests {
                 allow_loopback_trackers: false,
                 forbidden_root: Some(home.clone()),
                 secret_vault: None,
-                builds: trs_control::BuildsSlot::new(),
+                builds: seedwell_control::BuildsSlot::new(),
+                proxy: seedwell_control::ProxySlot::new(),
             };
             let e = super::RealBackend::start(o).err().expect("refused");
             assert!(e.to_string().contains("Refusing to start"), "{e}");

@@ -1,13 +1,13 @@
-//! Integration tests of trs-rendezvous: the client against a loopback rendezvous, and the setup against a loopback
+//! Integration tests of seedwell-rendezvous: the client against a loopback rendezvous, and the setup against a loopback
 //! fake of the Cloudflare API with the request shapes of its reference. Nothing reaches the Internet.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
-use trs_rendezvous::client::{ClientError, Rendezvous, WriteKey};
-use trs_rendezvous::cloudflare::{Api, DeployError, Stage, deploy};
-use trs_rendezvous::testkit::{Account, fake_cloudflare, fake_rendezvous};
+use seedwell_rendezvous::client::{ClientError, Rendezvous, WriteKey};
+use seedwell_rendezvous::cloudflare::{Api, DeployError, Stage, deploy};
+use seedwell_rendezvous::testkit::{Account, fake_cloudflare, fake_rendezvous};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_record_is_written_read_and_kept_for_its_first_key() {
@@ -66,7 +66,7 @@ async fn the_setup_uploads_the_worker_makes_the_subdomain_and_tests_it() {
     let meta: Value = serde_json::from_str(body.split("\r\n\r\n").nth(1).unwrap().split("\r\n--").next().unwrap()).unwrap();
     assert_eq!(meta["migrations"]["new_sqlite_classes"][0], "Rendezvous");
     assert_eq!(meta["bindings"][0]["type"], "durable_object_namespace");
-    assert!(body.contains(trs_rendezvous::WORKER_JS));
+    assert!(body.contains(seedwell_rendezvous::WORKER_JS));
     let enable: Value = serde_json::from_slice(&reqs[6].body).unwrap();
     assert_eq!(enable, serde_json::json!({"enabled": true, "previews_enabled": false}));
     // The self-test wrote, read and deleted a record.

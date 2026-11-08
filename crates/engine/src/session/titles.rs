@@ -4,8 +4,8 @@
 
 use std::time::Duration;
 
-use trs_classify::Category;
-use trs_metainfo::Metainfo;
+use seedwell_classify::Category;
+use seedwell_metainfo::Metainfo;
 
 use super::{Session, SessionMsg};
 use crate::api::TorrentId;

@@ -3,8 +3,8 @@
 
 use proptest::prelude::*;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use trs_bencode::{Encoder, Value, decode};
-use trs_dht::codec::{self, Body, Envelope, Query, QueryOut, ResponseOut};
+use seedwell_bencode::{Encoder, Value, decode};
+use seedwell_dht::codec::{self, Body, Envelope, Query, QueryOut, ResponseOut};
 
 fn addr(a: [u8; 4], p: u16) -> SocketAddrV4 {
     SocketAddrV4::new(Ipv4Addr::from(a), p)
@@ -105,7 +105,7 @@ proptest! {
         let ours = codec::parse(&data);
         if ours.is_ok() {
             // We tolerate trailing bytes, so only the prefix must be valid for the reference.
-            prop_assert!(trs_bencode::decode_prefix(&data).is_ok());
+            prop_assert!(seedwell_bencode::decode_prefix(&data).is_ok());
         }
     }
 }

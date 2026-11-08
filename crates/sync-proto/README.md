@@ -1,11 +1,11 @@
-# trs-sync-proto
+# seedwell-sync-proto
 
 Seedwell Sync (protocol 2): everything two devices must agree on to sync a folder (SPEC §7G). The folder key and
 what is derived from it, roles and membership, invitations, device ids, the signed file model and the wire
 messages. **Sans-I/O**: no sockets, no files, no clocks;
 randomness comes in through a trait (`Random`, implemented for ring's `SystemRandom`) so simulations are
-deterministic. `#![forbid(unsafe_code)]`. The sessions, TLS and compression live in `trs-sync-net`; the scanner,
-index and puller in `trs-sync`.
+deterministic. `#![forbid(unsafe_code)]`. The sessions, TLS and compression live in `seedwell-sync-net`; the scanner,
+index and puller in `seedwell-sync`.
 
 | Module | What |
 |---|---|
@@ -149,7 +149,7 @@ the file payload).
 
 ## Testing
 
-`tools/check.sh -p trs-sync-proto`. Unit tests sit next to the code; integration tests are one binary
+`tools/check.sh -p seedwell-sync-proto`. Unit tests sit next to the code; integration tests are one binary
 (`tests/it/`).
 
 * Test vectors: Syncthing's Luhn vectors (`luhn_test.go`) and two Syncthing device ids (the documentation example

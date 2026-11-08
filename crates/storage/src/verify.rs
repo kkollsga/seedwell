@@ -379,7 +379,7 @@ impl ResumeReport {
 }
 
 fn fingerprint_of(m: &std::fs::Metadata) -> FileFingerprint {
-    let (mtime_secs, mtime_nanos) = m.modified().map(trs_platform::fs::unix_time).unwrap_or((0, 0));
+    let (mtime_secs, mtime_nanos) = m.modified().map(seedwell_platform::fs::unix_time).unwrap_or((0, 0));
     FileFingerprint { size: m.len(), mtime_secs, mtime_nanos }
 }
 

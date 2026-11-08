@@ -6,11 +6,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use trs_sync_net::secrets::FileSecrets;
-use trs_sync_net::status::FolderState;
-use trs_sync_net::{Keep, Options, SyncHandle};
-use trs_sync_proto::members::Role;
-use trs_sync_proto::ids::FolderId;
+use seedwell_sync_net::secrets::FileSecrets;
+use seedwell_sync_net::status::FolderState;
+use seedwell_sync_net::{Keep, Options, SyncHandle};
+use seedwell_sync_proto::members::Role;
+use seedwell_sync_proto::ids::FolderId;
 
 struct Device {
     h: SyncHandle,
@@ -433,10 +433,10 @@ async fn a_link_this_system_cannot_make_is_an_issue_and_the_folder_still_settles
     until(20, "B has the file", || read(&dest.join("sub/a.txt")).as_deref() == Some(b"next to the link")).await;
 
     let probe = fb.path().join("probe");
-    let links = match trs_platform::fs::symlink("Shared", &probe) {
+    let links = match seedwell_platform::fs::symlink("Shared", &probe) {
         Ok(()) => true,
         Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
-            assert_eq!(e.to_string(), trs_platform::fs::SYMLINK_UNSUPPORTED);
+            assert_eq!(e.to_string(), seedwell_platform::fs::SYMLINK_UNSUPPORTED);
             false
         }
         Err(e) => panic!("probe link: {e}"),
@@ -448,7 +448,7 @@ async fn a_link_this_system_cannot_make_is_an_issue_and_the_folder_still_settles
         until(20, "B is up to date with the link as an issue", || {
             let f = &b.h.snapshot().folders[0];
             f.state == FolderState::UpToDate
-                && f.issues.iter().any(|(p, why)| p == "link" && why == trs_platform::fs::SYMLINK_UNSUPPORTED)
+                && f.issues.iter().any(|(p, why)| p == "link" && why == seedwell_platform::fs::SYMLINK_UNSUPPORTED)
         })
         .await;
         assert!(std::fs::symlink_metadata(dest.join("link")).is_err(), "nothing is made at the link's path");
@@ -552,18 +552,18 @@ async fn a_burst_that_overflows_the_watcher_still_syncs_every_file() {
     std::fs::create_dir(fa.path().join("burst")).unwrap();
     until(30, "B has the folder", || dest.join("burst").is_dir()).await;
     let n = 1000;
-    let overflows = trs_fswatch::debug::overflows();
-    trs_fswatch::debug::hold_reads(true);
+    let overflows = seedwell_fswatch::debug::overflows();
+    seedwell_fswatch::debug::hold_reads(true);
     for i in 0..n {
         std::fs::write(fa.path().join("burst").join(format!("file-{i:05}-with-a-name-long-enough-to-fill-the-buffer.txt")), i.to_string()).unwrap();
     }
-    trs_fswatch::debug::hold_reads(false);
+    seedwell_fswatch::debug::hold_reads(false);
     // (The puller's temp files count for nothing: one of them beside 999 files is not the 1000th.)
     let files = |d: std::fs::ReadDir| d.flatten().filter(|e| !e.file_name().to_string_lossy().starts_with(".seedwell.")).count();
     until(180, "B has every file of the burst", || std::fs::read_dir(dest.join("burst")).is_ok_and(|d| files(d) == n)).await;
     assert_eq!(read(&dest.join("burst").join("file-00999-with-a-name-long-enough-to-fill-the-buffer.txt")).as_deref(), Some(&b"999"[..]));
     if cfg!(windows) {
-        assert!(trs_fswatch::debug::overflows() > overflows, "the burst overflowed the system's buffer");
+        assert!(seedwell_fswatch::debug::overflows() > overflows, "the burst overflowed the system's buffer");
     }
     a.h.shutdown().await;
     b.h.shutdown().await;

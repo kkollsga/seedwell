@@ -1,7 +1,7 @@
 //! Mail and tags in a channel's text messages (SPEC 7G.8, 7G.9), read for the app by the same rules
-//! `seedwell mail` and `seedwell tag` use (`trs_control::mail`).
+//! `seedwell mail` and `seedwell tag` use (`seedwell_control::mail`).
 
-use trs_control::mail::{self, Posted};
+use seedwell_control::mail::{self, Posted};
 
 use crate::sync::{SyncMessage, SyncMessageKind};
 

@@ -3,7 +3,7 @@
 //! Scraping is never automatic: it goes through the same `HostGate` as
 //! announces, at most once per `scrape_min_gap` per (torrent, tracker).
 
-use trs_bencode::{DecodeLimits, Value};
+use seedwell_bencode::{DecodeLimits, Value};
 
 use crate::response::{AnnounceError, MAX_BODY, ParseError};
 use crate::types::InfoHash20;
@@ -71,7 +71,7 @@ pub fn parse_scrape_response(body: &[u8]) -> Result<Vec<(InfoHash20, ScrapeEntry
         max_items: 100_000,
         max_bytes: MAX_BODY,
     };
-    let (v, _) = trs_bencode::decode_prefix_with_limits(body, limits)
+    let (v, _) = seedwell_bencode::decode_prefix_with_limits(body, limits)
         .map_err(|_| AnnounceError::Garbage(ParseError::NotBencode))?;
     if v.as_dict().is_none() {
         return Err(AnnounceError::Garbage(ParseError::NotDict));

@@ -1,12 +1,12 @@
 # What the engine must add for streaming (SPEC 7F)
 
-`trs-stream` is finished and tested against a fake swarm; nothing in `crates/engine` calls it yet. This
+`seedwell-stream` is finished and tested against a fake swarm; nothing in `crates/engine` calls it yet. This
 is the complete list of engine work, with the places to change (paths relative to `crates/`; line
-numbers as of this writing). `trs-engine` gains a dependency on `trs-stream` (not the other way round).
+numbers as of this writing). `seedwell-engine` gains a dependency on `seedwell-stream` (not the other way round).
 
 ## 0. Ownership
 
-* One `trs_stream::StreamServer` per session, started lazily on the first `stream_url` (no listener
+* One `seedwell_stream::StreamServer` per session, started lazily on the first `stream_url` (no listener
   and no tasks while nobody streams: idle budgets in SPEC 2 stay untouched). Keep it in the session
   struct (`engine/src/session/mod.rs`) next to the other long-lived services; `Cmd::Shutdown` calls
   `server.shutdown().await`.
@@ -22,7 +22,7 @@ Everything needed already exists in the torrent's `DiskCtx` (`engine/src/peer.rs
 | `geometry()` | `disk.piece_len`, `disk.total_len` |
 | `has(p)` | `disk.have.get(p)` (`SharedHave`, lock-free atomic bits, already read by every peer task) |
 | `subscribe()` | a `watch::Sender<u64>` owned by the torrent actor, see section 4 |
-| `read(off, len, buf)` | split at piece boundaries; per piece `disk.handle.read_block(piece, begin, n, buf)` (`trs-storage`, goes through the fd cache; the `Vec` is reused as the storage API already allows; `peer.rs:924` is the existing upload-path example). Padding files read as zeros, which is correct |
+| `read(off, len, buf)` | split at piece boundaries; per piece `disk.handle.read_block(piece, begin, n, buf)` (`seedwell-storage`, goes through the fd cache; the `Vec` is reused as the storage API already allows; `peer.rs:924` is the existing upload-path example). Padding files read as zeros, which is correct |
 | `piece_progress(p)` | optional. The picker knows partial pieces (`Picker.partial`, `picker.rs:40`); publish `received * 16 KiB` for open partials in a small `Arc<[AtomicU32]>`/map the adapter can read. Without it a response times out after 60 s on a piece that is merely slow |
 | `set_urgent(id, ranges)` / `clear(id)` | `try_send` a `TorrentCmd::StreamHints { id, ranges: Box<[UrgentRange]> }` / `ClearHints(id)` to the torrent actor (`TorrentCmd`, `torrent/mod.rs:69`). Never block; the call comes from a stream task |
 
@@ -100,7 +100,7 @@ streams.
    `choker.rs`) while it has live cursors, so it wins bandwidth against background torrents. Cross-torrent fairness
    is bandwidth weighting; deadlines only order pieces inside one torrent.
 5. Build the `FileRange { index, name: last path component, offset: layout.file_start(i), len: layout.file_len(i) }`
-   (`Layout` in trs-storage; skip padding files) and call `server.open(source, file, id as u64)`.
+   (`Layout` in seedwell-storage; skip padding files) and call `server.open(source, file, id as u64)`.
 6. If the file is already complete (all its pieces present) return no URL: the app opens the file itself
    (SPEC 7F.3, finished files need no server). Expose `complete: bool` in the reply.
 
@@ -111,7 +111,7 @@ seed client yet. For streaming:
 
 * A web seed fetches **only Urgent pieces** (SPEC 7F.2: "and from web seeds when present"): when the picker holds an
   urgent piece with no peer able to serve it soon (or always, for the first piece of a window), issue
-  `GET <seed>/<file path> Range: bytes=<piece start - file start>-<end>` with `trs-http` (it already does ranged,
+  `GET <seed>/<file path> Range: bytes=<piece start - file start>-<end>` with `seedwell-http` (it already does ranged,
   resumable segment downloads, `crates/http`), write the bytes with `TorrentHandle::write_block(piece, begin, data)`
   as 16 KiB blocks so the normal hashing/`Verified` path and the epoch bump apply. Treat it as one more "peer"
   in the picker so duplicates are cancelled the same way (a cancelled HTTP range is just dropped).
@@ -140,7 +140,7 @@ StopStream(StopStreamParams { token }) = "stop_stream", Control   -> ()
 
 `StreamInfo` (serde, also the FFI record): `url`, `token`, `file_name`, `file_len`, `content_type`,
 `container` (`mp4_family | matroska | avi | mpeg_ts | other_video | audio | unknown`), `is_mp4_family: bool`,
-`complete: bool`. All of it is already in `trs_stream::StreamHandle` (`container`, `is_mp4_family`,
+`complete: bool`. All of it is already in `seedwell_stream::StreamHandle` (`container`, `is_mp4_family`,
 `content_type`); `complete` comes from step 6 above. Handlers go in `control/src/ops.rs`/`engine_backend.rs`
 (`Backend` trait: `stream_url`, `stop_stream`). The agent tools (`stream_url(id, file)`, `stop_stream(token)`,
 SPEC 7F.3) are these two requests; log them in `agent_activity` like other control calls.

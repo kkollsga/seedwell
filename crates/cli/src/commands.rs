@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use trs_control::client::{Client, ClientError};
-use trs_control::proto::*;
-use trs_control::types::*;
+use seedwell_control::client::{Client, ClientError};
+use seedwell_control::proto::*;
+use seedwell_control::types::*;
 
 use crate::args::Usage;
 use crate::cmd::{AddArgs, Cmd, DevAction, GoalArgs, ListArgs, LogArgs, StartMode};
@@ -407,10 +407,23 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
             let v = c.call(&Request::Rules(Empty {})).await?;
             show(g, &v, || render_rules(&v));
         }
-        Cmd::SettingsGet { keys } => {
+        Cmd::SettingsGet { keys, file } => {
             let mut c = connect(g).await?;
-            let (raw, s): (_, SettingsDto) = ask(&mut c, Request::SettingsGet(SettingsGetParams { keys: (!keys.is_empty()).then_some(keys) })).await?;
-            show(g, &raw, || s.settings.iter().map(|(k, v)| format!("{k} = {v}")).collect::<Vec<_>>().join("\n"));
+            let (raw, s): (_, SettingsDto) =
+                ask(&mut c, Request::SettingsGet(SettingsGetParams { keys: (!keys.is_empty()).then_some(keys), file: file.clone() })).await?;
+            match file {
+                // The document as JSON, to edit and give back to `settings set --file`.
+                Some(f) => show(g, &raw, || json_text(s.settings.get(&f).unwrap_or(&Value::Null), true)),
+                None => show(g, &raw, || s.settings.iter().map(|(k, v)| format!("{k} = {v}")).collect::<Vec<_>>().join("\n")),
+            }
+        }
+        Cmd::SettingsSetFile { file, doc } => {
+            let text = if doc == "-" { crate::chat::stdin_text("The JSON")? } else { doc };
+            let doc: Value = serde_json::from_str(&text).map_err(|e| CliError::plain(2, format!("--file {file}: the document is not JSON: {e}")))?;
+            let mut c = connect(g).await?;
+            let (raw, s): (_, SettingsDto) =
+                ask(&mut c, Request::SettingsSet(SettingsSetParams { file: Some(file), doc: Some(doc), ..Default::default() })).await?;
+            show(g, &raw, || format!("changed: {}\n{}", s.changed.join(", "), s.note));
         }
         Cmd::SettingsSet { pairs } => {
             let mut c = connect(g).await?;
@@ -436,6 +449,8 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         Cmd::Awake(a) => crate::awake::run(a, g).await?,
         Cmd::Agents(a) => crate::agents::run(a, g).await?,
         Cmd::Update(u) => crate::update::run(u, g).await?,
+        Cmd::Restart(r) => crate::restart::run(r, g).await?,
+        Cmd::Proxy(p) => crate::proxy::run(p, g).await?,
         Cmd::Relay(a) => sync::relay(a).await?,
         Cmd::Help(topic) => crate::print_help(topic.as_deref())?,
         Cmd::Daemon(_) => unreachable!("handled in lib.rs"),
@@ -447,11 +462,23 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
 pub async fn settings_set(c: &mut Client, pairs: Vec<(String, String)>) -> R<(Value, SettingsDto)> {
     let mut changes = serde_json::Map::new();
     for (k, v) in pairs {
-        // Numbers, booleans and quoted JSON pass through; anything else is a string.
-        let val = serde_json::from_str::<Value>(&v).unwrap_or(Value::String(v));
+        let val = setting_value(&k, v).map_err(|why| CliError::plain(2, why))?;
         changes.insert(k, val);
     }
-    ask(c, Request::SettingsSet(SettingsSetParams { changes })).await
+    ask(c, Request::SettingsSet(SettingsSetParams { changes, ..Default::default() })).await
+}
+
+/// A `settings set` value: numbers, booleans and quoted JSON pass through; anything else is a string. A table or list that
+/// is not JSON is refused here rather than sent as a string: Windows PowerShell 5.1 drops the double quotes inside an
+/// argument, so `'{"a":1}'` arrives as `{a:1}`, and the core could only say the type is wrong.
+fn setting_value(key: &str, v: String) -> Result<Value, String> {
+    match serde_json::from_str::<Value>(&v) {
+        Ok(val) => Ok(val),
+        Err(e) if v.trim_start().starts_with(['{', '[']) => Err(format!(
+            "{key}: the value is not JSON ({e}): {v}\nIf a shell dropped its double quotes (Windows PowerShell 5.1 does), write each as \\\" ('{{\\\"a\\\":1}}'), put --% before the arguments, or use settings set --file."
+        )),
+        Err(_) => Ok(Value::String(v)),
+    }
 }
 
 async fn list(g: &Global, a: ListArgs) -> R {
@@ -790,6 +817,12 @@ async fn watch(g: &Global, kinds: Option<Vec<String>>, count: Option<u64>, for_s
 /// `seedwell log trackers`: the developer-mode log. Asks the running app or daemon (permission
 /// `read_only`); when none runs it reads the file next to the socket.
 pub async fn log_trackers(g: &Global, a: LogArgs) -> R {
+    if a.clear {
+        let mut c = connect(g).await?;
+        let v = c.call(&Request::TrackerLogClear(seedwell_control::proto::Empty {})).await?;
+        show(g, &v, || "The tracker log was cleared.".into());
+        return Ok(());
+    }
     let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     let cutoff = a.since_secs.map(|s| now_ms.saturating_sub(s * 1000));
     let print = |v: &Value| {
@@ -799,10 +832,10 @@ pub async fn log_trackers(g: &Global, a: LogArgs) -> R {
         if g.json {
             println!("{}", json_text(v, false));
         } else {
-            println!("{}\n", trs_devlog::view::Row::from_value(v).detail);
+            println!("{}\n", seedwell_devlog::view::Row::from_value(v).detail);
         }
     };
-    let query = trs_devlog::read::Query {
+    let query = seedwell_devlog::read::Query {
         torrent: a.torrent.clone(),
         tracker: a.tracker.clone(),
         event: a.event.clone(),
@@ -816,13 +849,13 @@ pub async fn log_trackers(g: &Global, a: LogArgs) -> R {
             // No app or daemon: read the file that sits next to the socket.
             let dir = g.socket.parent().map(|p| p.join("logs")).unwrap_or_default();
             eprintln!("seedwell: not running; reading {}", dir.join("trackers.log").display());
-            for l in trs_devlog::read::tail(&dir, &query) {
+            for l in seedwell_devlog::read::tail(&dir, &query) {
                 if let Ok(v) = serde_json::from_str::<Value>(&l) {
                     print(&v);
                 }
             }
             if a.follow {
-                let mut f = trs_devlog::read::Follower::new(&dir);
+                let mut f = seedwell_devlog::read::Follower::new(&dir);
                 loop {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     for l in f.poll() {
@@ -874,7 +907,7 @@ async fn dev(g: &Global, action: DevAction) -> R {
     if action != DevAction::Status {
         let (_, _) = settings_set(&mut c, vec![(KEY.into(), (action == DevAction::On).to_string())]).await?;
     }
-    let (_, s): (_, SettingsDto) = ask(&mut c, Request::SettingsGet(SettingsGetParams { keys: Some(vec![KEY.into()]) })).await?;
+    let (_, s): (_, SettingsDto) = ask(&mut c, Request::SettingsGet(SettingsGetParams { keys: Some(vec![KEY.into()]), file: None })).await?;
     let on = s.settings.get(KEY) == Some(&Value::Bool(true));
     let log = g.socket.parent().map(|p| p.join("logs").join("trackers.log")).unwrap_or_default();
     let size = std::fs::metadata(&log).map(|m| m.len()).ok();
@@ -882,7 +915,7 @@ async fn dev(g: &Global, action: DevAction) -> R {
     show(g, &v, || {
         let mut t = format!("Developer mode is {}.", if on { "ON: every tracker exchange is logged (passkeys masked)" } else { "off" });
         match size {
-            Some(n) => t.push_str(&format!("\nTracker log: {} ({})", log.display(), trs_control::human::bytes(n))),
+            Some(n) => t.push_str(&format!("\nTracker log: {} ({})", log.display(), seedwell_control::human::bytes(n))),
             None => t.push_str(&format!("\nTracker log: {} (no file yet)", log.display())),
         }
         if !on {
@@ -906,6 +939,17 @@ mod tests {
         // an answer that already carries a version keeps one
         assert_eq!(json_text(&json!({ "v": 1, "x": 2 }), false), r#"{"v":1,"x":2}"#);
         assert_eq!(json_text(&json!([1]), false), "[1]");
+    }
+
+    #[test]
+    fn a_table_whose_quotes_a_shell_dropped_is_refused_naming_the_key_not_sent_as_a_string() {
+        assert!(setting_value("transfers.alt", r#"{"schedule":{"enabled":true}}"#.into()).unwrap().is_object());
+        // As Windows PowerShell 5.1 passes '{"schedule":{"enabled":true}}'.
+        let why = setting_value("transfers.alt", "{schedule:{enabled:true}}".into()).unwrap_err();
+        assert!(why.starts_with("transfers.alt: the value is not JSON") && why.contains("PowerShell"), "{why}");
+        assert!(setting_value("folders.watch", "[{path:x}]".into()).is_err());
+        assert_eq!(setting_value("folders.archive_dir", "~/Done".into()).unwrap(), json!("~/Done"));
+        assert_eq!(setting_value("transfers.max_active_downloads", "7".into()).unwrap(), json!(7));
     }
 
     #[test]

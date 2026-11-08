@@ -98,7 +98,7 @@ fn the_list_rows_and_their_menus() {
     let m = model(&i, &host_windows_all());
     let r = &m.folders[0];
     assert_eq!((r.title.as_str(), r.subtitle.as_str(), r.accessibility_label.as_str()), ("Photos", "Up to date", "Photos, Up to date"));
-    let reveal = concat!("Show in ", trs_platform::file_manager!());
+    let reveal = concat!("Show in ", seedwell_platform::file_manager!());
     assert_eq!(titles(&r.menu), [reveal, "Share…", "Open Chat", "Edit…", "-", "Stop Syncing…"]);
     assert_eq!(titles(&m.folders[1].menu), [reveal, "Edit…", "-", "Stop Syncing…"], "Read & write may not share; no channel here");
     assert_eq!(m.add.unwrap().title, "Add Folder…");
@@ -119,7 +119,7 @@ fn the_header_has_its_buttons_place_and_status() {
     i.channels = vec![channel("Family", 2, 1, 0, false)];
     let p = model(&i, &host_windows_all()).page.unwrap();
     let b: Vec<(&str, &str)> = p.buttons.iter().map(|b| (b.title.as_str(), b.help.as_str())).collect();
-    let computer = trs_platform::computer!();
+    let computer = seedwell_platform::computer!();
     assert_eq!(
         b,
         [
@@ -131,7 +131,7 @@ fn the_header_has_its_buttons_place_and_status() {
     );
     assert_eq!(p.buttons[0].command, SyncPageCommand::OpenChat { channel_id: "Family".into() });
     assert_eq!(p.place, "/Users/me/Seedwell/Photos");
-    assert_eq!(p.reveal.accessibility_label.as_deref(), Some(format!("Show Photos in {}", trs_platform::file_manager!()).as_str()));
+    assert_eq!(p.reveal.accessibility_label.as_deref(), Some(format!("Show Photos in {}", seedwell_platform::file_manager!()).as_str()));
     assert_eq!(p.status, format!("Up to date · 2 devices · Owner · shared until D{} · 10 items · 1.0 GB · synced 3 minutes ago", NOW_S + 86_400));
     assert_eq!((p.error, p.note, p.on_demand_off), (None, None, None));
     let w = model(&i, &WINDOWS).page.unwrap();
@@ -168,15 +168,18 @@ fn the_host_reads_members_and_conflicts_at_the_core_s_pace() {
     }
 }
 
+/// Reveal shows the folder's place, or its page when there is nothing to show; it decides from the folder as the core
+/// saw it, never from the disk (the hosts ask on their UI thread: a look at a disk that sleeps or is gone held it for
+/// seconds). Fails when a missing folder is shown, or when Reveal looks at the disk (a place the core sees, though not
+/// on this disk, must still be shown).
 #[test]
 fn reveal_shows_the_place_or_the_page_when_there_is_nothing_to_show() {
     let dir = tempfile::tempdir().unwrap();
     let mut f = folder("A", SyncState::UpToDate);
-    f.path = dir.path().display().to_string();
+    f.path = dir.path().join("Not looked at").display().to_string();
     assert_eq!(sync_reveal(f.clone(), None), SyncReveal::Show { path: f.path.clone() });
     // Missing (the folder or its disk): its page.
-    let mut gone = f.clone();
-    gone.path = dir.path().join("Gone").display().to_string();
+    let gone = SyncFolder { state: SyncState::Missing, ..f.clone() };
     assert_eq!(sync_reveal(gone, None), SyncReveal::Page);
     // On demand: where the file manager has it; without that, its page (its place on disk is not where it is).
     let mut od = f.clone();
@@ -204,7 +207,7 @@ fn members_are_ordered_named_and_an_owner_gets_their_menu() {
     }];
     let p = model(&i, &host_windows_all()).page.unwrap();
     assert_eq!(p.members.title, "Members");
-    let computer = trs_platform::computer!();
+    let computer = seedwell_platform::computer!();
     let rows = &p.members.rows;
     assert_eq!(rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>(), [format!("This {computer} (this {computer})"), "Anna K (Anna)".into(), "Studio".into()]);
     assert_eq!(rows.iter().map(|r| r.reach).collect::<Vec<_>>(), [SyncMemberReach::ThisDevice, SyncMemberReach::LocalNetwork, SyncMemberReach::Away]);
@@ -324,4 +327,22 @@ fn the_signature_follows_the_page() {
     let mut busy = i.clone();
     busy.snapshot.folders[0].state = SyncState::Paused;
     assert_ne!(model(&busy, &host_windows_all()).signature, a);
+}
+
+/// Failure: the structure changing with a value (the host rebuilds the whole page twice a second while a folder is
+/// added, and Windows collects garbage in a 50–70 ms pass every few draws), or staying put when a row or a part comes or
+/// goes (the host updates a page in place that no longer has those elements).
+#[test]
+fn the_structure_follows_the_elements_not_the_values() {
+    let i = input(vec![folder("A", SyncState::UpToDate)]);
+    let a = model(&i, &host_windows_all());
+    let mut busy = i.clone();
+    busy.snapshot.folders[0].state = SyncState::Paused;
+    let b = model(&busy, &host_windows_all());
+    assert_ne!(b.signature, a.signature);
+    assert_eq!(b.structure, a.structure, "a status is a value");
+    let two = input(vec![folder("A", SyncState::UpToDate), folder("B", SyncState::UpToDate)]);
+    assert_ne!(model(&two, &host_windows_all()).structure, a.structure, "a folder came");
+    let none = input(vec![]);
+    assert_ne!(model(&none, &host_windows_all()).structure, a.structure, "the empty page");
 }

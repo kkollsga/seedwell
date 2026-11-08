@@ -1,34 +1,34 @@
 //! Small file-system helpers: volume guards, free space, renames that never replace. The system
-//! calls behind them live in `trs-platform`.
+//! calls behind them live in `seedwell-platform`.
 
 use std::fs::File;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
 /// macOS refuses `setrlimit(NOFILE)` above `OPEN_MAX` regardless of the hard limit.
-pub const NOFILE_SAFE_CAP: u64 = trs_platform::proc::NOFILE_SAFE_CAP;
+pub const NOFILE_SAFE_CAP: u64 = seedwell_platform::proc::NOFILE_SAFE_CAP;
 
 /// Raises the limit of open files towards `target`; returns the resulting limit. Call once at
 /// startup: the macOS default soft limit of 256 is below the fd-cache default.
 pub fn raise_nofile_limit(target: u64) -> io::Result<u64> {
-    trs_platform::proc::raise_nofile_limit(target)
+    seedwell_platform::proc::raise_nofile_limit(target)
 }
 
 /// Number of performance cores, else logical CPUs: hashing is pinned to this many threads so it
 /// never competes with efficiency cores' power budget.
 pub fn perf_core_count() -> usize {
-    trs_platform::proc::perf_core_count()
+    seedwell_platform::proc::perf_core_count()
 }
 
 /// Reserves `len` bytes for a freshly created (empty) file, then sets its length
-/// ([`trs_platform::fs::preallocate`]).
+/// ([`seedwell_platform::fs::preallocate`]).
 pub fn preallocate(file: &File, len: u64) -> io::Result<()> {
-    trs_platform::fs::preallocate(file, len)
+    seedwell_platform::fs::preallocate(file, len)
 }
 
 /// Lowers the calling thread's disk I/O priority (scrub/recheck must not hurt foreground I/O).
 pub fn set_background_io() {
-    trs_platform::proc::set_background_io()
+    seedwell_platform::proc::set_background_io()
 }
 
 /// For `/Volumes/<name>/...` returns `/Volumes/<name>`: the mount point that must exist before
@@ -69,7 +69,7 @@ pub fn create_dirs_guarded(dir: &Path) -> io::Result<()> {
 /// This is the "same volume?" key of SPEC §7A.4: a folder that has not been created yet lives on
 /// the volume of the closest folder that exists. Symlinks are followed.
 pub fn dev_of_nearest_existing(path: &Path) -> io::Result<u64> {
-    nearest_existing(path, trs_platform::fs::volume_id)
+    nearest_existing(path, seedwell_platform::fs::volume_id)
 }
 
 /// Whether two paths live on the same volume (device id of the nearest existing ancestor).
@@ -79,7 +79,7 @@ pub fn same_volume(a: &Path, b: &Path) -> io::Result<bool> {
 
 /// Bytes available to an unprivileged writer on the volume holding `path` (nearest existing ancestor).
 pub fn available_space(path: &Path) -> io::Result<u64> {
-    nearest_existing(path, trs_platform::fs::available_space)
+    nearest_existing(path, seedwell_platform::fs::available_space)
 }
 
 /// `f` of `path`'s nearest ancestor that exists (`path` itself first).
@@ -97,25 +97,57 @@ fn nearest_existing<T>(path: &Path, f: impl Fn(&Path) -> io::Result<T>) -> io::R
 }
 
 /// Renames `from` to `to`, failing with `AlreadyExists` instead of replacing `to`
-/// ([`trs_platform::fs::rename_no_replace`]). A cross-volume attempt fails so callers can copy instead.
+/// ([`seedwell_platform::fs::rename_no_replace`]). A cross-volume attempt fails so callers can copy instead.
 pub fn rename_excl(from: &Path, to: &Path) -> io::Result<()> {
-    trs_platform::fs::rename_no_replace(from, to)
+    seedwell_platform::fs::rename_no_replace(from, to)
 }
 
 /// Turns the page cache off for `file`: bulk copies must not evict the working set that seeding
 /// needs. Best effort.
 pub fn set_nocache(file: &File) {
-    trs_platform::fs::set_nocache(file)
+    seedwell_platform::fs::set_nocache(file)
 }
-/// Copy a file's metadata from `src` to `dst`, both open ([`trs_platform::fs::copy_metadata`]).
+/// Copy a file's metadata from `src` to `dst`, both open ([`seedwell_platform::fs::copy_metadata`]).
 pub fn copy_metadata(src: &File, dst: &File) -> io::Result<()> {
-    trs_platform::fs::copy_metadata(src, dst)
+    seedwell_platform::fs::copy_metadata(src, dst)
 }
 
 /// Ask the allocator to give freed memory back to the OS and return roughly how many bytes it
-/// Ask the allocator to give freed memory back to the OS ([`trs_platform::proc::release_free_memory`]).
+/// Ask the allocator to give freed memory back to the OS ([`seedwell_platform::proc::release_free_memory`]).
 pub fn release_free_memory() -> usize {
-    trs_platform::proc::release_free_memory()
+    seedwell_platform::proc::release_free_memory()
+}
+
+/// The partial copy a cross-volume move (finalize, relocate) writes beside its destination before the
+/// atomic rename that publishes it: `<dst>.seedwell-part`.
+pub(crate) fn part_path(dst: &Path) -> PathBuf {
+    with_suffix(dst, ".seedwell-part")
+}
+
+/// The partial copy's suffix before the rename of the internal names (2026-11-07). A move cut off by a
+/// crash before the update left its part under this name.
+const PRE_RENAME_PART_SUFFIX: &str = ".trs-part";
+
+fn with_suffix(dst: &Path, suffix: &str) -> PathBuf {
+    let mut s = dst.as_os_str().to_os_string();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+/// Removes `dst`'s partial copy, under its name and under the one it had before the rename of the
+/// internal names: a move resumed or rolled back after the update must not leave the old part behind,
+/// nor take an old part's presence for "the publishing rename did not happen yet" wrongly. `true` when
+/// either existed.
+pub(crate) fn remove_part(dst: &Path) -> io::Result<bool> {
+    let mut existed = false;
+    for p in [part_path(dst), with_suffix(dst, PRE_RENAME_PART_SUFFIX)] {
+        match std::fs::remove_file(&p) {
+            Ok(()) => existed = true,
+            Err(e) if crate::error::is_not_found(&e) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(existed)
 }
 
 /// Finder's own bookkeeping: `.DS_Store` (view settings) and AppleDouble `._name` files. A folder
@@ -160,9 +192,9 @@ mod tests {
         );
         assert_eq!(volume_mount_point(Path::new("/Users/x")), None);
         assert_eq!(volume_mount_point(Path::new("/Volumes")), None);
-        let e = create_dirs_guarded(Path::new("/Volumes/__trs_no_such_volume__/a/b")).unwrap_err();
+        let e = create_dirs_guarded(Path::new("/Volumes/__seedwell_no_such_volume__/a/b")).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
-        assert!(!Path::new("/Volumes/__trs_no_such_volume__").exists());
+        assert!(!Path::new("/Volumes/__seedwell_no_such_volume__").exists());
     }
 
     #[test]

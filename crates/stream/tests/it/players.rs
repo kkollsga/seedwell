@@ -1,10 +1,10 @@
 //! Real players against the server and a fake swarm at a fixed rate. All `#[ignore]`: they need
 //! the players installed (and a GUI session for IINA), take seconds each, and print a report.
 //!
-//!   cargo test -p trs-stream --test players -- --ignored --nocapture --test-threads=1
+//!   cargo test -p seedwell-stream --test players -- --ignored --nocapture --test-threads=1
 //!
 //! Budgets (SPEC 7F.4, healthy swarm at >= 5 MB/s): first frame <= 5 s, seek <= 4 s.
-//! Environment: `TRS_PIECE_MIB` (default 4) piece size, `TRS_RATE_MBS` (default 6) swarm MB/s.
+//! Environment: `SEEDWELL_PIECE_MIB` (default 4) piece size, `SEEDWELL_RATE_MBS` (default 6) swarm MB/s.
 
 use crate::common;
 
@@ -18,11 +18,11 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use trs_stream::{Config, EndReason, Event, FileRange, StreamHandle, StreamServer};
+use seedwell_stream::{Config, EndReason, Event, FileRange, StreamHandle, StreamServer};
 
-/// VLC to run: `TRS_VLC` (e.g. a universal build unpacked elsewhere) or the one in /Applications.
+/// VLC to run: `SEEDWELL_VLC` (e.g. a universal build unpacked elsewhere) or the one in /Applications.
 fn vlc() -> String {
-    std::env::var("TRS_VLC").unwrap_or_else(|_| "/Applications/VLC.app/Contents/MacOS/VLC".into())
+    std::env::var("SEEDWELL_VLC").unwrap_or_else(|_| "/Applications/VLC.app/Contents/MacOS/VLC".into())
 }
 
 fn env_u64(k: &str, d: u64) -> u64 {
@@ -49,8 +49,8 @@ struct Lab {
 
 async fn lab(kind: Fx, name: &str, secs: u32) -> Option<Lab> {
     let path: PathBuf = fixture(kind, secs)?;
-    let piece = env_u64("TRS_PIECE_MIB", 4) * MIB;
-    let rate = env_u64("TRS_RATE_MBS", 6) * 1_000_000;
+    let piece = env_u64("SEEDWELL_PIECE_MIB", 4) * MIB;
+    let rate = env_u64("SEEDWELL_RATE_MBS", 6) * 1_000_000;
     let src = FakeSource::from_file(&path, piece as u32, rate);
     let recs: Arc<Mutex<Vec<Rec>>> = Arc::new(Mutex::new(Vec::new()));
     let (r2, w): (_, Weak<FakeSource>) = (recs.clone(), Arc::downgrade(&src));
@@ -58,7 +58,7 @@ async fn lab(kind: Fx, name: &str, secs: u32) -> Option<Lab> {
         on_event: Some(Arc::new(move |e| {
             let present = match (e, w.upgrade()) {
                 (Event::Request { start, status, .. }, Some(s)) if *status < 300 => {
-                    use trs_stream::PieceSource;
+                    use seedwell_stream::PieceSource;
                     Some(s.has((*start / piece) as u32))
                 }
                 _ => None,
@@ -147,7 +147,7 @@ impl Lab {
 
     /// A seek target (fraction of the file) whose piece and neighbours are not yet downloaded.
     fn unfetched_fraction(&self) -> f64 {
-        use trs_stream::PieceSource;
+        use seedwell_stream::PieceSource;
         for f in [0.70, 0.66, 0.74, 0.62, 0.78, 0.58, 0.82, 0.5, 0.9] {
             let p = (self.file_len as f64 * f / self.piece as f64) as u32;
             if (p.saturating_sub(1)..=p + 1).all(|q| !self.src.has(q)) {
@@ -446,13 +446,13 @@ async fn iina_plays_url_and_issues_ranges() {
     lab.srv.shutdown().await;
 }
 
-/// Serve the 10-minute MP4 for `TRS_SERVE_SECS` (default 60) and print the URL and requests, so a
+/// Serve the 10-minute MP4 for `SEEDWELL_SERVE_SECS` (default 60) and print the URL and requests, so a
 /// player can be pointed at it by hand.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "manual: prints a URL and serves it"]
 async fn manual_serve() {
     let Some(lab) = lab(Fx::Mp4End, "movie.mp4", 600).await else { return };
     eprintln!("URL: {}", lab.h.url);
-    tokio::time::sleep(Duration::from_secs(env_u64("TRS_SERVE_SECS", 60))).await;
+    tokio::time::sleep(Duration::from_secs(env_u64("SEEDWELL_SERVE_SECS", 60))).await;
     eprintln!("{}", lab.report());
 }

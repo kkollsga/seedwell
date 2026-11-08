@@ -1,4 +1,4 @@
-//! Port mapping for the listen port (TCP and UDP) with `trs-portmap`, plus at most one extra port, also TCP
+//! Port mapping for the listen port (TCP and UDP) with `seedwell-portmap`, plus at most one extra port, also TCP
 //! and UDP (folder sync's, SPEC 7G: the engine lends sync a port mapping).
 //!
 //! Started when `network.upnp` or `network.natpmp` is on, stopped (mappings deleted) when they go
@@ -10,8 +10,8 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use tokio::task::JoinHandle;
-use trs_portmap::driver::{DriverConfig, PortMapHandle, Snapshot, spawn};
-use trs_portmap::{Config, Event, Method, Protocol, Wanted};
+use seedwell_portmap::driver::{DriverConfig, PortMapHandle, Snapshot, spawn};
+use seedwell_portmap::{Config, Event, Method, Protocol, Wanted};
 
 use crate::api::PortMapStatus;
 use crate::session::SessionMsg;
@@ -81,7 +81,7 @@ impl PortMapRunner {
         let mut fixed_net = None;
         if let Some(gw) = pc.test_gateway {
             core.gateway_port = gw.port();
-            fixed_net = Some(trs_portmap::NetInfo { gateway: *gw.ip(), local: Ipv4Addr::LOCALHOST });
+            fixed_net = Some(seedwell_portmap::NetInfo { gateway: *gw.ip(), local: Ipv4Addr::LOCALHOST });
         }
         let (handle, mut events) = spawn(DriverConfig { core, fixed_net });
         let mut watch = handle.watch();
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn the_status_keeps_the_ports_apart() {
-        use trs_portmap::Mapping;
+        use seedwell_portmap::Mapping;
         let m = |protocol, internal_port, external_port| Mapping { protocol, internal_port, external_port, external_ip: None, lifetime_secs: 7200, method: Method::NatPmp };
         let snap = Snapshot {
             method: Some(Method::NatPmp),

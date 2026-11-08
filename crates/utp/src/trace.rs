@@ -1,4 +1,4 @@
-//! Opt-in diagnostics: `TRS_UTP_TRACE=1` makes connections print rare events (retransmission
+//! Opt-in diagnostics: `SEEDWELL_UTP_TRACE=1` makes connections print rare events (retransmission
 //! timeouts, fast-retransmit losses, path-MTU probe results, zero-window periods, persist probes)
 //! and the driver print a state line for every busy connection every 500 ms, to stderr, stamped
 //! with wall-clock milliseconds so it lines up with `netstat` timelines. Off by default; the
@@ -13,9 +13,9 @@ pub(crate) fn on() -> bool {
     ON.load(Ordering::Relaxed)
 }
 
-/// Turn tracing on if `TRS_UTP_TRACE` is set to something other than `0`.
+/// Turn tracing on if `SEEDWELL_UTP_TRACE` is set to something other than `0`.
 pub(crate) fn init_from_env() {
-    if std::env::var_os("TRS_UTP_TRACE").is_some_and(|v| v != "0") {
+    if std::env::var_os("SEEDWELL_UTP_TRACE").is_some_and(|v| v != "0") {
         ON.store(true, Ordering::Relaxed);
     }
 }

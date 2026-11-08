@@ -1,38 +1,38 @@
 == env: Alpine Linux v3.24 | aarch64 | rustc 1.99.0 (b940084d7 2026-09-28) host: aarch64-unknown-linux-musl  | libc: musl libc (aarch64)
-=== trs-bencode: build+test
-RESULT trs-bencode rc=0 passed=24 failed=0 ignored=0 build=ok secs=21
-=== trs-metainfo: build+test
-RESULT trs-metainfo rc=0 passed=67 failed=0 ignored=3 build=ok secs=9
-=== trs-wire: build+test
-RESULT trs-wire rc=0 passed=79 failed=0 ignored=1 build=ok secs=14
-=== trs-tracker: build+test
-RESULT trs-tracker rc=0 passed=296 failed=0 ignored=1 build=ok secs=153
-=== trs-storage: build+test
-RESULT trs-storage rc=101 passed=69 failed=1 ignored=1 build=ERRORS secs=26
+=== seedwell-bencode: build+test
+RESULT seedwell-bencode rc=0 passed=24 failed=0 ignored=0 build=ok secs=21
+=== seedwell-metainfo: build+test
+RESULT seedwell-metainfo rc=0 passed=67 failed=0 ignored=3 build=ok secs=9
+=== seedwell-wire: build+test
+RESULT seedwell-wire rc=0 passed=79 failed=0 ignored=1 build=ok secs=14
+=== seedwell-tracker: build+test
+RESULT seedwell-tracker rc=0 passed=296 failed=0 ignored=1 build=ok secs=153
+=== seedwell-storage: build+test
+RESULT seedwell-storage rc=101 passed=69 failed=1 ignored=1 build=ERRORS secs=26
     error: 1 target failed:
-    error: test failed, to rerun pass `-p trs-storage --test download`
+    error: test failed, to rerun pass `-p seedwell-storage --test download`
     failures:
     test preallocate_option_reserves_full_files ... FAILED
     test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
     thread 'preallocate_option_reserves_full_files' (7792) panicked at crates/storage/tests/download.rs:349:5:
-=== trs-dht: build+test
-RESULT trs-dht rc=0 passed=95 failed=0 ignored=1 build=ok secs=69
-=== trs-utp: build+test
-RESULT trs-utp rc=0 passed=65 failed=0 ignored=1 build=ok secs=23
-=== trs-http: build+test
-RESULT trs-http rc=0 passed=54 failed=0 ignored=0 build=ok secs=35
-=== trs-state: build+test
-RESULT trs-state rc=0 passed=134 failed=0 ignored=0 build=ok secs=57
-=== trs-classify: build+test
-RESULT trs-classify rc=0 passed=157 failed=0 ignored=0 build=ok secs=17
-=== trs-engine: build+test
-RESULT trs-engine rc=101 passed=200 failed=10 ignored=1 build=ERRORS secs=768
+=== seedwell-dht: build+test
+RESULT seedwell-dht rc=0 passed=95 failed=0 ignored=1 build=ok secs=69
+=== seedwell-utp: build+test
+RESULT seedwell-utp rc=0 passed=65 failed=0 ignored=1 build=ok secs=23
+=== seedwell-http: build+test
+RESULT seedwell-http rc=0 passed=54 failed=0 ignored=0 build=ok secs=35
+=== seedwell-state: build+test
+RESULT seedwell-state rc=0 passed=134 failed=0 ignored=0 build=ok secs=57
+=== seedwell-classify: build+test
+RESULT seedwell-classify rc=0 passed=157 failed=0 ignored=0 build=ok secs=17
+=== seedwell-engine: build+test
+RESULT seedwell-engine rc=101 passed=200 failed=10 ignored=1 build=ERRORS secs=768
     error: 5 targets failed:
-    error: test failed, to rerun pass `-p trs-engine --lib`
-    error: test failed, to rerun pass `-p trs-engine --test locations`
-    error: test failed, to rerun pass `-p trs-engine --test moves`
-    error: test failed, to rerun pass `-p trs-engine --test utp`
-    error: test failed, to rerun pass `-p trs-engine --test watch`
+    error: test failed, to rerun pass `-p seedwell-engine --lib`
+    error: test failed, to rerun pass `-p seedwell-engine --test locations`
+    error: test failed, to rerun pass `-p seedwell-engine --test moves`
+    error: test failed, to rerun pass `-p seedwell-engine --test utp`
+    error: test failed, to rerun pass `-p seedwell-engine --test watch`
     failures:
     test a_category_can_stage_in_its_own_incomplete_folder ... FAILED
     test a_category_change_moves_a_placed_torrent ... FAILED
@@ -47,16 +47,16 @@ RESULT trs-engine rc=101 passed=200 failed=10 ignored=1 build=ERRORS secs=768
     test result: FAILED. 7 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 46.26s
     test result: FAILED. 82 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
     test the_dht_works_on_the_shared_port ... FAILED
-=== trs-control: build+test
-RESULT trs-control rc=0 passed=85 failed=0 ignored=0 build=ok secs=54
-=== trs-cli: build+test
-RESULT trs-cli rc=101 passed=25 failed=1 ignored=0 build=ERRORS secs=51
+=== seedwell-control: build+test
+RESULT seedwell-control rc=0 passed=85 failed=0 ignored=0 build=ok secs=54
+=== seedwell-cli: build+test
+RESULT seedwell-cli rc=101 passed=25 failed=1 ignored=0 build=ERRORS secs=51
     error: 1 target failed:
-    error: test failed, to rerun pass `-p trs-cli --test e2e`
+    error: test failed, to rerun pass `-p seedwell-cli --test e2e`
     failures:
     test download_pause_resume_info_stats_and_two_step_remove ... FAILED
     test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.94s
     thread 'download_pause_resume_info_stats_and_two_step_remove' (31911) panicked at crates/cli/tests/common/mod.rs:152:9:
     thread 'download_pause_resume_info_stats_and_two_step_remove' (31911) panicked at crates/cli/tests/common/mod.rs:83:63:
-=== trs-portmap: build+test
-RESULT trs-portmap rc=0 passed=71 failed=0 ignored=1 build=ok secs=16
+=== seedwell-portmap: build+test
+RESULT seedwell-portmap rc=0 passed=71 failed=0 ignored=1 build=ok secs=16

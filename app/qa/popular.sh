@@ -18,9 +18,9 @@ qa_setting transfers.max_active_downloads=3
 APPPORT=$("$CLI" --socket "$SOCK" status --json | python3 -c "import json,sys;print(json.load(sys.stdin)['totals']['listen_port'])")
 for n in 1 2 3; do
   L="$QA_ROOT/leech$n"; mkdir -p "$L"
-  TRS_FORBID_REAL_HOME=1 HOME="$QA_ROOT/leech-home" detach "$TRS" daemon --state-dir "$L" --download-dir "$L/dl" --listen-port $((7400+n)) --bind 127.0.0.1 --no-dht --no-trackers --permission full --socket "$L/control.sock" >"$L/log" 2>&1 &
+  SEEDWELL_FORBID_REAL_HOME=1 HOME="$QA_ROOT/leech-home" detach "$SEEDWELL" daemon --state-dir "$L" --download-dir "$L/dl" --listen-port $((7400+n)) --bind 127.0.0.1 --no-dht --no-trackers --permission full --socket "$L/control.sock" >"$L/log" 2>&1 &
 done
 for n in 1 2 3; do
   qa_until 10 test -S "$QA_ROOT/leech$n/control.sock"
-  "$TRS" --socket "$QA_ROOT/leech$n/control.sock" add "$QA_ROOT/big/torrents"/*.torrent --peer 127.0.0.1:$APPPORT >/dev/null || echo "leecher $n failed"
+  "$SEEDWELL" --socket "$QA_ROOT/leech$n/control.sock" add "$QA_ROOT/big/torrents"/*.torrent --peer 127.0.0.1:$APPPORT >/dev/null || echo "leecher $n failed"
 done

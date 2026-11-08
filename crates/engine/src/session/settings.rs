@@ -29,7 +29,7 @@ pub(crate) fn now_local(cfg: &EngineConfig) -> (i64, i32) {
 fn open_at(cfg: &EngineConfig, unix: i64, offset: i32) -> bool {
     let Some(s) = &cfg.alt_schedule else { return false };
     let local = unix.saturating_add(i64::from(offset));
-    let day = trs_state::Day::from_unix(unix, offset);
+    let day = seedwell_state::Day::from_unix(unix, offset);
     let minute = (local.rem_euclid(86_400) / 60) as u16;
     s.active_at(day.weekday(), minute)
 }
@@ -377,7 +377,7 @@ impl Session {
         self.restart_portmap();
     }
 
-    pub(super) fn on_dht_moved(&mut self, serial: u64, dht: trs_dht::DhtHandle) {
+    pub(super) fn on_dht_moved(&mut self, serial: u64, dht: seedwell_dht::DhtHandle) {
         if self.shutting_down || serial != self.rebind_gen {
             tokio::spawn(async move { dht.shutdown().await });
             return;
@@ -482,11 +482,11 @@ mod tests {
 
     use super::*;
     use crate::config::{AltSchedule, ClockFn};
-    use trs_state::config::{DaySet, TimeOfDay};
+    use seedwell_state::config::{DaySet, TimeOfDay};
 
     /// 2026-10-12 was a Monday.
     fn monday(h: i64, m: i64, s: i64) -> i64 {
-        trs_state::fsutil::days_from_civil(2026, 10, 12) * 86_400 + h * 3600 + m * 60 + s
+        seedwell_state::fsutil::days_from_civil(2026, 10, 12) * 86_400 + h * 3600 + m * 60 + s
     }
 
     fn cfg_at(t: i64, off: i32, days: DaySet, from: u16, to: u16) -> EngineConfig {

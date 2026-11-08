@@ -4,10 +4,10 @@
 
 use std::net::SocketAddr;
 
-use trs_rendezvous::testkit::fake_rendezvous;
-use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::members::{InviteLink, Role};
-use trs_sync_proto::rendezvous::{Record, record_id_hex};
+use seedwell_rendezvous::testkit::fake_rendezvous;
+use seedwell_sync_proto::ids::FolderId;
+use seedwell_sync_proto::members::{InviteLink, Role};
+use seedwell_sync_proto::rendezvous::{Record, record_id_hex};
 
 use crate::utp::{addr, device_with, until};
 
@@ -31,7 +31,7 @@ async fn a_device_joins_through_the_rendezvous_alone_and_a_network_change_writes
 
     // Anna's record there: sealed, signed, her address in it.
     let id = record_id_hex(&a.h.device_id());
-    let sealed = trs_rendezvous::client::Rendezvous::new(&rv.url()).unwrap().get(&id).await.unwrap().unwrap();
+    let sealed = seedwell_rendezvous::client::Rendezvous::new(&rv.url()).unwrap().get(&id).await.unwrap().unwrap();
     let rec = Record::open(&sealed, &a.h.device_id()).unwrap();
     assert_eq!(rec.lan, vec![addr(&a)]);
 
@@ -69,7 +69,7 @@ async fn a_device_joins_through_the_rendezvous_alone_and_a_network_change_writes
     a.h.turn_off_rendezvous().await.unwrap();
     assert_eq!(a.h.rendezvous_status().url, "");
     assert!(rv.count("DELETE", &format!("/v1/r/{id}")) >= 1);
-    assert_eq!(trs_rendezvous::client::Rendezvous::new(&rv.url()).unwrap().get(&id).await.unwrap(), None);
+    assert_eq!(seedwell_rendezvous::client::Rendezvous::new(&rv.url()).unwrap().get(&id).await.unwrap(), None);
     a.h.shutdown().await;
     b.h.shutdown().await;
 }

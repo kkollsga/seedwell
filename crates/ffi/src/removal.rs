@@ -3,7 +3,7 @@
 //! for several), picks its icon from [`RemovalQuestion::delete_files`] and calls `remove(ids, delete_files)` on the
 //! confirm button.
 
-use trs_platform::{return_key, trash};
+use seedwell_platform::{return_key, trash};
 
 use crate::menu::APP_NAME;
 use crate::types::TransferRow;

@@ -15,11 +15,11 @@ use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use stateright::{Checker, Model, Property};
-use trs_tracker::backoff::{nominal_delay, slow_nominal_delay};
-use trs_tracker::response::{
+use seedwell_tracker::backoff::{nominal_delay, slow_nominal_delay};
+use seedwell_tracker::response::{
     AnnounceError, AnnounceResponse, FailureClass, RetryIn, TransportError,
 };
-use trs_tracker::*;
+use seedwell_tracker::*;
 
 const IH: InfoHash20 = [5; 20];
 

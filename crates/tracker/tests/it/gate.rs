@@ -4,10 +4,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use trs_tracker::gate::*;
-use trs_tracker::machine::SendKind;
-use trs_tracker::response::Timing;
-use trs_tracker::*;
+use seedwell_tracker::gate::*;
+use seedwell_tracker::machine::SendKind;
+use seedwell_tracker::response::Timing;
+use seedwell_tracker::*;
 
 fn url(s: &str) -> Arc<TrackerUrl> {
     Arc::new(TrackerUrl::parse(s).unwrap())

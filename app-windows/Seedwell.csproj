@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Seedwell for Windows: a WinUI 3 app over the Rust core (trs-ffi as a DLL, C# bindings by uniffi-bindgen-cs).
+  <!-- Seedwell for Windows: a WinUI 3 app over the Rust core (seedwell-ffi as a DLL, C# bindings by uniffi-bindgen-cs).
        Unpackaged and self-contained (Windows App SDK included): simpler on a test PC and for a zip release like the
        Mac's. Build with build.ps1, which makes Generated/ (the DLL, the bindings, the .ico) first. -->
   <PropertyGroup>
@@ -45,7 +45,7 @@
 
   <ItemGroup>
     <!-- Build output of build.ps1, never committed. -->
-    <Content Include="Generated\trs_ffi.dll" CopyToOutputDirectory="PreserveNewest" Link="trs_ffi.dll" />
+    <Content Include="Generated\seedwell_ffi.dll" CopyToOutputDirectory="PreserveNewest" Link="seedwell_ffi.dll" />
     <Content Include="Generated\Seedwell.ico" CopyToOutputDirectory="PreserveNewest" Link="Seedwell.ico" />
   </ItemGroup>
 

@@ -1,13 +1,13 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
 /// <summary>
 /// A synced folder's Edit dialog on Windows (the Mac's folder editor), drawn from the core's <c>SyncEditWindowModel</c>
-/// (trs-ffi sync_dialogs.rs): the name, where it is with Move…, Files on demand, "On all my devices", "Read only", Share… with its
+/// (seedwell-ffi sync_dialogs.rs): the name, where it is with Move…, Files on demand, "On all my devices", "Read only", Share… with its
 /// note, and the Options (Pause, Local network only, Rescan Now). The form is the core's value: this keeps it, edits
 /// the fields itself and the new place through <c>sync_edit_choose_parent</c>, and draws the model again after each
 /// change. Save closes without a call when nothing changed, else runs <c>sync_edit_save</c> off the UI thread (every
@@ -51,7 +51,7 @@ sealed class EditFolderDialog
         };
         dialog.Opened += (_, _) =>
         {
-            foreach (var b in RowCommands.Descendants(dialog.XamlRoot).OfType<Button>())
+            foreach (var b in RowCommands.DialogButtons(dialog))
             {
                 if (Equals(b.Content, model.ConfirmTitle)) AddFolderDialog.Help(b, model.ConfirmHelp);
                 else if (Equals(b.Content, model.CancelTitle)) AddFolderDialog.Help(b, model.CancelHelp);
@@ -85,7 +85,7 @@ sealed class EditFolderDialog
 
     static TextBlock Note(string text) => new() { Text = text, FontSize = 12, Foreground = Res("TextFillColorSecondaryBrush"), TextWrapping = TextWrapping.Wrap, HorizontalAlignment = HorizontalAlignment.Left, MaxWidth = 440 };
 
-    static SyncEditWindowModel Window(SyncEditForm form) => TrsFfiMethods.SyncEditWindow(form, App.HostWindows, App.HostFeatures);
+    static SyncEditWindowModel Window(SyncEditForm form) => SeedwellFfiMethods.SyncEditWindow(form, App.HostWindows, App.HostFeatures);
 
     void Change(SyncEditForm next)
     {
@@ -94,7 +94,9 @@ sealed class EditFolderDialog
         Draw();
     }
 
-    void Draw()
+    void Draw() => FocusKeeper.Redraw(content, dialog.XamlRoot, DrawAnew);
+
+    void DrawAnew()
     {
         model = Window(form);
         dialog.Title = AddFolderDialog.Title(model.Caption, model.Title);
@@ -138,7 +140,7 @@ sealed class EditFolderDialog
         place.Children.Add(where);
         var move = new Button { Content = model.MoveTitle, IsEnabled = model.MoveEnabled && !saving };
         AddFolderDialog.Help(move, model.MoveHelp);
-        move.Click += async (_, _) => { if (await app.PickFolder(model.MovePicker) is string parent) Change(TrsFfiMethods.SyncEditChooseParent(form, parent)); };
+        move.Click += async (_, _) => { if (await app.PickFolder(model.MovePicker) is string parent) Change(SeedwellFfiMethods.SyncEditChooseParent(form, parent)); };
         Grid.SetColumn(move, 1);
         place.Children.Add(move);
         content.Children.Add(place);
@@ -222,7 +224,7 @@ sealed class EditFolderDialog
     {
         _ = Task.Run(() => app.Core.SyncRescan(id)).ContinueWith(t => content.DispatcherQueue.TryEnqueue(() =>
         {
-            rescanned = t.IsCompletedSuccessfully ? "" : t.Exception?.InnerException is CoreException ce ? TrsFfiMethods.CoreErrorMessage(ce) : "";
+            rescanned = t.IsCompletedSuccessfully ? "" : t.Exception?.InnerException is CoreException ce ? SeedwellFfiMethods.CoreErrorMessage(ce) : "";
             AppLog.Write($"edit folder: rescan {(t.IsCompletedSuccessfully ? "started" : $"failed: {rescanned}")}");
             Draw();
         }));
@@ -250,7 +252,7 @@ sealed class EditFolderDialog
         }
         catch (CoreException e)
         {
-            error = TrsFfiMethods.CoreErrorMessage(e);
+            error = SeedwellFfiMethods.CoreErrorMessage(e);
         }
         saving = false;
         if (error is not null)
@@ -271,6 +273,15 @@ sealed class EditFolderDialog
 
     // --------------------------------------------------------------------------------------------------- QA
 
+    /// <summary>QA: typing a name, the caret at <paramref name="caret"/>: each key's TextChanged redraws the dialog.</summary>
+    internal void QaTypeName(string text, int caret)
+    {
+        name.Focus(FocusState.Keyboard);
+        name.Text = text;
+        name.Select(caret, 0);
+    }
+    internal string QaFocused => FocusKeeper.Describe(content, dialog.XamlRoot);
+    internal Task<string> QaWalk() => FocusKeeper.QaWalk(content, dialog.XamlRoot, Draw);
     internal void QaName(string text)
     {
         Change(form with { Name = text });
@@ -283,7 +294,7 @@ sealed class EditFolderDialog
     internal void QaReadOnly(bool on) => Change(form with { ReadOnly = on });
     internal void QaOnDemand(bool on) => Change(form with { OnDemand = on });
     internal void QaOptions(bool open) => Change(form with { OptionsOpen = open });
-    internal void QaParent(string path) => Change(TrsFfiMethods.SyncEditChooseParent(form, path));
+    internal void QaParent(string path) => Change(SeedwellFfiMethods.SyncEditChooseParent(form, path));
     internal void QaShare()
     {
         next = () => ShareDialog.Show(app, id);

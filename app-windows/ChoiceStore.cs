@@ -1,10 +1,10 @@
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
 /// <summary>
 /// The one chooser per torrent that the starting notifier, the chooser window and the list under a held row share
-/// (SPEC 7A.6), as the core keeps them (<c>Choices</c>, trs-ffi chooser.rs): its ticks, Start, Cancel and a category
+/// (SPEC 7A.6), as the core keeps them (<c>Choices</c>, seedwell-ffi chooser.rs): its ticks, Start, Cancel and a category
 /// change are the core's; the Mac's ChoiceStore. This only tells what draws a chooser that it changed, shows Cancel's
 /// quiet note and tells the app that a torrent was resolved.
 /// </summary>

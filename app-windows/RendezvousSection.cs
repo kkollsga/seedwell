@@ -1,13 +1,13 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
 /// <summary>
 /// Settings › Folder Sync › "Find your devices over the Internet (Cloudflare)" on Windows (SPEC §7G.5), drawn from the
-/// core's <c>RendezvousView</c> (trs-ffi sync_rendezvous.rs, as the Mac's RendezvousSection): while off the guide, the
+/// core's <c>RendezvousView</c> (seedwell-ffi sync_rendezvous.rs, as the Mac's RendezvousSection): while off the guide, the
 /// token field with Set Up and another device's address with Use; while working the progress line; while on the address
 /// with Copy, its status, Update, Turn Off and Test; under them the last result. Read again every second while shown.
 /// The API token goes straight to the core and the field is cleared; it is the user's action, never an agent's.
@@ -71,7 +71,9 @@ sealed class RendezvousSection
         }
     }
 
-    void Draw(RendezvousView v)
+    void Draw(RendezvousView v) => FocusKeeper.Redraw(panel, panel.XamlRoot, () => DrawAnew(v));
+
+    void DrawAnew(RendezvousView v)
     {
         // The fields and their buttons move to the new drawing (a child has one parent).
         foreach (var kept in new FrameworkElement[] { token, address, setUp, use })
@@ -253,4 +255,6 @@ sealed class RendezvousSection
 
     /// <summary>QA: types into the address field (as a paste would), so Use can be pressed.</summary>
     internal void QaAddress(string text) => address.Text = text;
+    /// <summary>QA: what a change of the core's view does, while the section is showing (its timer runs only then).</summary>
+    internal void QaRedraw() { if (panel.IsLoaded && View is RendezvousView v) Draw(v); }
 }

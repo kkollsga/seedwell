@@ -15,7 +15,7 @@
 //! Default rule, field by field. `ResolvedPolicy` is therefore always complete.
 
 use serde::{Deserialize, Serialize};
-use trs_classify::Category;
+use seedwell_classify::Category;
 
 use crate::config::{check_path, fixed_prefix};
 use crate::doc::{Document, Parsed, parse_toml, render_table};

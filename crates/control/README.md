@@ -1,4 +1,4 @@
-# trs-control
+# seedwell-control
 
 The agent interface of Seedwell (SPEC 9A): a **versioned JSON-lines control protocol**, the **local
 server** behind `control.sock`, and a small **async client** used by the `seedwell` CLI
@@ -6,8 +6,8 @@ and the tests. `#![forbid(unsafe_code)]`.
 
 ```
 seedwell CLI ─┐
-seedwell sim ─┼─ JSON lines over a Unix socket ─▶ trs-control server ─▶ Backend ─▶ trs_engine::EngineHandle
-Claude, tools ┘   (~/Library/Application Support/Seedwell/control.sock)     └─────▶ trs-state (stats, rules, profiles, settings)
+seedwell sim ─┼─ JSON lines over a Unix socket ─▶ seedwell-control server ─▶ Backend ─▶ seedwell_engine::EngineHandle
+Claude, tools ┘   (~/Library/Application Support/Seedwell/control.sock)     └─────▶ seedwell-state (stats, rules, profiles, settings)
 ```
 
 | Module | Role |
@@ -20,13 +20,14 @@ Claude, tools ┘   (~/Library/Application Support/Seedwell/control.sock)     �
 | `engine_backend` (feature `engine`) | `EngineBackend`: the thin mapping from `EngineHandle`; `serve(..)` and `start_for_app(..)` |
 | `socket` | Where the socket lives, atomic creation with mode 0600 in a 0700 directory, `peer_allowed` |
 | `confirm` | Two-step remove tokens (60 s, single use, per client name) |
-| `perm`, `activity`, `limits`, `redact`, `settings`, `state`, `human`, `b64`, `client` | Permission sources, activity log, line reader and rate limiter, secret scrubbing, allow-listed settings, state access, formatting, base64, client |
+| `perm`, `activity`, `limits`, `redact`, `settings`, `state`, `human`, `b64`, `client` | Permission sources, activity log, line reader and rate limiter, secret scrubbing, settings (every key but `DENIED`; `ROUTED` keys name their command; rules and trackers documents), state access, formatting, base64, client |
+| `builds`, `proxy` | Where the server finds the app's updater (`update.*`, `restart`) and torrent proxy (`proxy.*`); a daemon has neither |
 
 ## Starting the server
 
 ```rust
-// Inside the app (trs-ffi), after the engine started on runtime `rt`:
-let handle = trs_control::start_for_app(&rt, engine.handle(), trs_control::AppServerConfig {
+// Inside the app (seedwell-ffi), after the engine started on runtime `rt`:
+let handle = seedwell_control::start_for_app(&rt, engine.handle(), seedwell_control::AppServerConfig {
     socket_path: None,                                   // default: ~/Library/Application Support/Seedwell/control.sock
     state_dir,                                           // config.toml, rules.toml, trackers.toml
     store: Some(host.store().clone()),                   // Arc<StateStore> for statistics (it implements StoreRef)
@@ -68,11 +69,14 @@ use `serve(engine, state, path, permission).await` from async code. Headless: `s
 * **Activity log.** Every mutating call, allowed or denied, is recorded with the `hello` client name,
   a redacted description and the outcome; `ServerHandle::activity()` for the app,
   `activity` over the protocol (`full`).
-* **Nothing secret goes out.** Announce URLs lose passkeys (`trs_state::url::redact_url`), URLs and
+* **Nothing secret goes out.** Announce URLs lose passkeys (`seedwell_state::url::redact_url`), URLs and
   error texts are scrubbed of anything URL-shaped, magnet links in names/logs keep only `xt` and `dn`,
   direct-download URLs lose their query. Peer addresses appear only in `info`. There are no client-identity
-  or compliance settings to expose; the settings allow-list (`settings::ALLOWED`) excludes `agents.*`
-  (an agent cannot change its own permission), `network.*`, `advanced.*` and watch folders. Tracker
+  or compliance settings to expose. `settings_get`/`settings_set` reach every key of `config.toml` except
+  `settings::DENIED` (`agents.permission`, `agents.notify_changes`, `agents.rate_limit_per_sec`, `version`: an agent
+  cannot raise its own access, silence the notice of its changes or lift its own limit); `settings::ROUTED` keys
+  (`updates.dev_builds`, `updates.dev_folder`, `network.proxy.*`) are refused with the command that does all of
+  their change. The proxy's key goes in through `proxy.key` only and never comes back. Tracker
   timing is limited to coarse last/next announce times; `reannounce` goes through the engine's tracker
   gate, which enforces the minimum interval, and the answer carries `not_before`.
 
@@ -96,7 +100,7 @@ Ids in params are the 40-hex transfer id or any unique prefix of at least 6 hex 
 
 | Method | Min. level | Logged | Params | Result |
 |---|---|---|---|---|
-| `hello` | read_only | no | `client` (string, 1-64 chars), `protocol?`, `version?` | `protocol`, `server`, `permission`, `methods` (allowed now), `rate_limit_per_sec` |
+| `hello` | read_only | no | `client` (string, 1-64 chars), `protocol?`, `version?` | `protocol`, `server`, `permission`, `methods` (allowed now), `rate_limit_per_sec`, `pid` (the server's process), `started_ms` (when it started answering: a restarted app answers with another `pid` or a later one) |
 | `ping` | read_only | no | - | `{pong, time_ms}` |
 | `status` | read_only | no | - | `server`, `protocol`, `permission`, `totals` (rates, connections, port, tiers), `counts` by state, `total`, `limits`, `summary` |
 | `list` | read_only | no | `filter?` (`all` `downloading` `queued` `seeding` `low-power` `paused` `error` `finished` `recent` `checking` `metadata` `awaiting-choice`), `tracker?` (profile id, `public`, `other-private` or host part), `category?`, `text?`, `kind?` (`torrent`/`direct`), `limit?` (50, max 500), `offset?` | `total`, `offset`, `transfers[]` (every field of a row, plus `human` strings) |
@@ -104,7 +108,7 @@ Ids in params are the 40-hex transfer id or any unique prefix of at least 6 hex 
 | `trackers` | read_only | no | - | `profiles[]` (`id`, `name`, `urls`, `rule`, `private`, `allow_pex`, live `transfers`/`sharing`/rates), `groups[]` (automatic trackers, same fields), `public_transfers`, `other_private_transfers`, `other_private_allow_pex`, `pex_enabled` |
 | `tracker_stats` | read_only | no | `tracker?` (profile id, `public`, `other-private`, `all`), `days?` (30, max 400) | `today`, `this_week`, `this_month`, `all_time` (bytes up/down, ratio, completed...), daily `series[]`, `summary` |
 | `rules` | read_only | no | - | the contents of `rules.toml` (`default`, `rule[]`) |
-| `settings_get` | full | no | `keys?` (dotted, allow-listed) | `settings` map |
+| `settings_get` | full | no | `keys?` (dotted keys or tables; absent: every key but the denied ones, plus `network.proxy.key`: installed/none with the app's proxy), or `file` (`rules`, `trackers`) | `settings` map (with `file`: `{<file>: the document as JSON}`) |
 | `events_subscribe` | read_only | no | `kinds?`, `hold?` (a name this connection holds alone while open: `duplicate` while another holds it) | `{subscribed, cursor}`, then pushed events |
 | `events_unsubscribe` | read_only | no | - | `{subscribed:false}` |
 | `events` | read_only | no | `since?` (cursor), `limit?` (100, max 500), `kinds?` | `events[]`, `cursor`, `oldest_available` (ring of the last 1024 events) |
@@ -123,8 +127,17 @@ Ids in params are the 40-hex transfer id or any unique prefix of at least 6 hex 
 | `recheck` | control | yes | `ids` | action |
 | `remove` | control (`delete_files`: full) | yes | `ids`, `delete_files?` | `token`, `expires_in_secs`, `delete_files`, `items[]`, `summary`. **Removes nothing.** |
 | `remove_confirm` | control (full if the plan deletes files) | yes | `token` | `removed[]`, `missing[]`, `files_deleted` |
-| `settings_set` | full | yes | `changes` (dotted key to value, all-or-nothing, validated by `trs-state`) | `changed[]`, `note` |
+| `settings_set` | full | yes | `changes` (dotted key to value: a table merges, `null` is the default, a list replaces; all-or-nothing, validated by `seedwell-state`), or `file` (`rules`, `trackers`) with `doc` (the whole document, validated as the file is) | `changed[]`, `note` |
+| `tracker_log_clear` | full | yes | - | `cleared`: the developer-mode tracker log is deleted (Settings › Advanced › Developer › Clear Log) |
+| `proxy.status` | full | no | - | `enabled`, `kind`, `host`, `port`, `country`, `has_key` (never the key), `server`, `status`, `problem` |
+| `proxy.set` | full | yes | `on?`, `country?` (ISO code, "" none) | as `proxy.status`, with `note` |
+| `proxy.key` | full | yes | `kind` (`nordvpn`: `user`, `pass`; `custom`: `host`, `port`, both or neither of `user`, `pass`); tested before it is kept, never logged or returned | as `proxy.status`, with `note` |
+| `proxy.remove_key` / `proxy.faster` | full | yes | - | as `proxy.status`, with `note` |
 | `activity` | full | no | `limit?` (50) | `entries[]` (`at`, `client`, `method`, `summary`, `outcome`) |
+| `update.status` | read_only | no | - | `version`, `development`, `dev_builds`, `watching`, `kept`, `status` (the app's updater, SPEC 12A; a daemon has none: `unsupported`) |
+| `update.install` / `update.watch` | control | yes | `path`, `sha256?` / `folder?` (absent: stop) | as `update.status`, with `note`; need "Allow development builds" on |
+| `update.dev_builds` / `update.now` | full | yes | `on` / - | as `update.status`, with `note` |
+| `restart` | full | yes | - | `note` (what happens and what it interrupts), `log`, `pid` and `started_ms` of the run that quits. The app's own installer quits this process the proper way and opens the app again (SPEC 9A.10); the answer comes first. Refused (`invalid`) while an install or another restart runs; a daemon: `unsupported` |
 | `awake.set` | control | no | `key` (`agent:<name>`; taking it again replaces the time), `who?` (what is working, shown), `secs?` (at most a day; absent or 0 gives the lease back) | as `awake.status`. Keeps the Mac from idle sleep while the lease is live (SPEC 9A.7); not in the activity log |
 | `awake.status` | read_only | no | - | `leases[]` (`key`, `who`, `client`, `since_ms`, `until_ms`), `setting` (`general.keep_awake_for_agents`), `host_keeps` (the app holds a power assertion; a headless daemon cannot), `kept` |
 | `tracker_log` | read_only | no | `limit?` (50, max 500), `torrent?` (info-hash prefix or title word), `tracker?` (host part), `event?`, `errors_only?`, `since_ms?` (follow) | `enabled` (Settings > Advanced > Developer mode), `path`, `entries[]`: the developer-mode tracker log lines, newest last (SPEC 8.7). Passkeys and the client `key` are masked in the file itself. Empty while developer mode is off |
@@ -134,6 +147,14 @@ Ids in params are the 40-hex transfer id or any unique prefix of at least 6 hex 
 | `location_moves` | read_only | no | - | `items[]` (`id`, `name`, `bytes`, `from`, `to`, `cross_volume`, `kind`: `finished` `incomplete` `retarget`), `total_bytes`, `cross_volume`: torrents that sit elsewhere than the settings say (nothing moves) |
 | `move` | **full** | yes | `ids`, `path?` (absolute or `~/...`; never a system, `~/Library` or hidden folder, like `add.save_path`) | `queued[]`, `refused[]` (`id`, `reason`). With `path` the torrents move below it and are pinned there; without it they move to where the settings and category say. Same volume: rename; other volume: verified copy while seeding goes on |
 | `cancel_move` | control | yes | `ids` | `ActionDto`; stops queued and running moves |
+| `chat.groups` | read_only | no | - | `groups[]` (`id`, `name`, `icon`, `position` from 1, `channels[]` (`id`, `name`): only those open to agents), `icons[]`. The sidebar's groups of channels on this computer (SPEC §7G.7 *Groups*): this device's own, never sent to another |
+| `chat.group_new` | control | yes | `name` (new, in any case), `icon?` (one of `icons`; absent: the one its name suggests, "Agents" sparkles, else `folder`) | one group as in `chat.groups` |
+| `chat.group_edit` | control | yes | `group` (id, a prefix of 4+, or name), `name?`, `icon?`, `position?` (from 1) | one group as in `chat.groups` |
+| `chat.group_delete` | control | yes | `group` | `deleted`, `id`, `name`; its channels go back to the plain list, nothing else changes |
+| `chat.set_group` | control | yes | `channel` (open to agents), `group?` (absent: none) | the channel as in `chat.list` |
+
+The other `chat.*` and `sync.*` methods are described in `seedwell help chat` / `seedwell help sync` (crates/cli/src/help.rs)
+and SPEC §7G.
 
 ### Error codes
 
@@ -160,15 +181,15 @@ To expose a new engine field: add it to the DTO in `types.rs` (`#[serde(default)
 
 ## Dependencies
 
-`trs-state` (validation, stats, profiles, redaction), `trs-classify` (category names), `trs-engine`
+`seedwell-state` (validation, stats, profiles, redaction), `seedwell-classify` (category names), `seedwell-engine`
 (feature `engine`), `serde`/`serde_json`, `tokio` (`net`, `fs`, `sync`, `time`, `io-util`), `getrandom`
 (tokens, temp names). Base64 is hand-rolled (30 lines) instead of pulling a crate.
 
 ## Tests
 
-`cargo test -p trs-control`
+`cargo test -p seedwell-control`
 
-* `src/**`: unit tests (protocol round trips, id resolution, filters, validation, settings allow-list,
+* `src/**`: unit tests (protocol round trips, id resolution, filters, validation, settings deny-list and routed keys,
   redaction, token expiry/reuse/ownership, socket modes, `peer_allowed`, rate limiter, line reader).
 * `tests/server.rs`: the server against an in-memory backend on a real socket: **permission matrix
   (every method x every level)**, permission-before-params, off/level changes on open connections,

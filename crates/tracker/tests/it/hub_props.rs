@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use common::*;
 use proptest::prelude::*;
-use trs_tracker::Millis;
-use trs_tracker::gate::{GateConfig, GatedRequest};
-use trs_tracker::response::{AnnounceError, RetryIn, TransportError};
+use seedwell_tracker::Millis;
+use seedwell_tracker::gate::{GateConfig, GatedRequest};
+use seedwell_tracker::response::{AnnounceError, RetryIn, TransportError};
 
 /// Random fault injection driven by a seed so proptest can shrink the knobs.
 struct Faulty {
@@ -54,7 +54,7 @@ impl Responder for Faulty {
                 3 => (
                     secs(1),
                     Err(AnnounceError::Garbage(
-                        trs_tracker::response::ParseError::NotBencode,
+                        seedwell_tracker::response::ParseError::NotBencode,
                     )),
                 ),
                 4 => (secs(0), Err(AnnounceError::Transport(TransportError::Dns))),

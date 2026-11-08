@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Text;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
@@ -889,6 +889,7 @@ sealed class CloudHost : SyncHostListener
         SyncErrorKind.NotRunning => CloudFiles.StatusCloudFileProviderNotRunning,
         SyncErrorKind.NoItem or SyncErrorKind.Gone => CloudFiles.StatusObjectNameNotFound,
         SyncErrorKind.Changed => CloudFiles.StatusCloudFileNotInSync,
+        SyncErrorKind.Busy => CloudFiles.StatusCloudFileInUse,
         _ => CloudFiles.StatusCloudFileUnsuccessful,
     };
 
@@ -1034,9 +1035,9 @@ sealed class CloudHost : SyncHostListener
     }
 
     /// <summary>
-    /// What a filled file holds against the core: a change of the user's is reported. A report the core could not take
-    /// (the file was written while it was copied, or is still changing) is offered again a moment later: nothing else
-    /// would tell of it, and the save would stay on this PC.
+    /// What a filled file holds against the core: a change of the user's is reported. A file the core says is busy (held
+    /// by another program, or written during every copy) is offered again a moment later: nothing else would tell of it,
+    /// and the save would stay on this PC. Any other error would fail the same way again: said once, and that is the end.
     /// </summary>
     void LookAt(Root root, string item, int tries = 0)
     {
@@ -1052,11 +1053,15 @@ sealed class CloudHost : SyncHostListener
         {
             if (app.Core.SyncLocalChange(root.Id, item) is SyncLocalChange.Modified m) Report(root, item, path, m.Base);
         }
-        // A busy copy is a plain core error (no on-demand kind of its own).
-        catch (CoreException e) when (tries < 120)
+        // The one kind a host tries again (the core's SyncErrorKind.Busy), for a minute at most.
+        catch (CoreException.OnDemand e) when (e.kind == SyncErrorKind.Busy && tries < 120)
         {
             if (tries == 0) AppLog.Write($"on-demand: {path} offered again ({Words(e)})");
             Later(root, full, 500, () => LookAt(root, item, tries + 1));
+        }
+        catch (CoreException e)
+        {
+            AppLog.Write($"on-demand: {path} not reported ({Words(e)})");
         }
     }
 
@@ -1100,7 +1105,17 @@ sealed class CloudHost : SyncHostListener
             CloudFiles.Convert(full, id, false);
             if (app.Core.SyncLocalChange(root.Id, id) is SyncLocalChange.Modified again) Report(root, id, rel, again.Base);
         }
-        // Written again meanwhile, or the system not done with it: looked at again while it comes to rest.
+        // The core's: only Busy is tried again (for a minute at most); any other would fail the same way again.
+        catch (CoreException.OnDemand e) when (e.kind == SyncErrorKind.Busy && tries < 120)
+        {
+            if (tries == 0) AppLog.Write($"on-demand: {rel} offered again ({Words(e)})");
+            Later(root, full, 500, () => Overwritten(root, full, tries + 1));
+        }
+        catch (CoreException e)
+        {
+            AppLog.Write($"on-demand: {rel} overwritten, not reported ({Words(e)})");
+        }
+        // The system's (the file not yet ready to be a placeholder again): looked at again while it comes to rest.
         catch (Exception e) when (tries < 120)
         {
             if (tries == 0) AppLog.Write($"on-demand: {rel} overwritten, looked at again ({Words(e)})");
@@ -1114,7 +1129,7 @@ sealed class CloudHost : SyncHostListener
     /// an attribute, and looking whether a file is closed takes it for a moment, in the way of the host's own calls on it);
     /// a change is reported once no one has it open, so a file still being written is not copied again and again.
     /// </summary>
-    void Written(Root root, string full)
+    void Written(Root root, string full, bool offered = false)
     {
         if (RelativeTo(root, full) is not string rel || rel.Length == 0 || root.IdAt(rel) is not string id || !File.Exists(full)) return;
         if (!CloudFiles.IsPlaceholder(full))
@@ -1122,7 +1137,19 @@ sealed class CloudHost : SyncHostListener
             Overwritten(root, full);
             return;
         }
-        if (((uint)File.GetAttributes(full) & RecallOnDataAccess) != 0 || app.Core.SyncLocalChange(root.Id, id) is not SyncLocalChange.Modified) return;
+        if (((uint)File.GetAttributes(full) & RecallOnDataAccess) != 0) return;
+        try
+        {
+            if (app.Core.SyncLocalChange(root.Id, id) is not SyncLocalChange.Modified) return;
+        }
+        // Held by a program that lets no one read it: the core cannot say yet, and this event is the only one that may
+        // come. Looked at again until it can. (Anything else goes to the queue's log.)
+        catch (CoreException.OnDemand e) when (e.kind == SyncErrorKind.Busy)
+        {
+            if (!offered) AppLog.Write($"on-demand: {rel} offered again ({Words(e)})");
+            Later(root, full, 500, () => Written(root, full, true));
+            return;
+        }
         if (Closed(full)) LookAt(root, id);
         else Later(root, full, 500, () => Written(root, full));
     }
@@ -1170,6 +1197,7 @@ sealed class CloudHost : SyncHostListener
         SyncItem item;
         try
         {
+            qaBeforeCore?.Invoke(full);
             item = app.Core.SyncCreateItem(root.Id, parent, NameOf(rel), dir, dir ? null : full);
         }
         catch (CoreException.OnDemand e) when (e.kind == SyncErrorKind.Ignored)
@@ -1177,11 +1205,18 @@ sealed class CloudHost : SyncHostListener
             AppLog.Write($"on-demand: {rel} not synced ({Words(e)})");
             return;
         }
-        // Written while the core copied it (a plain core error): offered again, or a new file would stay on this PC.
-        catch (CoreException e) when (e is not CoreException.OnDemand && failures < 120)
+        // Held by another program or written during every copy (the one kind a host tries again, for a minute at most):
+        // offered again, or a new file would stay on this PC.
+        catch (CoreException.OnDemand e) when (e.kind == SyncErrorKind.Busy && failures < 120)
         {
             if (failures == 0) AppLog.Write($"on-demand: {rel} offered again ({Words(e)})");
             Later(root, full, 500, () => Adopt(root, full, failures + 1));
+            return;
+        }
+        // Any other error would fail the same way again: the file is left alone, a plain file of this PC.
+        catch (CoreException e)
+        {
+            AppLog.Write($"on-demand: {rel} not added ({Words(e)})");
             return;
         }
         if (item.Path != rel)
@@ -1198,7 +1233,7 @@ sealed class CloudHost : SyncHostListener
     }
 
     /// <summary>Whether no one has the file open any more; looking never stands in the way of another program's write.</summary>
-    static bool Closed(string full) => CloudFiles.NobodyHasOpen(full);
+    bool Closed(string full) => string.Equals(full, qaHeldPath, StringComparison.OrdinalIgnoreCase) || CloudFiles.NobodyHasOpen(full);
 
     // ------------------------------------------------------------------------------------------------------ QA
 
@@ -1277,6 +1312,64 @@ sealed class CloudHost : SyncHostListener
 
     internal bool QaWroteWhenStale => qaWroteWhenStale;
 
+    /// <summary>QA: runs just before the host asks the core to take a new file, after it looked that the file is there.</summary>
+    Action<string>? qaBeforeCore;
+
+    /// <summary>QA: a file another program holds with no sharing; the host's look whether it is closed says yes, as when the program opened it just after that look.</summary>
+    volatile string? qaHeldPath;
+    FileStream? qaHeld;
+
+    /// <summary>
+    /// QA: another program opens a file of the first root (made if it is not there) with no sharing and writes to it, just
+    /// after the host looked that it is closed: the core can only say Busy until <see cref="QaRelease"/>. The host is told
+    /// of it as the watcher tells it.
+    /// </summary>
+    internal string QaHold(string relative, string text, bool overwrite = false)
+    {
+        Root? r;
+        lock (gate) r = roots.Values.FirstOrDefault();
+        if (r is null) return "hold: no root";
+        var full = Full(r, relative);
+        qaHeldPath = full;
+        // Overwriting (CREATE_ALWAYS) takes the placeholder away; writing in it does not.
+        qaHeld = new FileStream(full, overwrite ? FileMode.Create : FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        qaHeld.SetLength(0);
+        qaHeld.Write(Encoding.ASCII.GetBytes(text));
+        qaHeld.Flush(true);
+        Queue(r, () => { if (r.IdAt(relative) is null) Adopt(r, full); else Written(r, full); });
+        return "held";
+    }
+
+    /// <summary>QA: the program of <see cref="QaHold"/> lets go; the host's next look finds the file free.</summary>
+    internal string QaRelease()
+    {
+        qaHeld?.Dispose();
+        qaHeld = null;
+        qaHeldPath = null;
+        return "released";
+    }
+
+    /// <summary>QA: a new file goes away between the host's look and its question to the core: a lasting error, which must fail at once.</summary>
+    internal string QaVanish(string relative)
+    {
+        Root? r;
+        lock (gate) r = roots.Values.FirstOrDefault();
+        if (r is null) return "vanish: no root";
+        var full = Full(r, relative);
+        qaBeforeCore = at =>
+        {
+            if (!string.Equals(at, full, StringComparison.OrdinalIgnoreCase)) return;
+            qaBeforeCore = null;
+            File.Delete(at);
+        };
+        File.WriteAllText(full, "gone in a moment");
+        Queue(r, () => Adopt(r, full));
+        return "armed";
+    }
+
+    /// <summary>QA: what a callback answers for the core's Busy.</summary>
+    internal static string QaBusyStatus() => $"busy status 0x{Status(SyncErrorKind.Busy):X8}";
+
     internal string QaRead(string relative)
     {
         Root? r;
@@ -1296,7 +1389,7 @@ sealed class CloudHost : SyncHostListener
         catch (Exception e) { return $"read failed: {e.InnerException?.Message ?? e.Message}"; }
     }
 
-    static string Words(Exception e) => e is CoreException ce ? TrsFfiMethods.CoreErrorMessage(ce) : e.Message;
+    static string Words(Exception e) => e is CoreException ce ? SeedwellFfiMethods.CoreErrorMessage(ce) : e.Message;
 
     static string Short(string id) => id[..Math.Min(8, id.Length)];
 }

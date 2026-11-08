@@ -4,10 +4,10 @@
 //! that forgot to set its own folders would otherwise move real files.
 //!
 //! Active when the running executable is a cargo test binary (it lives in a `deps` folder), or the
-//! environment has `TRS_FORBID_REAL_HOME`. A test that starts a *child* process (a daemon built
-//! from another crate) must pass `TRS_FORBID_REAL_HOME=1` to it, because the child is not a test
+//! environment has `SEEDWELL_FORBID_REAL_HOME`. A test that starts a *child* process (a daemon built
+//! from another crate) must pass `SEEDWELL_FORBID_REAL_HOME=1` to it, because the child is not a test
 //! binary itself. Tests either point every folder into a temp directory or set `HOME` to one.
-//! `TRS_ALLOW_REAL_HOME=1` switches the guard off.
+//! `SEEDWELL_ALLOW_REAL_HOME=1` switches the guard off.
 
 use std::path::{Path, PathBuf};
 
@@ -22,18 +22,18 @@ fn is_test_binary() -> bool {
 }
 
 pub(crate) fn active() -> bool {
-    (cfg!(test) || is_test_binary() || std::env::var_os("TRS_FORBID_REAL_HOME").is_some())
-        && std::env::var_os("TRS_ALLOW_REAL_HOME").is_none()
+    (cfg!(test) || is_test_binary() || std::env::var_os("SEEDWELL_FORBID_REAL_HOME").is_some())
+        && std::env::var_os("SEEDWELL_ALLOW_REAL_HOME").is_none()
 }
 
 fn home() -> Option<PathBuf> {
-    trs_platform::dirs::home().filter(|h| h.is_absolute() && h.parent().is_some())
+    seedwell_platform::dirs::home().filter(|h| h.is_absolute() && h.parent().is_some())
 }
 
 /// Inside `home`, and not in a temporary folder (which is inside the home folder on Windows; compared as real paths, so
 /// a TEMP written with 8.3 short names still matches).
 fn inside(p: &Path, home: &Path) -> bool {
-    p.starts_with(home) && !trs_platform::dirs::in_temp_folder(p)
+    p.starts_with(home) && !seedwell_platform::dirs::in_temp_folder(p)
 }
 
 /// `Err(text)` if `p` is inside the real home directory while the guard is on (a runtime
@@ -62,7 +62,7 @@ pub(crate) fn check_config(cfg: &EngineConfig) -> Result<(), String> {
         if inside(p, &home) {
             Err(format!(
                 "refusing to use {what} {} inside the real home directory while running under test; \
-                 point the folders into a temporary directory or set HOME (TRS_ALLOW_REAL_HOME=1 overrides)",
+                 point the folders into a temporary directory or set HOME (SEEDWELL_ALLOW_REAL_HOME=1 overrides)",
                 p.display()
             ))
         } else {
@@ -84,19 +84,19 @@ pub(crate) fn check_config(cfg: &EngineConfig) -> Result<(), String> {
     if let AfterAdd::Archive(d) = &cfg.torrent_after_add {
         bad("the archive folder", d)?;
     }
-    const THE_TRASH: &str = concat!("the ", trs_platform::trash!());
+    const THE_TRASH: &str = concat!("the ", seedwell_platform::trash!());
     match &cfg.trash_dir {
         Some(t) => bad(THE_TRASH, t)?,
-        None if needs_trash => match trs_platform::fs::system_trash() {
-            Some(trs_platform::fs::TrashPlace::Folder(t)) => bad(THE_TRASH, &t)?,
+        None if needs_trash => match seedwell_platform::fs::system_trash() {
+            Some(seedwell_platform::fs::TrashPlace::Folder(t)) => bad(THE_TRASH, &t)?,
             // Not a folder in the home folder, but the user's all the same (the Mac's own Trash is the real one
             // whatever HOME says).
-            Some(trs_platform::fs::TrashPlace::RecycleBin | trs_platform::fs::TrashPlace::VolumeTrash) => {
+            Some(seedwell_platform::fs::TrashPlace::RecycleBin | seedwell_platform::fs::TrashPlace::VolumeTrash) => {
                 return Err(concat!(
                     "refusing to use ",
                     "the ",
-                    trs_platform::trash!(),
-                    " while running under test; set trash_dir to a temporary folder (TRS_ALLOW_REAL_HOME=1 overrides)"
+                    seedwell_platform::trash!(),
+                    " while running under test; set trash_dir to a temporary folder (SEEDWELL_ALLOW_REAL_HOME=1 overrides)"
                 )
                 .into());
             }
@@ -105,7 +105,7 @@ pub(crate) fn check_config(cfg: &EngineConfig) -> Result<(), String> {
         None => {}
     }
     for (i, l) in cfg.category_locations.iter().enumerate() {
-        let name = trs_classify::Category::ALL[i].as_str();
+        let name = seedwell_classify::Category::ALL[i].as_str();
         if let Some(p) = &l.incomplete {
             bad(&format!("the {name} incomplete folder"), p)?;
         }
@@ -118,7 +118,7 @@ pub(crate) fn check_config(cfg: &EngineConfig) -> Result<(), String> {
 
 /// `Err(text)` if a tracker profile (`trackers.toml`) sets a folder inside the real home while
 /// the guard is on.
-pub(crate) fn check_profiles(profiles: &trs_state::TrackerProfiles) -> Result<(), String> {
+pub(crate) fn check_profiles(profiles: &seedwell_state::TrackerProfiles) -> Result<(), String> {
     if !active() {
         return Ok(());
     }
@@ -129,7 +129,7 @@ pub(crate) fn check_profiles(profiles: &trs_state::TrackerProfiles) -> Result<()
             if inside(&d, &home) {
                 return Err(format!(
                     "refusing to use the folder {} of tracker {} inside the real home directory while running under test; \
-                     point the folders into a temporary directory or set HOME (TRS_ALLOW_REAL_HOME=1 overrides)",
+                     point the folders into a temporary directory or set HOME (SEEDWELL_ALLOW_REAL_HOME=1 overrides)",
                     d.display(),
                     p.id
                 ));

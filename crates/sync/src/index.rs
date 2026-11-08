@@ -9,9 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::Arc;
 
-use trs_sync_proto::ids::ShortId;
-use trs_sync_proto::model::{Causality, ChunkRef, FileKind, IndexEntry, SignedFile};
-use trs_sync_proto::sign::Writer;
+use seedwell_sync_proto::ids::ShortId;
+use seedwell_sync_proto::model::{Causality, ChunkRef, FileKind, IndexEntry, SignedFile};
+use seedwell_sync_proto::sign::Writer;
 
 use crate::global::{self, Candidate, Need};
 use crate::ignore::Ignore;
@@ -390,7 +390,7 @@ impl<'a, S: IndexStore + ?Sized> Batch<'a, S> {
     }
 
     /// The versions other devices announce at a path (valid ones), including this batch's writes.
-    pub fn remote_versions(&self, path: &str) -> io::Result<Vec<trs_sync_proto::model::Version>> {
+    pub fn remote_versions(&self, path: &str) -> io::Result<Vec<seedwell_sync_proto::model::Version>> {
         Ok(self.remote_at(path)?.into_iter().filter(|(_, e)| !e.invalid).map(|(_, e)| e.file.info.version).collect())
     }
 

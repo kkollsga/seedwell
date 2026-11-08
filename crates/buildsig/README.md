@@ -1,8 +1,8 @@
-# trs-buildsig
+# seedwell-buildsig
 
 Signed development-build manifests (SPEC 12A, Development builds). A folder the app watches for builds (on the
 user's devices: `<Seedwell Sync folder>/builds/`, shared by Folder Sync) holds each system's zip and one `build.json`
-signed with the Ed25519 **build key**. The updater (`trs-ffi`'s `updates.rs`, on the Mac and on Windows) installs a
+signed with the Ed25519 **build key**. The updater (`seedwell-ffi`'s `updates.rs`, on the Mac and on Windows) installs a
 build from such a folder only when `build.json` verifies under a key compiled into this crate (`TRUSTED_KEYS`) and
 the zip's SHA-256 is the one signed; anyone else who can write to the folder can drop files there, not builds.
 
@@ -28,6 +28,6 @@ Dependencies:
 
 | Crate | Why |
 |---|---|
-| `ring` | Ed25519 signing and verification, and random seeds (already the workspace's crypto: `trs-sync-proto`) |
+| `ring` | Ed25519 signing and verification, and random seeds (already the workspace's crypto: `seedwell-sync-proto`) |
 | `serde`, `serde_json` | `build.json` and its manifest |
-| `sha2` | the zips' SHA-256 (as `trs-ffi` computes it) |
+| `sha2` | the zips' SHA-256 (as `seedwell-ffi` computes it) |

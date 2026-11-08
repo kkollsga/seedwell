@@ -12,10 +12,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
-use trs_sync_proto::ids::ShortId;
-use trs_sync_proto::model::{Causality, FileInfo, FileKind, Version};
-use trs_sync_proto::msg::HeldFile;
-use trs_sync_proto::msg::encode_entry;
+use seedwell_sync_proto::ids::ShortId;
+use seedwell_sync_proto::model::{Causality, FileInfo, FileKind, Version};
+use seedwell_sync_proto::msg::HeldFile;
+use seedwell_sync_proto::msg::encode_entry;
 
 use crate::index::{IndexStore, LocalRecord};
 
@@ -708,7 +708,7 @@ impl Holder<'_> {
     /// folder that is not running.)
     pub fn answer(&self, asker: ShortId, files: &[HeldFile]) -> Vec<bool> {
         let rank = !self.on_demand || self.me.0 > asker.0;
-        let here = self.writer && self.fs.lstat(trs_sync_proto::model::STATE_DIR).ok().flatten().is_some_and(|m| m.kind == FileKind::Dir);
+        let here = self.writer && self.fs.lstat(seedwell_sync_proto::model::STATE_DIR).ok().flatten().is_some_and(|m| m.kind == FileKind::Dir);
         files
             .iter()
             .map(|h| {

@@ -132,17 +132,17 @@ yet.
 
 ## Tests (Mac, in-process)
 
-- `trs-sync` `ondemand::a_new_file_where_the_host_just_deleted_one_is_that_item_changed`,
+- `seedwell-sync` `ondemand::a_new_file_where_the_host_just_deleted_one_is_that_item_changed`,
   `a_new_file_elsewhere_or_later_is_a_new_item`, `a_rename_to_a_name_not_synced_takes_the_item_out_of_the_folder`,
   `a_temp_file_renamed_over_a_just_deleted_name_continues_its_history`,
   `a_save_by_replace_with_the_same_bytes_is_never_taken_for_a_delete`, `a_large_tree_deleted_through_the_host_is_quick`
   (20 000 files), `a_rename_onto_a_name_not_synced_is_checked_as_it_lands` (a disk that folds case);
   `ignore::tests::why_names_the_deciding_line`.
-- `trs-sync-net` `ondemand::a_save_by_replace_reaches_the_other_device_as_one_edit` (a full peer's file polled every
+- `seedwell-sync-net` `ondemand::a_save_by_replace_reaches_the_other_device_as_one_edit` (a full peer's file polled every
   2 ms is never missing; it fails without the announcement wait),
   `words_save_and_a_plain_delete_reach_the_other_device_as_they_should`,
   `a_delete_made_while_a_session_announces_still_waits_for_the_save` (a session already at its batches).
-- `trs-ffi` `a_save_by_replace_through_the_app_keeps_the_item_and_leaves_temp_files_alone` (the Windows host's calls
+- `seedwell-ffi` `a_save_by_replace_through_the_app_keeps_the_item_and_leaves_temp_files_alone` (the Windows host's calls
   in its order, through `Core`), `sync_host` `a_save_by_replace_through_the_extension_keeps_the_item` (the Mac
   extension's requests over the socket, with a second save of the same bytes and a plain delete whose feed signal comes
   after the window), `a_rename_to_a_name_not_synced_waits_for_the_systems_download`,

@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use trs_sync_proto::members::{Body, Role};
-use trs_sync_proto::msg::{Close, MAX_REMOVE_REASON, Message, RemoveReply, RemoveRequest};
+use seedwell_sync_proto::members::{Body, Role};
+use seedwell_sync_proto::msg::{Close, MAX_REMOVE_REASON, Message, RemoveReply, RemoveRequest};
 
 use crate::shared::{Ctx, PeerHandle, Space, SpaceKind, lock};
 
@@ -194,7 +194,7 @@ pub(crate) async fn on_request(ctx: &Arc<Ctx>, peer: &Arc<PeerHandle>, f: Arc<Sp
     if refused.is_none() {
         let (device, known) = (req.device, req.seen);
         // Decided again under the membership's lock: still a user, and no owner statement about it since the request.
-        let make = |m: &trs_sync_proto::members::Membership, serials: &mut crate::roles::Serials| {
+        let make = |m: &seedwell_sync_proto::members::Membership, serials: &mut crate::roles::Serials| {
             let current = m.role(&device).is_some_and(|r| !r.admits()) && m.owner_serial(&device).unwrap_or(0) <= known;
             if current { vec![Body::Remove { device, serial: serials.next(), at_s: crate::roles::now_s() }] } else { Vec::new() }
         };

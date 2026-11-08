@@ -9,13 +9,13 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
-use trs_tracker::gate::{GateConfig, GatedRequest, HostGate};
-use trs_tracker::http::{HttpConfig, HttpTransport};
-use trs_tracker::machine::SendKind;
-use trs_tracker::policy::DestinationPolicy;
-use trs_tracker::response::{AnnounceError, ParseError, TransportError};
-use trs_tracker::udp::{UdpConfig, UdpTransport};
-use trs_tracker::*;
+use seedwell_tracker::gate::{GateConfig, GatedRequest, HostGate};
+use seedwell_tracker::http::{HttpConfig, HttpTransport};
+use seedwell_tracker::machine::SendKind;
+use seedwell_tracker::policy::DestinationPolicy;
+use seedwell_tracker::response::{AnnounceError, ParseError, TransportError};
+use seedwell_tracker::udp::{UdpConfig, UdpTransport};
+use seedwell_tracker::*;
 
 fn params() -> AnnounceParams {
     AnnounceParams {

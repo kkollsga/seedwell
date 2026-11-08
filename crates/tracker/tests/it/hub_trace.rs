@@ -7,8 +7,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use adversarial_support::*;
-use trs_tracker::hub::{HubNote, NoteKind};
-use trs_tracker::{TorrentEvent, TorrentRole};
+use seedwell_tracker::hub::{HubNote, NoteKind};
+use seedwell_tracker::{TorrentEvent, TorrentRole};
 
 const T1: &str = "http://t1.test/announce?pk=1";
 const T2: &str = "http://t2.test/announce?pk=1";

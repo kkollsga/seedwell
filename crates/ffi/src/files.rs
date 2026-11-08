@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use trs_control::display;
+use seedwell_control::display;
 
 use crate::types::{FilePriority, FilePriorityChange, TorrentFile};
 

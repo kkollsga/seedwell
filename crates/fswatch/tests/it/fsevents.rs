@@ -1,6 +1,6 @@
 //! FSEvents only: resume tokens and history replay.
 
-use trs_fswatch::{Backend, RawEvent, RescanReason, ResumeToken, WatchOptions, Watcher, watch};
+use seedwell_fswatch::{Backend, RawEvent, RescanReason, ResumeToken, WatchOptions, Watcher, watch};
 
 use crate::common::*;
 

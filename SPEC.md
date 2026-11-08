@@ -78,8 +78,8 @@ These are acceptance criteria. Every milestone is measured against them.
 - **Shell:** Swift. AppKit `NSStatusItem`/`NSMenu` for the menu bar; SwiftUI (with AppKit `NSTableView` where SwiftUI's `Table` is too slow) for the windows.
 - **Bridge:** UniFFI, generating Swift bindings. The UI **pulls** compact snapshots only while something is visible (menu open, window open). When nothing is visible the UI costs nothing and the core sends only events (completed, error).
 - **One process.** No separate daemon in v1: lower memory and simpler. The core API is kept clean enough to split into a `launchd` agent later if remote/CLI control is ever wanted.
-- **One control API.** The menu, main window, `trs` CLI and agent interface (§9A) all use the same typed, versioned command API in the core. Anything one can do, the others can too. Nothing can change client identity or compliance behaviour (§7B).
-- **`trs` CLI** ships inside the app bundle. It also runs the core headless for benchmarks and tests.
+- **One control API.** The menu, main window, `seedwell` CLI and agent interface (§9A) all use the same typed, versioned command API in the core. Anything one can do, the others can too. Nothing can change client identity or compliance behaviour (§7B).
+- **`seedwell` CLI** ships inside the app bundle. It also runs the core headless for benchmarks and tests.
 
 *Rejected alternatives:* Tauri/Electron (webview costs 50–150 MB and doesn't look native). Pure-Rust AppKit via `objc2` would work for the menu but makes the table window much harder for little gain.
 
@@ -178,8 +178,8 @@ It must be safe to leave a torrent seeding for years, across app updates, reboot
 - Rarest-first picker with sequential-within-piece requests, endgame mode, and fast resume of partial pieces.
 - Request pipelining sized to each peer's bandwidth-delay product (adaptive queue depth).
 - Choker: tit-for-tat plus optimistic unchoke; upload slots auto-sized to the upload limit.
-- Redundant connections (libtorrent's `close_redundant_connections`): a torrent that wants nothing more (complete, or a partial seed holding every wanted piece) closes any peer that can never want anything from it (it has every piece, or every piece we have; also when a HAVE completes it, and right after we finish), as a plain local close with no strike, and does not dial those addresses again while upload-only. They are candidates again the moment more files are ticked or a recheck finds pieces missing. Downloading torrents and tracker announces are never affected.
-- Idle seeds (upload-only torrents): leechers find us, not the other way round. An incoming connection is never refused for want of a slot while the torrent is upload-only: at the per-torrent cap a redundant peer, else the longest-idle peer that is not interested in us (10 s or more) and has sent no HAVE for 5 minutes (a peer still downloading stays until it is done), is closed to admit it (a Cold torrent wakes for the handshake as before). Outgoing, an upload-only torrent dials nothing when the last tracker response reported zero leechers (`incomplete` = 0), and otherwise never dials an address remembered as a seed; with nothing to dial and no peers the actor sleeps. `numwant`, announce intervals, `left` and events are untouched (no scrapes, no extra announces). The global connection cap is not evicted against (redundant peers are dropped at once, so it rarely fills with them).
+- Redundant connections (libtorrent's `close_redundant_connections`): a torrent that wants nothing more (complete, or a partial seed holding every wanted piece) closes any peer that can never want anything from it (it has every piece, or every piece we have; also when a HAVE completes it, and right after we finish), as a plain local close with no strike that first sends what is queued and then, over TCP, reads what the peer still sends until it closes too (bounded together: 4 KiB, 2 s; a socket closed with bytes unread resets the connection, and a reset makes the peer's system, Windows above all, discard what it has received and not yet read), and does not dial those addresses again while upload-only. They are candidates again the moment more files are ticked or a recheck finds pieces missing. Downloading torrents and tracker announces are never affected. Our extended handshake says `upload_only` (BEP 21) whenever the torrent wants nothing, complete or partial seed, and is sent again to connected peers when that changes either way: the peer we close learns from it that we want nothing, and does not dial us back. The handshake also lists libtorrent's `upload_only` message in `m` (our id 3; payload one byte, 1 or 0): libtorrent-family clients (qBittorrent, Deluge) only ever set a peer's upload-only state from its handshake and clear it only through that message, so it goes with every re-sent handshake to a peer that lists it (and once its id is known, if we cleared it before), and one received sets that peer's `upload_only`. A change a full command queue kept from a peer is told on the next tick. A peer's listen address (from its extended handshake) is not dialled while that peer is connected. Addresses have one form: an IPv4 peer is known by its IPv4 address also when a dual-stack socket reports it IPv4-mapped (`::ffff:a.b.c.d`), as trackers and PEX give it.
+- Idle seeds (upload-only torrents): leechers find us, not the other way round. An incoming connection is never refused for want of a slot while the torrent is upload-only: at the per-torrent cap a redundant peer, else the longest-idle peer that is not interested in us (10 s or more) and has sent no HAVE for 5 minutes (a peer still downloading stays until it is done), is closed to admit it (a Cold torrent wakes for the handshake as before). Outgoing, an upload-only torrent dials nothing when the last tracker response reported zero leechers (`incomplete` = 0), and otherwise never dials an address remembered as a seed; with nothing to dial and no peers the actor sleeps. `numwant`, announce intervals, `left` and events are untouched (no scrapes, no extra announces). The global connection cap is not evicted against (redundant peers are dropped at once, their slot held at most 2 s while their last words are sent and the close drained, so it rarely fills with them).
 - TCP and uTP in parallel; uTP yields to other traffic via LEDBAT.
 - Hardware SHA-1/SHA-256 (ARMv8 crypto extensions). Hashing runs on a worker pool, off the network threads.
 - Disk: sparse files by default (APFS), optional full preallocation. Writes are coalesced and `pwrite` runs on a dedicated I/O pool.
@@ -361,7 +361,7 @@ When a finished location changes (app default, category override, a favorite tra
 | Torrent still downloading | Only the finalize target changes; data in the incomplete location is moved when the download finishes | Zero | None |
 | Incomplete location changes during a download | Same methods as above for the partial files; that torrent's writes pause while its files move (instant on the same volume) | As above | Download of that torrent pauses during a cross-volume copy |
 
-- **Crash safety:** every move is journaled (the finalize journal of trs-storage). After a crash it is resumed or rolled back; the source is deleted only after the destination is verified and the torrent's record points at it.
+- **Crash safety:** every move is journaled (the finalize journal of seedwell-storage). After a crash it is resumed or rolled back; the source is deleted only after the destination is verified and the torrent's record points at it.
 - **Scheduling:** at most one cross-volume copy per destination volume at a time; the copy is unbuffered (`F_NOCACHE`), so seeding and the Mac stay responsive without a speed limit (`advanced.move_limit_mib`, default 0 = unlimited; settings before version 6 that still hold the old default 100 become 0). Measured, 1 GiB verified copy within one SSD: about 1.4 GB/s. Re-pointing a category with hundreds of torrents queues them; same-volume moves finish almost at once.
 - **Safety:** never overwrite (collisions get a suffix, §7A.3); refuse when the destination lacks free space for the largest pending torrent plus 1 GB; a failed or cancelled move leaves the torrent seeding from its original location.
 - **UI:** the row shows "Moving… 42%" in its grey status line; the menu bar icon shows the green move bar (§8.1).
@@ -404,7 +404,7 @@ Detection exists to remove decisions, so the app asks only when there is a real 
   - *Where the file is.* The engine remembers the path **in memory, only for torrents that are still held** (`EngineHandle::held_source`): set when a torrent is added from a `.torrent` path (Finder open, drag and drop, File ▸ Open, the add panel, a watch folder, the "ask first" answer) and forgotten when the torrent is released (OK, Download, Start Now, the countdown ends) or removed. It is the file that is **left** after the folder's "after adding" action: the original path for "leave", the archive copy for "archive", nothing for "trash" or "delete". Nothing stores paths for every torrent, and a restart forgets it (a torrent held across a restart has a plain Cancel). Adds that carry the bytes only (the control socket and CLI) have no file.
   - *Safety.* Only a regular file (never a symlink or folder) whose name ends in `.torrent` and whose own info-hash is the cancelled torrent's is moved, and that is checked again, by reading the file, right before the move. Anything else is left alone and the torrent is still removed. If the Trash refuses, the torrent is still removed and a quiet notification says "Couldn't move <name>.torrent to the Trash".
   - *QA.* `SEEDWELL_QA_TRASH_DIR` (a folder under a temp root) makes the app move the file (and a synced folder removed with its files) there instead of to the real Trash; `starting cancel [name] keep` is ⇧-Cancel; `starting shift on|off` forces the Shift state of the button; `open-file <path>` opens a `.torrent` as Finder would.
-- **One engine text.** Titles ("Sintel (2010)"), the line "Rule … · Saves to … · Then seeds until ratio …" and seeding goals in words come from the engine (`trs_classify::torrent_title`, `SeedGoal::describe`, `ChoicePreview::summary`), so the app and the CLI show the same text. The title is stored with the torrent and recomputed only when the category changes. A row whose remaining bytes do not fit at its destination fails at resume or re-add with "Not enough space: …" instead of failing in the middle of a write.
+- **One engine text.** Titles ("Sintel (2010)"), the line "Rule … · Saves to … · Then seeds until ratio …" and seeding goals in words come from the engine (`seedwell_classify::torrent_title`, `SeedGoal::describe`, `ChoicePreview::summary`), so the app and the CLI show the same text. The title is stored with the torrent and recomputed only when the category changes. A row whose remaining bytes do not fit at its destination fails at resume or re-add with "Not enough space: …" instead of failing in the middle of a write.
 - **Later changes:** Get Info ▸ Files reopens the same chooser for a running torrent, so more seasons can be added at any time; newly ticked items download into the same locations.
 - **A finished torrent that gets more files is a download again**. The state is derived from the wanted pieces: a torrent whose wanted pieces are not all verified is downloading, whatever happened before. When files are ticked after it finished (Get Info ▸ Files, the file tree, the chooser, a skipped file streamed), or a recheck finds wanted pieces missing, the engine takes it out of Recent and Sharing (`finished_at` cleared and persisted, `seed_group` none), it takes a download slot like any download (queue rules apply) and shows progress over the wanted bytes, speed and time left. It keeps seeding the pieces it has. When the wanted pieces are complete again it is finished again with a new `finished_at` (Recently Finished for 15 h) and the "finished" notification is shown again. Seeding goals and the private floor never act on it while it downloads; the seed time it had earned stays counted.
 
@@ -558,7 +558,7 @@ Retry pace depends on what the torrent is doing. A download needs peers soon; a 
 - **A host that recovers helps its siblings.** When an announce to a host succeeds, every other (torrent, tracker) waiting in backoff on the same host whose last failure was the host's (5xx, timeout, connection refused or reset, DNS) has its retry pulled forward to 5–60 s from now (jittered, never within 30 s of its own last attempt or before a `Retry-After` hint, still through the per-host gate and never before the regular interval or `min interval`). Failures that are about the torrent (a tracker `failure reason`, a 4xx, a halt) are left alone. It happens at most once per recovery: a retry that fails again continues the normal backoff, and the next pull waits for a success of its own, so there is no retry storm. Not while an outage is declared (§7C.4c).
 - **Ask Tracker Again always beats Seedwell's own wait.** A manual re-announce (row context menu, Get Info, `seedwell reannounce`) goes out now, through the per-host gate, whatever the backoff says (a halt, a slow `failure reason` schedule or a 15-minute seed backoff); the only floor is 10 s since the last attempt on that tracker (a double click). If it fails, the backoff restarts from that failure as usual. The **tracker's own `min interval`** is kept by default (private trackers can penalise early announces): the answer then says "the tracker asked for a minimum time between announces" with the time it allows the next one, which is a different message from "Seedwell is backing off after N failed tries". It can be overridden explicitly: `seedwell reannounce --force` or Get Info's "Announce anyway" (shown as "Tracker allows the next announce at 07:13 · Announce anyway"). Forced announces are limited to one per tracker per 5 minutes, so a loop cannot hammer. `--wait` waits up to 30 s for the answer and prints it ("ok: 12 seeders, 3 leechers" or the plain-language failure). The CLI prints the tracker's host only, never the announce URL or passkey.
 - `warning message` is shown, and announcing continues normally.
-- Sleep/wake and network changes only reschedule failed announces, spread across the same jittered scheduler. They never trigger a regular announce early, so no torrent ever announces twice in a burst.
+- Sleep/wake and network changes only reschedule failed announces, spread across the same jittered scheduler. They never trigger a regular announce early, so no torrent ever announces twice in a burst. A retry waiting after a network failure (timeout, DNS, connect) is pulled in to 1–16 s from now, never within 30 s of the failed attempt and never inside a tracker's `Retry-After`. It happens **once per failure series**: a network change and a wake share the one pull, a pulled retry that fails again continues the normal growing backoff, and the next pull waits for a success (or for a new series of failures, after the user's retry or an outage's rollback). A Wi-Fi link that keeps dropping or a VPN that keeps reconnecting gets one early "are we back?" try per outage, not one per flap.
 - **An outage is not the trackers' fault.** Failures that come from the network being gone do not escalate any backoff (§7C.4c): without that, a seed that was cut off for three hours would sit at the 6 h step for hours after the network returned.
 
 ### 7C.4b Multiple tiers: every tier runs alone
@@ -573,7 +573,7 @@ Rules (all covered by `crates/tracker/tests/multi_tier_independence.rs`):
 4. `http`/`https` spellings of one tracker (same host, path and query) in different tiers are one tracker: the later one becomes a failover in the earlier one's tier. Otherwise a private torrent that lists both would be announced to twice per interval.
 5. Different hostnames with no shared tracker profile (`torrent.ubuntu.com` and `ipv6.torrent.ubuntu.com`, which exist to collect v4 and v6 peers separately) are two trackers in separate tiers; each announces once per interval. The per-host gate still applies to each.
    **Tracker profiles (§ trackers.toml):** tiers whose URLs the engine's profile matcher (`policy::match_profile`, the one that attributes a torrent to a profile) maps to the same profile are folded into ONE tier when the torrent is registered, so BEP 12 failover applies inside it and a tracker that is known under several domains is never announced to in parallel. A tier belongs to the profile of its first matching URL. The fold happens at registration; editing profiles later takes effect for torrents registered afterwards.
-6. `set_port`, `set_crypto`, network change and wake move no healthy tracker's schedule in any tier (a network change only pulls failed announces in, spread by the wake jitter).
+6. `set_port`, `set_crypto`, network change and wake move no healthy tracker's schedule in any tier (a network change only pulls failed announces in, once per failure series, spread by the wake jitter).
 7. Dual-stack is handled inside one request by the transport (§7C.4a rule 1); it is never a reason to announce to another tracker.
 
 ### 7C.4c Outages: detect, hold, probe, release
@@ -818,7 +818,7 @@ rules below hold from there on:
   Seedwell's (from 0.1.7, CI runs it against the latest release).
 
 **Separate from torrents by construction.**
-- Sync lives in its own crates: `trs-sync-proto`, `trs-sync`, `trs-sync-net` and `trs-fswatch`.
+- Sync lives in its own crates: `seedwell-sync-proto`, `seedwell-sync`, `seedwell-sync-net` and `seedwell-fswatch`.
 - It has its own port, its own state file (`sync.redb`) and its own speed limits and counters. Sync bytes never
   appear in torrent stats or ratios (§7B.2).
 - The engine lends it two things only: DHT lookups on public topics, and a port mapping.
@@ -1034,7 +1034,7 @@ rules below hold from there on:
     that is there), on demand when it is on demand on the device that put it there, or marked on demand there for the
     devices without its files (§7G.11, *Modes*; since 0.1.14: its place there, its
     files in this device's cache, nothing downloaded until asked for), else synced in full; a channel. A device that
-    keeps no folders on demand yet (Windows, Linux) joins such a folder in full, and its page says so. The mode is only
+    keeps no folders on demand yet (Linux) joins such a folder in full, and its page says so. The mode is only
     the default at joining: each device switches its own afterwards, and a switch on one device changes no other (one
     that joined in full under 0.1.13 stays so). It waits "from your devices" until admitted: each device that is
     owner there grants the others Admin with the folder key, one that is admin admits them at Read & write with a
@@ -1241,7 +1241,7 @@ rules below hold from there on:
 - **Can other devices reach this one (0.1.20):** a device whose sync port a firewall blocks still dials out and syncs
   with every device that listens, so nothing looks wrong on it, but no device can dial it (the user's PC in 0.1.19:
   Windows Firewall on a Public network, where Windows never asks for a rule). Folder sync finds out with evidence
-  only (`trs-sync-net` `inbound.rs`):
+  only (`seedwell-sync-net` `inbound.rs`):
   - *reached:* a direct TCP session it accepted from another computer, or a dial back that got through;
   - *not reached:* a device it dialed directly over TCP, asked to dial it back (ReachAsk, feature bit 6), could not
     connect within 5 s (tried twice). The device dials back only the IP the session comes from (it can be made to
@@ -1254,7 +1254,7 @@ rules below hold from there on:
     network change; one ask per network every 10 minutes while such a session lasts. *Blocked* only when a device
     failed to reach it and none reached it within the hour (a failure never hides a success); a device any device
     reached is never called blocked; without evidence (no session to a device with the bit) it is *not known*.
-  - **The notice** (`trs-ffi` `sync_reach.rs`, drawn as a banner at the top of the Folder Sync page): "Other
+  - **The notice** (`seedwell-ffi` `sync_reach.rs`, drawn as a banner at the top of the Folder Sync page): "Other
     devices can't reach this PC", who could not connect at which address, and why. On Windows the firewall's rule
     for the app's own exe is read off the UI thread (PowerShell's NetSecurity module, which answers in the same
     words in every system language; at most every 5 minutes, only while blocked): *no rule* ("Windows Firewall
@@ -1361,7 +1361,9 @@ rules below hold from there on:
   - a delete confirmation that slides out under the row;
   - an *Add Folder…* row at the bottom.
 - **Add Folder…** opens a modal, then **Cancel** and **Start**:
-  - *From this Mac*: choose a folder. This Mac becomes its owner, and the Share dialog opens after Start.
+  - *From this Mac*: choose a folder. This Mac becomes its owner, and the Share dialog opens after Start, unless
+    *On all my devices* was on: that folder reaches the user's devices by itself, and it is shared with others from its
+    right-click menu (**Share…**) when the user wants to.
   - *Shared with me*: paste a link, and choose where it goes. A bare key is refused, with "Folders are shared with
     links now".
     - The place offered first is `~/Seedwell/<name>`, with a number when that is taken (`Team 2`). When it is taken
@@ -1681,6 +1683,40 @@ Chat between devices, for people and agents (0.1.6).
     channel's total less its topics'); closed, it shows the channel's total. Its topics are listed under it as "#"
     rows with their unread, newest activity first, then *New Topic…* (not for Read only members). The channel's ⋯
     menu and its context menu have *New Topic…* too.
+- **Groups** (0.1.21, the user's wish: "Can you add optional channel grouping with icons? I.e. let's group all agent
+  bridge chats."): the sidebar's Chats can list channels under groups, each with a name and an icon. Optional: with
+  none, the sidebar is the plain list of channels as before.
+  - **This device's own**, like Mute: kept in `sync.toml` (`[[chat_group]]`: id, name, icon, in the user's order; and
+    each channel's `group`), never signed into a channel or sent to another device. A configuration without them
+    loads unchanged. Leaving or losing a channel takes its entry, and its place in a group, with it; a group with no
+    channels stays until the user deletes it. A channel whose group is not there (unknown to this version) is in the
+    plain list.
+  - **Drawn** first in Chats, in the user's order, then the channels in no group. A group's row has its icon where a
+    channel's is, its name and, closed, the unread of its channels together (a muted channel adds none, as it shows
+    none). It opens like a channel's disclosure with its channels under it (by name), each with its own topics; a
+    click on it only opens or closes it (it is no place of the window). It starts open; open or closed is kept while
+    the app runs, as a channel's; one of its channels shown from elsewhere (a notification) opens it. Closed while
+    the channel shown is in it, the page stays and the group's row stands for the hidden selection: its icon in the
+    accent colour, as the sidebar's selection marks are; opening it shows the selected row again.
+  - **Only on a host that draws them** (`HostWindow::ChatGroups`, the Mac's): a host without it is offered no group
+    and no group command, and lists every channel in the plain list, so a channel put in a group (by an agent, or on
+    the Mac's sidebar sharing the same config) never vanishes from a sidebar that cannot draw groups.
+  - **Icons:** a fixed set, by name: sparkles (agents), folder, briefcase (work), house (home), people (family,
+    friends), star, hammer (development), book, gamecontroller, heart, globe, tray. Rust gives each its spoken name;
+    each host maps them in one table (the Mac: SF Symbols; Windows: Segoe Fluent glyphs). A new group's icon follows
+    from its name ("Agents" sparkles, "Work" a briefcase, "Family" people), else a folder, made in the app or by an agent
+    without `--icon` alike.
+  - **Menus:** a channel's context menu and ⋯ menu have *Move to Group* ▸ with each group (its own checked), *New
+    Group…* (asks for a name, then makes the group with the channel in it) and *Remove from Group* while it is in
+    one. A group's context menu has *Rename Group…*, *Icon* ▸ (the icons, its own checked), *Move Up* / *Move Down*
+    (with another group to pass) and *Delete Group*, which asks nothing: its channels go back to the plain list and
+    nothing is lost. The dialogs are the chat dialogs' (a name field, Cancel and Start or Rename).
+  - **Agents** change them as the user can, at permission Control like Mute, each change in the activity log:
+    `chat.groups` (`seedwell chat group list`, read-only: the groups in order, each with the channels open to agents
+    in it, and the icon names), `chat.group_new` (`group new <name> [--icon I]`), `chat.group_edit` (`group edit
+    <group> [--name N] [--icon I] [--position N]`), `chat.group_delete` (`group delete <group>`) and `chat.set_group`
+    (`group move <channel> <group>|--none`). A group's name is new on the device in any case; `<group>` is its name,
+    its id or 4 or more characters of the id.
 - **Images** (0.1.15, the user's wish: "Native support for images and SVGs in the chat. It's a great way to share
   screenshots, context and designs."): a message in a channel can carry up to 10 images, PNG, JPEG, GIF, WebP or
   SVG, with or without text, and private messages too (since files, below: a private message's images are fetched
@@ -1822,11 +1858,12 @@ Chat between devices, for people and agents (0.1.6).
   checked against its piece table.
 - **Permissions** (§9A): every channel method needs the channel open to agents (Agents: Yes, above), and then no
   more than Control: `chat.list`, `chat.members`, `chat.read`, `chat.attachment` (an image's bytes, base64; an SVG
-  also drawn as PNG with `png`; for a file, where it stands), `chat.topics` and the `chat.message` events need read;
+  also drawn as PNG with `png`; for a file, where it stands), `chat.topics`, `chat.groups` and the `chat.message` events need read;
   `chat.download`, `chat.cancel_download` and `chat.stop_sharing` (a file of a channel, or with `device` of a private
   conversation, which also needs the Mac's switch at Read) need control; `chat.new`, `chat.join`, `chat.send`, `chat.new_topic`, `chat.share`, `chat.set_role`,
   `chat.remove_device`, `chat.set_share_until`, `chat.set_agents` (owners and admins; an agent sets only No in
-  practice), `chat.mute`, `chat.rename`, `chat.add_address` and `chat.leave` need control; only `chat.set_wake` (it
+  practice), `chat.mute`, `chat.rename`, `chat.group_new`, `chat.group_edit`, `chat.group_delete`, `chat.set_group`,
+  `chat.add_address` and `chat.leave` need control; only `chat.set_wake` (it
   runs commands on this Mac) needs full. `chat.new` (and `sync.share` with `chat: "new"`) makes a Yes channel; a
   channel's `agents` is `yes` or `no`. Private messages: `chat.dm_list` and `chat.dm_read` need read and the Mac's switch at
   Read, `chat.dm_send` control and the switch at Read and post, `chat.dm_delete` full. Every message in the agent interface carries `"trust"`: `this-device` for the user's
@@ -2016,7 +2053,7 @@ A folder whose every file is listed on this device, but whose content is here on
 or changed here (iCloud Drive and OneDrive style). The user chose the system's own placeholders for it, never a file
 browser in Seedwell's window: the Finder through a File Provider extension on the Mac (a Developer ID-signed build,
 an app group shared by the app and its extension), a Cloud Files sync root on Windows. The rules are the core's
-(`trs_sync::ondemand`, `FolderCore`'s on-demand calls); the hosts only draw and report.
+(`seedwell_sync::ondemand`, `FolderCore`'s on-demand calls); the hosts only draw and report.
 
 - **Modes.** *Files on demand* never touches the files of a device that holds them (the user's decision, 2026-11-04,
   after 0.1.18 moved a 914 GB folder from under the torrents seeding from it). On demand matters only for the devices
@@ -2114,7 +2151,7 @@ an app group shared by the app and its extension), a Cloud Files sync root on Wi
   `6GND8Z2C7Z.io.github.kkollsga.Seedwell` it shares with the app; Team-prefixed, so no provisioning profile) keeps
   nothing: each of its calls is one request over the socket `fp` in the group's container (one JSON line each way,
   versioned) to the running app, which answers from the core; what an item may do, whether it is kept and what an
-  error means to the system are decided there (trs-ffi `sync_host`). With the app not running, the extension starts it
+  error means to the system are decided there (seedwell-ffi `sync_host`). With the app not running, the extension starts it
   in the menu bar (at most once in 30 s) and waits up to 10 s, else the call fails "Seedwell isn't running" (the system
   tries again when signalled). Only the user's own app serves it: tests, QA and isolated runs never take the socket nor
   register a domain. Only the app's own extension is served: its code signature is checked from the peer's audit
@@ -2124,9 +2161,9 @@ an app group shared by the app and its extension), a Cloud Files sync root on Wi
 
   **One *Seedwell* in the Finder's sidebar, listing every synced folder** (the user's decision, 2026-11-05, replacing
   0.1.19's domain per on-demand folder, `~/Library/CloudStorage/Seedwell-<Name>`, one sidebar entry each). The app
-  registers one File Provider domain, the hub (identifier `seedwell`, name *Seedwell*, with the extension's custom
-  sidebar symbol; macOS places it under `~/Library/CloudStorage`, which the user accepts), and the core decides what it
-  holds (trs-ffi `sync_hub`; the app starts the server in hub mode, `sync_host_start(…, Hub)`; Windows is unaffected).
+  registers one File Provider domain, the hub (identifier `seedwell`, with the extension's custom sidebar symbol;
+  macOS places it under `~/Library/CloudStorage`, which the user accepts), and the core decides what it
+  holds (seedwell-ffi `sync_hub`; the app starts the server in hub mode, `sync_host_start(…, Hub)`; Windows is unaffected).
   Its root lists every synced folder in name order (without case), each under a name no other has (` 2`, ` 3`, … for a
   name taken): an on-demand folder as a folder of placeholders, served as its own domain was; a full folder (its files
   on this Mac, wherever its place is: the Seedwell folder, `~/Seedwell` by default, or elsewhere) as a link to its
@@ -2155,6 +2192,26 @@ an app group shared by the app and its extension), a Cloud Files sync root on Wi
   when an on-demand folder joins it (switched here, by the command line or an agent), and shows its held files
   downloaded. The core reports the hub while folder sync runs and a folder is synced; the host only adds and
   renames it. The system's set of items on disk is reported for the hub and taken per folder.
+
+  **The hub has no name of its own**, so the sidebar says *Seedwell* (the user's wish, 2026-11-06). macOS labels a
+  domain "<app> - <domain name>" and keeps it in `~/Library/CloudStorage/<app>-<domain name>`; 0.1.20 named the hub
+  *Seedwell* and the Finder said "Seedwell - Seedwell" (`Seedwell-Seedwell`). With an empty name the app's name stands
+  alone, as Dropbox's one domain is `~/Library/CloudStorage/Dropbox`. The hub's root item is named *Seedwell* by the
+  core (the extension names a root after its domain only when the core gives none). A hub registered under another
+  name (a Mac that ran 0.1.20) is renamed in place: the system hands over what it has pending in the hub (the same
+  bounded barrier as below), then the app adds the domain again under its identifier, which only updates its name
+  and keeps what the system has on disk and the user's switch in System Settings (`NSFileProviderManager.h`,
+  `addDomain`); never removed and added. macOS may move the folder to `~/Library/CloudStorage/Seedwell`; nothing in
+  Seedwell depends on that folder's name (every place is asked of the system, `getUserVisibleURL`). Should the rename
+  leave the hub switched off, the user is asked to allow it, as for a new one. **A Mac must never end up without the
+  entry:** should macOS refuse the empty name (an error about the name or an argument at once, or every one of the
+  retries failing), the hub is registered under the core's fallback name, *Seedwell*
+  (`sync_host_domain_fallback_name`), and the empty name is not tried again this launch. A domain whose reported
+  name is the one asked for (the fallback's, after a refusal), or that was added under it this run whatever macOS
+  reports back, is not added again. The app also keeps, across launches (its defaults), the name macOS reported for
+  each domain after its last add for the core's name: a later launch that finds the domain so does nothing (no
+  hand-over, no add, nobody asked), so a refused empty name or one read back otherwise is not tried again on every
+  launch.
 
   **Removing or switching an on-demand folder** (by whoever asks: the app, the control socket, an agent; after the
   checks that need no host) first lets it go from the hub, and the core waits: the system hands over what it has
@@ -2319,7 +2376,7 @@ an app group shared by the app and its extension), a Cloud Files sync root on Wi
     from the first piece; a temp file left from anything else is never trusted.
   - **A file changed while it is read** is never recorded with a hash of mixed content: the maker compares the
     file's stamp before the first piece with the stamp its record holds and again after the last byte (as
-    `trs_platform::fs::copy_shared` does), and when either differs it answers the piece *changed* (response code 5),
+    `seedwell_platform::fs::copy_shared` does), and when either differs it answers the piece *changed* (response code 5),
     forgets the read and records nothing; the receiver drops what it got and tries again in its next round, by then
     against the new version the scan found.
   - **Which version is current.** The hashed and the unhashed form of one version are the same content (same
@@ -2658,7 +2715,7 @@ off. Only the app's call (`EngineHandle::set_proxy`) turns the proxy off or chan
 `config.toml` never does (one landing just after the app switched it on would otherwise send torrents directly while
 the app says on); the file can only switch on its own hold, and take that hold back.
 
-*Choosing the server* (`trs_engine::proxy`). Every candidate is tested at once with an authenticated SOCKS5
+*Choosing the server* (`seedwell_engine::proxy`). Every candidate is tested at once with an authenticated SOCKS5
 handshake (connect, greeting, login; 6 s at most); the fastest that answers is used, the earlier in the list on a
 tie. The server in use is tested again every 60 s, a dial or announce that meets a dead proxy asks for a test at once
 (at most every 3 s), a failed test switches to the next best at once, and every 30 min all candidates are ranked
@@ -2706,6 +2763,14 @@ off with one; the right-click menu opens the window. The window holds the NordVP
 guide shown or hidden inside it) and a custom SOCKS5 proxy (server, port, optional username and password), and
 Remove Key. Settings › Network shows the status line.
 
+*From the command line* (`seedwell proxy`, §9A.2; permission full, in the activity log). The same calls the window
+makes, through the app (`seedwell_control::ProxyControl`, which the app registers; a daemon has none and says so): `on`,
+`off`, `country <code>|none`, `nordvpn` and `custom <host> <port> [--key]` (the key from standard input only, two
+lines: the username, then the password; tested before it is kept, as in the window), `faster`, `remove-key`, and
+`status`. The key is never an argument, never in an answer, an error or the activity log (it says "key not logged");
+`status` and `settings get` (`network.proxy.key`: installed or none) say only whether one is installed. `settings set`
+refuses `network.proxy.*` and names this command: the file alone would hold every torrent or leave the proxy on.
+
 *On the Mac* (`app/Sources/SeedwellApp/Proxy/`). The shield sits at the left of the menu bar menu's last row, beside
 "Open Seedwell…", with the row's own highlight; a click there switches the proxy in place (the menu stays open) or,
 without a key, closes the menu and opens the window. Settings › Network has a "Torrent proxy" box between Connection and
@@ -2718,7 +2783,7 @@ under it (the accessible name and tooltip say both). While a key test or Find a 
 shield's click, Remove Key and the country wait (the core refuses a switch then: the test would undo it when it ends).
 Copied text fills the password only within two minutes of a copied username, and a note says the fields came from a
 copy. Problems are plain sentences ("No server answered. The proxy refused the connection."), never the
-system's "os error N" (`trs_socks::io_words`). The right-click menu: "SOCKS5 Proxy…", the switch and Find a Faster Server
+system's "os error N" (`seedwell_socks::io_words`). The right-click menu: "SOCKS5 Proxy…", the switch and Find a Faster Server
 with a key, and "Country: Sweden…" (the chosen one's name). **The country list** (the user's request: the 60-row
 submenu was too long) is the same in the menu and the window: `country_visible_rows` rows (6) at the menu's row height
 and font with a scrollbar, "No preference" first, a checkmark on the chosen one, scrolled so it shows when the list
@@ -2896,7 +2961,7 @@ Settings > Advanced > **Developer mode** (`advanced.developer_mode`, off by defa
   - *Schedule:* `next` = when the next announce is and why: `interval 1800 s`, `min interval ... the floor wins`, `backoff step N after failure (downloading|seeding|dormant seed pace)` with the server's `Retry-After` / `retry in`, halted until the user acts. The rate gate's delay is its own entry (`deferred` ... `released ... after waiting N ms`), as are breaker pauses and trips.
   - *Decisions that send nothing:* `session_opened` (which tracker of which tier the walk reached), `retire` / `retire_silent` (BEP 12 failover passed a tracker over; whether a `stopped` was sent), `suspend` and `quit_begin` / `quit_done` (quit handling, stopped abandoned at the deadline), `skipped` (a network change or wake did not move a healthy tracker's regular announce), `retry_moved`, `manual_deferred` (a re-announce before the min interval), `halted`, `stop_abandoned`.
   - *Connectivity (§7C.4c):* `path` (the OS reported a usable path or none), `will_sleep`, `did_wake`, `checking` (the wake check holds announces), `offline` (since when, reason `path` or `inference`, how many torrents' failures were taken back, how many announces are already due), `probe` (which torrent's announce tests the network), `probe_skipped` (nothing was due), `online` ("online after 3 h 12 min: 214 announces due, released over 60 s through the host gate").
-- **Secrets are never written.** The engine hands raw tracker URLs to `trs_devlog::DevLog::log`, which is the logging boundary: every URL goes through `trs_state::url::mask_secrets_for_log` (passkey / authkey / torrent_pass / pid / `key` ... values, 20+ alphanumeric, 32+ hex and base64-looking path segments, userinfo), every free text (tracker messages, headers, notes, field values) through `mask_text`, and the client `key` (UDP too) is masked in every field. Masking happens before the line reaches the channel, never in a viewer. `info_hash` and our `peer_id` are logged. Tests feed private-tracker URL shapes through the logging path and through a real engine, and `grep` the file for the passkey.
+- **Secrets are never written.** The engine hands raw tracker URLs to `seedwell_devlog::DevLog::log`, which is the logging boundary: every URL goes through `seedwell_state::url::mask_secrets_for_log` (passkey / authkey / torrent_pass / pid / `key` ... values, 20+ alphanumeric, 32+ hex and base64-looking path segments, userinfo), every free text (tracker messages, headers, notes, field values) through `mask_text`, and the client `key` (UDP too) is masked in every field. Masking happens before the line reaches the channel, never in a viewer. `info_hash` and our `peer_id` are logged. Tests feed private-tracker URL shapes through the logging path and through a real engine, and `grep` the file for the passkey.
 - **Cost.** Off: one relaxed atomic load per pass of the tracker task, no formatting, no allocation, no thread. On: the line is formatted on the tracker task and written by a separate thread through a bounded channel (4096 lines) that drops, and counts, when full: it can never delay an announce. Rotation at 10 MB, three files (`trackers.log`, `.1`, `.2`).
 - **App.** When on, the Developer group shows **View Log…**, **Show Log in Finder** and **Clear Log**. The viewer is a sheet of the main window: a live tail (once a second; *Live* pauses it) with a filter for torrent or tracker, an event menu and *Errors only*; a row is one line (time, torrent, tracker host, transport and event, what happened), a click shows the request, the answer and the schedule in a monospaced, selectable block; failed exchanges are red.
 - **Agents.** `seedwell log trackers [--follow] [--torrent ID|TITLE] [--tracker HOST] [--event E] [--errors] [--limit N]` (human text, `--json` for the lines; control method `tracker_log`, permission `read_only`) read it; `seedwell dev on|off|status` switches Developer mode (§9A.5).
@@ -2909,7 +2974,7 @@ Settings > Advanced > **Developer mode** (`advanced.developer_mode`, off by defa
 - Logging through `os_log` (Console.app). What the core says on standard error (folder sync, chat, the engine; a
   panic's message) goes to `<state dir>/logs/core.log` when the app's standard error goes nowhere (started from the
   Finder or at login it is /dev/null; a Windows app has no console at all): the core redirects it when it starts
-  (`trs_platform::proc::stderr_to_log`, once per process), the same on every system, with a first line
+  (`seedwell_platform::proc::stderr_to_log`, once per process), the same on every system, with a first line
   `seedwell: <time> Seedwell <version> started (process <pid>)`. A log larger than 2 MB at start is kept as
   `core.log.1` and begun anew. A terminal, a test run or a QA script that reads standard error keeps it.
 - Distribution: Developer ID signed and notarized (Team ID `6GND8Z2C7Z`, from 0.1.11; earlier releases were signed ad hoc), as a disk image (`Seedwell.dmg`: the app, a link to Applications, a background with an arrow) and as a zip for `install.sh` and the updater (updates: §12A). `install.sh` installs a release from GitHub only when it is signed by that team and Gatekeeper accepts it (a `--zip` test build and a local test server excepted; a release from before signing only when pinned with `--version`). Not sandboxed and not on the App Store, because the sandbox makes arbitrary download folders painful.
@@ -2939,19 +3004,47 @@ Agents like Claude should be able to operate Seedwell as easily as a person: "ad
 | Control | `pause` / `resume <torrent>...\|--all` · `top` · `priority <torrent>... high\|normal\|low` · `category` · `files <torrent> [--want\|--skip\|--only\|--low\|--normal\|--high L]` · `goal` · `reannounce` · `recheck` · `remove <torrent>... [--delete-files] [-y]` · `remove-confirm <token>` |
 | Files on disk | `moves` · `move` · `cancel-move` · `stream` · `stop-stream` |
 | Speed and trackers | `limits [--down R --up R --alt-down R --alt-up R --alt on\|off]` · `trackers` · `tracker <name> limits [--down R] [--up R]` · `tracker <name> pex [on|off]` · `stats [tracker] [--days N]` · `rules` |
-| Settings | `settings get [key...]` · `settings set key=value...` |
+| Settings | `settings get [key...]` · `settings set key=value...` · `settings get --file rules\|trackers` · `settings set --file rules\|trackers <json>\|-` · `proxy [status]\|on\|off\|country <code>\|nordvpn\|custom <host> <port> [--key]\|faster\|remove-key` (§7H) · `log trackers --clear` |
 | Watch | `wait <torrent>... [--any] [--timeout S]` · `watch` · `activity` · `log trackers` |
 | Debug | `dev on\|off\|status` · `debug health\|trackers\|peers\|perf\|announce` (§9A.5) |
 | Folder sync | `sync list\|status\|add\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never] [--chat <channel>\|new]\|share-until <days>\|never [--extend]\|members\|invites\|revoke-invite\|role\|remove-device\|rename\|move\|pause\|resume\|rescan\|read-only <folder> on\|off\|status\|address\|remove\|settings` (§7G.5) · `relay [--port N]`. Read-only: `list`, `status`, `members`, `read-only … status`, `settings`; full: `share`, `share-until`, `invites`, `role`, `remove-device`, `rename`, `move`, changing `settings`, `remove --delete-files`; control: the rest |
-| Channels | `chat list\|new\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never]\|members\|role\|remove-device\|share-until\|topics\|topic <title>\|send [--topic T] [--reply ID] [--as-json] [--attach FILE]... -\|attachment <channel> <hash> [--out PATH] [--png] [--no-wait]\|read [--topic T] [--since ID\|--last N]\|watch [<channel>...] [--topic T]\|dm list\|send <device> [--attach FILE]... -\|attachment <device> <hash> [--out PATH]\|read <device>\|watch\|delete <device>\|address\|rename <name>\|mute\|wake <command>\|off\|agents <channel> no\|leave` (§7G.7); `rename` names the channel on this Mac only, as a folder's name. Every command needs the channel open to agents (Agents: Yes, one setting for the whole channel; a No channel is not there for agents), or the Mac's switch for private messages (only the user sets that one, in the app). `new` makes a Yes channel; `join` with a Yes channel's link opens it to agents at once (joining until admitted); `agents <channel> no` closes a channel (owners and admins). Read-only: `list`, `members`, `topics`, `read`, `attachment` of an image or a file here, `watch`, `dm list`, `dm read`, `dm watch`; full: `wake`, `dm delete`; control: the rest, and `attachment` that downloads a file (`dm send` also needs the switch at post) |
+| Channels | `chat list\|new\|join\|share [--role R] [--uses N\|unlimited] [--days N\|never]\|members\|role\|remove-device\|share-until\|topics\|topic <title>\|send [--topic T] [--reply ID] [--as-json] [--attach FILE]... -\|attachment <channel> <hash> [--out PATH] [--png] [--no-wait]\|read [--topic T] [--since ID\|--last N]\|watch [<channel>...] [--topic T]\|dm list\|send <device> [--attach FILE]... -\|attachment <device> <hash> [--out PATH]\|read <device>\|watch\|delete <device>\|address\|rename <name>\|mute\|wake <command>\|off\|agents <channel> no\|leave\|group list\|new <name> [--icon I]\|edit <group>\|delete <group>\|move <channel> <group>\|--none` (§7G.7); `rename` names the channel on this Mac only, as a folder's name; `group` keeps the sidebar's groups of channels (this Mac's own). Every command needs the channel open to agents (Agents: Yes, one setting for the whole channel; a No channel is not there for agents), or the Mac's switch for private messages (only the user sets that one, in the app). `new` makes a Yes channel; `join` with a Yes channel's link opens it to agents at once (joining until admitted); `agents <channel> no` closes a channel (owners and admins). Read-only: `list`, `group list`, `members`, `topics`, `read`, `attachment` of an image or a file here, `watch`, `dm list`, `dm read`, `dm watch`; full: `wake`, `dm delete`; control: the rest, and `attachment` that downloads a file (`dm send` also needs the switch at post) |
 | Test | `sim ...` (§9A.6) · `daemon ...` |
-| Agents | `skill show\|install\|uninstall` · `awake --for D\|off\|status` (§9A.7) · `agents request <what> [--why T] [--channel C [--topic T] [--reply ID]]\|requests [--all]` (§9A.8) · `update [status]\|now\|install <zip>\|watch <folder>\|watch --off\|dev-builds on\|off` (§12A) · `help [command\|agents]` |
+| Agents | `skill show\|install\|uninstall` · `awake --for D\|off\|status` (§9A.7) · `agents request <what> [--why T] [--channel C [--topic T] [--reply ID]]\|requests [--all]` (§9A.8) · `update [status]\|now\|install <zip>\|watch <folder>\|watch --off\|dev-builds on\|off` (§12A) · `restart [--no-wait] [--timeout T]` (§9A.10) · `help [command\|agents]` |
 
+- **Every setting the user can change is an agent's to change** (the user's decision, 2026-11-07: "The CLI should
+  enable the agent to make all changes"; permission full, each change in the activity log). `settings get` lists every
+  key of `config.toml` with its value; `settings set` takes `key=value` pairs, applied together or not at all, each
+  type-checked and validated as the Settings window's are, and the running app applies them as it applies its own:
+  the engine reloads the file (limits, the listening port, watch folders, port mapping, Developer mode) and the app
+  applies what is its own when the reload is announced (launch at login, keeping the computer awake, the updater; the
+  Mac and Windows apps read the settings again on `on_settings_changed`). A value is JSON where it parses as JSON:
+  `null` is the setting's default (and clears an optional folder), a table merges into the one in force (RFC 7396), a
+  list replaces the list; a watch folder (`folders.watch`) is named by its `path`, and a new one takes what Settings'
+  + gives it (on, ask first, leave the `.torrent` file). A folder an agent names is never a system folder, the user's
+  settings folder (`~/Library`, `AppData`) or a hidden folder of the home folder, as for `add --save-path` and `move`
+  (§9A.3); folders already in force stay as the user chose them. Rules and favourite trackers are documents: `settings get
+  --file rules|trackers` gives `rules.toml` or `trackers.toml` as JSON and `settings set --file` replaces it with an
+  edited copy, validated as the file is (keys this build does not know are kept), its folders held to the same rule.
+  A key that a value, a list entry or a document does not have is refused by name, never dropped (a misspelt
+  `"mdoe"`), and so is a dotted key inside a value; the answer and the activity log name only the settings whose
+  value really changed, and a call that changes nothing says so. Folder sync's settings are `sync
+  settings`. Never an agent's (`seedwell_control::settings::DENIED`, refused for reading and writing, by key or through
+  its table): `agents.permission` (an agent must not raise its own access; only the user sets it),
+  `agents.notify_changes` (the user's notice of what agents change), `agents.rate_limit_per_sec` (the limit on agents'
+  own calls) and `version` (the file format). The per-channel Agents switch and the private-message switch are not in
+  `config.toml`: they are the user's privacy switches (§7G.7; an agent can only close a channel). Keys whose change
+  needs more than the file (`ROUTED`) are refused with the command that does all of it: `updates.dev_builds` (`update
+  dev-builds on|off`), `updates.dev_folder` (`update watch`), `network.proxy.*` (`proxy`). What the window does
+  besides settings has its command too (`update now`, `update install`, `skill install`, `log trackers --clear`), or
+  stays the user's: pairing devices, the rendezvous, answering an agent's request, the system's own switches (the
+  Finder extension, the Share menu). A test walks every control of every tab, as the Mac and Windows draw them, and
+  fails when one has no CLI path or the CLI's change ends in another state (`crates/ffi/src/settings_cli_tests.rs`).
 - **Held torrents use the app's words.** A new or waiting torrent is confirmed with **Start** and dismissed with **Cancel** (§7A.6). `seedwell start` begins with every file ticked, like Start in the app (`--suggested` is the engine's preselection, `--files`/`--skip` choose); on a torrent in its start delay it starts at once. `seedwell cancel` removes the torrent and moves its `.torrent` file to the Trash (the engine's `held_source`, verified by info-hash); `--keep-file` keeps it, like ⇧-Cancel. Magnet links and web addresses have no file.
 - **Selecting torrents.** Every command that acts on torrents takes `<torrent>`: an id prefix (6+ hex characters), part of the name (title or raw name, any case), or filters `--all`, `--tracker X`, `--state S`, `--category C`. A term that matches several torrents is an error (exit 3) that lists the candidates; nothing is guessed. `pause --all` / `resume --all` use the engine's one-pass call.
 - **Units.** Rates and sizes accept `5MB/s`, `500KB/s`, `1.5GB`, `unlimited`; durations `90s 15m 12h 7d 2w`; file numbers `0,3-5`. Human output prints units; `--json` prints bytes, bytes/s and Unix seconds.
 - **Output.** Human text by default (the engine's shared texts: titles, goal wording, waiting notes). `--json` on every command: one object with `"v":1` first (fields are only ever added within a version). Errors go to stderr, as text or `{"v":1,"error":{"code","message","exit",...}}`; an ambiguous selector adds `candidates`.
-- **Exit codes.** 0 ok · 1 error · 2 usage · 3 not found or ambiguous · 4 permission denied or agent access off · 5 Seedwell is not running · 6 timed out (`wait`).
+- **Exit codes.** 0 ok · 1 error · 2 usage · 3 not found or ambiguous · 4 permission denied or agent access off · 5 Seedwell is not running · 6 timed out (`wait`, `restart`).
 - **App not running.** The message says so and names `--launch`, which starts the installed app in the background (`open -g -b io.github.kkollsga.Seedwell`) and waits for the socket (never with `--socket`).
 
 ### 9A.3 Guardrails
@@ -2959,7 +3052,7 @@ Agents like Claude should be able to operate Seedwell as easily as a person: "ad
   - **Off** is the default until enabled.
   - **Read-only** allows status, list, info, choice, trackers, stats, rules, wait, watch, `log trackers` and every `debug` read.
   - **Control** adds add, start, cancel, pause, resume, priority, category, goals, files, limits, tracker caps, reannounce, recheck, removing without files, `debug announce`.
-  - **Full** adds removing with file deletion, moving files, changing settings (`dev on|off` and `update dev-builds on|off` included), installing the latest release (`update now`), the activity log and `sim`.
+  - **Full** adds removing with file deletion, moving files, changing settings (every setting of the Settings window but the agents' own access, §9A.2; `dev on|off`, `update dev-builds on|off`, `proxy` and `sync settings` included), installing the latest release (`update now`), restarting the app (`restart`), the activity log and `sim`.
   - **Asking for more** (`agents request`, §9A.8) is open to every level from read-only: it grants nothing. A command
     refused for lack of access says what is missing and the one `seedwell agents request …` that asks the user for it.
 - **Out of reach for every level:**
@@ -2969,12 +3062,12 @@ Agents like Claude should be able to operate Seedwell as easily as a person: "ad
   - the user's own devices (§7G.1 *Your devices*): no command pairs, confirms, removes, follows, leaves or starts
     over, and none returns the user key or names the group (not as a folder or channel, not by its id, not as a
     device connected only for it). The CLI has no pairing commands: pairing is the app's alone.
-- **Activity log:** every agent action is recorded with the client name, time and arguments, and shown in Settings → Agents. An optional notification can say "Claude paused 3 downloads".
+- **Activity log:** every agent action is recorded with the client name, time and arguments, and shown in Settings → Agents. An optional notification can say "Claude paused 3 downloads". It survives a restart and an update (the user's decision, 2026-11-07: an agent can restart the app itself, `restart`, and the record of what it did must outlive that): the newest 1,000 entries are kept in `agent-activity.jsonl` in the state folder, written on a thread of their own, never by the caller. An entry keeps the channel it named, so it stays out of an agent's answer while that channel is closed to agents, after a restart too. Arguments are redacted as before (no links, keys or message text).
 - Calls are rate-limited (default 20/s per client) to protect the UI and disk. Tracker traffic is protected separately by the HostGate.
 - **Removal is two steps** on the wire (plan and token, then confirm); the CLI asks `Proceed? [y/N]` on a terminal, `-y` confirms, and with `--json` and no `-y` it prints the plan and the token and removes nothing.
 
 ### 9A.4 The embedded skill and the command-line tool
-- `seedwell skill show` prints `SKILL.md` (frontmatter `name: seedwell` and a description that says when to use it, the rules of thumb, recipes) and `REFERENCE.md` (every command, usage, examples, JSON shape, units, exit codes). Both are generated from `trs_cli::help::COMMANDS`, the table the parser tests walk, so a command in the skill exists and every example in it parses (tests).
+- `seedwell skill show` prints `SKILL.md` (frontmatter `name: seedwell` and a description that says when to use it, the rules of thumb, recipes) and `REFERENCE.md` (every command, usage, examples, JSON shape, units, exit codes). Both are generated from `seedwell_cli::help::COMMANDS`, the table the parser tests walk, so a command in the skill exists and every example in it parses (tests).
 - `seedwell skill install [--dir PATH] [--force]` writes the two files to `~/.claude/skills/seedwell/` (or `--dir`), and a second skill, `seedwell-agents` (`SKILL.md`: mail between projects, tags, passing files, chat; §7G.7–7G.10), beside it, **only when the user runs it**; two skills so an agent loads only what its task needs (a torrent task never loads the mail guide, an agent working with other projects never loads the torrent reference). A file that differs from what Seedwell wrote earlier is only replaced after asking (or with `--force`). `seedwell skill uninstall` removes both.
 - **Settings → Agents → Command line:** "Copy CLI Path"; "Install Command-Line Tool…" (shown only while no `seedwell` is on the PATH or in `/usr/local/bin`, `~/.local/bin`; asks which of the two folders, then makes a symlink to the copy in the app, never silently, never overwriting a link that points elsewhere); "Install Skill for Claude Code" / "Update Skill" / "Remove Skill" (run the bundled CLI; ask before replacing changed files). Buttons are normal buttons, right-aligned, each with hover text, and nothing is written until one is pressed.
 
@@ -3060,6 +3153,33 @@ it checks that folder instead (a newer signed build there is installed); with de
 goes back to the latest release, as the switch does. Nothing else touches the app. A Sparkle build or a daemon has no
 core updater and says so.
 
+### 9A.10 Restarting the app (`seedwell restart`)
+Agents can do through the CLI what the user can, and that includes quitting Seedwell and opening it again (the
+user's rule: an app that misbehaves, far too much memory, must not wait for the user). `restart` (permission full;
+below it the refusal names `seedwell agents request full`; in the activity log with what it interrupts) quits the app
+and opens it again with the same state, the way every install quits and reopens it (§12A): the core starts the
+app's own installer (`install.sh --restart --pid <pid>`, `install.ps1 -Restart -AppPid <pid>`) apart from the app,
+with the install folder, state folder and relaunch arguments an install gets. It replaces nothing: it waits a second
+(the answer goes out first), quits exactly that process the proper way (SIGTERM on the Mac, `Seedwell.exe --quit` on
+Windows: the trackers are told `stopped`, at most 130 s) and opens the app again in the background as it was started
+(an isolated run with its own `--state-dir`); on Windows it ends nothing else running from the install folder (the
+CLI waiting for the app is one). The hosts add nothing: each already quits properly for an installer.
+- **Like Install, it does not wait.** Downloads and a move of files are what an automatic install waits for; an
+  explicit Install does not, and neither does `restart`: its answer names them ("this interrupts 2 downloads (they
+  go on when Seedwell is open again) and a move of files at 40 % (cancelled: the files stay where they were; move
+  them again after)").
+- **Refused** while an install runs (it already quits and reopens the app), while the app quits, within 5 minutes of
+  another restart (the installer's time; a second would quit the reopened app), in a copy without its installer (a
+  build run from its build folder), and by a daemon or a Sparkle build (no core updater).
+- **An app still starting waits for its updater.** The socket answers before the host has started the updater (on
+  Windows about 90 ms earlier, longer under load). In that moment `restart` and `update …` wait for it, up to 10 s,
+  then say "Seedwell is still starting: try again in a moment". They never give a daemon's answer for an app.
+- **The CLI waits for the new run.** `hello` names the server's process and when it started answering (`pid`,
+  `started_ms`); the answer to `restart` names the run that quits. Unless `--no-wait`, the CLI then looks every half
+  second until another run answers and prints its process and start; after 3 minutes (`--timeout`) it gives up with
+  exit 6 and says whether the old run never quit (it may still be telling trackers) or nothing came back, with the
+  installer's log (`logs/update.log` in the state folder).
+
 ## 10. Persistence
 `~/Library/Application Support/Seedwell/`
 - `config.toml`, `rules.toml`: human-readable, hot-reloaded.
@@ -3075,7 +3195,7 @@ core updater and says so.
 | # | Deliverable | Exit criterion |
 |---|---|---|
 | M0 | Workspace, Swift shell, UniFFI bridge, native menu spike | menu shows live rows from Rust; right-click on a menu item proven (or fallback chosen) |
-| M1 | bencode, metainfo, **tracker stack per §7C (state machine, HostGate, layers 1–5)**, TCP peer wire, picker, storage, resume | `trs` downloads a public Linux ISO; §7C invariants, simulation and real-tracker conformance green |
+| M1 | bencode, metainfo, **tracker stack per §7C (state machine, HostGate, layers 1–5)**, TCP peer wire, picker, storage, resume | `seedwell` downloads a public Linux ISO; §7C invariants, simulation and real-tracker conformance green |
 | M2 | magnet + DHT, PEX, LSD, uTP, encryption, NAT-PMP/UPnP | magnet-only download at line rate |
 | M3 | parked torrents, rules engine, queue manager | **200-torrent memory benchmark meets §2** |
 | M4 | content detection + placement (§7A), watch folders, **direct downloads (§7D)** | ≥ 95% correct category on 500 real torrent names; HTTP resume survives kill -9 and server-side file changes |
@@ -3102,7 +3222,7 @@ These were taken by the build coordinator for the autonomous build. Each can be 
 | 17 | Recent rows in the menu | **Click reveals in Finder** (with a checkmark image; plain rows, no submenu, also for videos). Downloading and queued rows have a check (pause / resume) and, for video, a Play icon; their commands are on right-click (§8.2; no hover submenu since 2026-10-18). Right-click inside an `NSMenu` was not reliably deliverable in the first spike (`StatusMenuController`); it is to be verified on hardware" |
 | 18 | Tracker wire format | Aligned with captured announces of mainstream clients: upper-case hex, Transmission-style parameter order, `numwant=0` on `stopped`, no `ip`/`ipv4`/`ipv6`, no `corrupt`/`redundant`/`no_peer_id`, per-process `key` and `peer_id`, per-`started` counters; encryption advertised after `compact` (2026-10-13): `network.encryption` prefer = `supportcrypto=1`, require = `supportcrypto=1&requirecrypto=1`, off = nothing (HTTP only, applied from the next announce) |
 | 19 | Distribution | **Developer ID signing, notarization, direct download (a disk image), the curl installer, optional Homebrew cask. Updates (§12A): the GitHub-release updater; Sparkle only in a build that carries its key and feed (none does).** No Mac App Store: Apple has historically refused general BitTorrent clients, and the sandbox would cut watch folders and the agent socket. A later App Store variant would have to describe BitTorrent openly |
-| 20 | Product name and identity | **Seedwell** (chosen 2026-10-11 over Dispatch, which was hard to search for). User-Agent `Seedwell/<ver>`, BEP 10 `v` = `Seedwell <ver>`, peer id `-SW<major><minor><patch>0-`, one character per part, `0`-`9` then `A`-`Z` for 10-35 as libtorrent does (0.1.0 → `-SW0100-`, 0.1.10 → `-SW01A0-`) + 12 random alphanumerics for releases (built by `app/release-zip.sh`, which sets `SEEDWELL_RELEASE`), `-SX0001-` for every other build. `SW` and `SX` checked free in the libtorrent, WebTorrent and Transmission 4.0.6 client tables. App `Seedwell.app` (Swift target stays internal), bundle id `io.github.kkollsga.Seedwell` (2026-10-13; no domain, so the GitHub namespace; fixed from the first release on, since changing it resets settings), Application Support `Seedwell/`, CLI `seedwell`. Internal crates keep the `trs-` prefix. Replaces the working names TorrentRS and Dispatch everywhere users, trackers or peers can see them |
+| 20 | Product name and identity | **Seedwell** (chosen 2026-10-11 over Dispatch, which was hard to search for). User-Agent `Seedwell/<ver>`, BEP 10 `v` = `Seedwell <ver>`, peer id `-SW<major><minor><patch>0-`, one character per part, `0`-`9` then `A`-`Z` for 10-35 as libtorrent does (0.1.0 → `-SW0100-`, 0.1.10 → `-SW01A0-`) + 12 random alphanumerics for releases (built by `app/release-zip.sh`, which sets `SEEDWELL_RELEASE`), `-SX0001-` for every other build. `SW` and `SX` checked free in the libtorrent, WebTorrent and Transmission 4.0.6 client tables. App `Seedwell.app` (Swift target stays internal), bundle id `io.github.kkollsga.Seedwell` (2026-10-13; no domain, so the GitHub namespace; fixed from the first release on, since changing it resets settings), Application Support `Seedwell/`, CLI `seedwell`. Internal names are Seedwell's too (2026-11-07, the owner's decision: the working name TorrentRS and its abbreviation are retired): crates `seedwell-*`, the FFI module `seedwell_ffi` (Swift `seedwell_ffiFFI`, C# `SeedwellFfiMethods`), `SEEDWELL_*` environment variables, thread and temp names. Files written under the old names before then (partial-download sidecars, move journals and partial copies) are still read. Replaces the earlier working names everywhere users, trackers or peers can see them |
 | 21 | Streaming | **In scope (2026-10-11), §7F.** Play while downloading in the user's own player over loopback HTTP with ranges; the player's range requests are the playhead, so no control channel. Urgent window ahead of each read, rarest-first elsewhere; never pure sequential |
 
 ## 12A. Updates
@@ -3110,8 +3230,8 @@ These were taken by the build coordinator for the autonomous build. Each can be 
 Two back ends, picked once at launch; the Settings group, its two switches and the menu bar row are shared. Never both.
 
 - **Sparkle** drives updates when the build carries an EdDSA public key and a feed URL (`SUPublicEDKey`, `SUFeedURL`; a Developer ID build). Otherwise Sparkle is not started and makes no request.
-- **GitHub release** drives every other build, as follows. Every rule below is the core's (`trs-ffi`'s `Updates`,
-  the same on the Mac and Windows; what differs per system is `trs-platform`'s `update`); the app runs its timer and
+- **GitHub release** drives every other build, as follows. Every rule below is the core's (`seedwell-ffi`'s `Updates`,
+  the same on the Mac and Windows; what differs per system is `seedwell-platform`'s `update`); the app runs its timer and
   its checks off the main thread, starts the installer it is handed and draws its `UpdatesModel`.
 
 **Source.** The app fetches `<repo>/releases/latest/download/latest.json` (GitHub redirects it to the release marked Latest; drafts and pre-releases never resolve there, and there is no API rate limit). `latest.json` is a release asset written by `app/release-zip.sh` with `version`, `tag`, `notes_url`, `minimum_macos`, `zip` and `sha256` (the Mac's, at the top level, which every installed Mac copy reads), plus `"windows": {"zip", "sha256", "minimum_windows"}` added by the release workflow; it is not listed in `SHA256SUMS`. The repo URL is the Info.plist key `SeedwellRepoURL` (set by `build.sh`, default `https://github.com/kkollsga/seedwell`, override `SEEDWELL_REPO_URL`); the environment variable `SEEDWELL_UPDATE_REPO` replaces it at launch for tests on loopback. One GET (the downloads' HTTP client and redirect rules, at most 64 KiB), 15 s, no retries (the next scheduled check is the retry), `User-Agent: Seedwell/<version>`, no cookies or credentials; only the small result is kept.
@@ -3122,7 +3242,7 @@ Two back ends, picked once at launch; the Settings group, its two switches and t
 
 **Release and development builds.** `build.sh` writes `SeedwellReleaseBuild` = true only when `SEEDWELL_RELEASE=1` (`release-zip.sh` sets it). Automatic checks and automatic installs happen only in release builds. A development build still shows the Updates group and **Check Now** works ("Development build: checks only when you ask"), so the developer's own Mac is never replaced by a release on its own.
 
-**Settings > General > Updates.** Switches **Check automatically** (daily; default on) and **Install automatically** (default off; off and disabled when checking is off), stored in `config.toml` as `[updates] check` and `auto_install` (absent section means the defaults; no format version change). A status line ("Seedwell 0.1.0 is up to date, checked 2 hours ago", "Seedwell 0.2.0 is available" with a Release Notes link, "Checking…", "Couldn't check: …", "No releases yet", "Update to 0.2.0 failed" with Show Log) and right-aligned buttons **Check Now** and, when one is waiting, **Update to 0.2.0**. With Sparkle the two switches are Sparkle's own and its window shows the rest.
+**Settings > General > Updates.** Switches **Check automatically** (daily; default on) and **Install automatically** (default off; off and disabled when checking is off), stored in `config.toml` as `[updates] check` and `auto_install` (absent section means the defaults; no format version change); agents switch them with `seedwell settings set updates.check=… updates.auto_install=…` (permission full, in the activity log), so a device's agent can make it follow the user's other devices to a release (*A newer Seedwell on the network*, below). A status line ("Seedwell 0.1.0 is up to date, checked 2 hours ago", "Seedwell 0.2.0 is available" with a Release Notes link, "Checking…", "Couldn't check: …", "No releases yet", "Update to 0.2.0 failed" with Show Log) and right-aligned buttons **Check Now** and, when one is waiting, **Update to 0.2.0**. With Sparkle the two switches are Sparkle's own and its window shows the rest.
 
 **Menu bar.** While an update is waiting, one row "Update to Seedwell 0.2.0" (arrow.down.circle) sits in the footer section just above "Open Seedwell…". It is read when the menu is built; there is no timer. A click starts the install.
 
@@ -3173,7 +3293,7 @@ when the user asks.
   core checks the switch, that the name is this system's zip (`Seedwell-<version>.zip`, `-windows-x64.zip` on
   Windows) of another version than the running one, and the file's SHA-256 (against `--sha256` when given); then it
   starts the running app's own installer (`install.sh` in the bundle's Resources; `install.ps1` next to the exe) on
-  it, itself, detached (`trs_platform::update::spawn`), output to `logs/update.log`. A handed-over build may be of any
+  it, itself, detached (`seedwell_platform::update::spawn`), output to `logs/update.log`. A handed-over build may be of any
   other version, older included: whoever may use the control socket chose it. Refusals say why ("development
   builds are off: turn on Settings › General › Updates › Allow development builds"). A build installed over a Seedwell signed with a Developer ID
   must be signed by the same team (`tools/dev-build.sh` signs with `SEEDWELL_SIGN_IDENTITY`; it needs no
@@ -3183,13 +3303,13 @@ when the user asks.
   `--off` to stop; `[updates] dev_folder`, acting only while the switch is on; Settings shows the folder with **Stop
   Watching**), on the Mac and on Windows alike. The user's devices share one, `<Seedwell Sync folder>/builds/`
   (Folder Sync carries it), so a build put there reaches each device that watches it within minutes. The core
-  watches it with `trs-fswatch` (FSEvents, ReadDirectoryChangesW, inotify; polling only where native watching cannot
+  watches it with `seedwell-fswatch` (FSEvents, ReadDirectoryChangesW, inotify; polling only where native watching cannot
   start) on a thread of its own while it is set and the switch is on, and stops the watcher when either goes off. No
   timer: the folder is read once when watching starts (at launch, when the switch or the folder changes) and on
   file-change notifications, each a hint (a rescan too) to read `<folder>/build.json` again and believe the disk.
 - **Only the user's builds (trust).** Anyone who can write to a watched folder (any member of a shared folder) can
   put files there, so a folder is a code-execution path and the core installs from it only what is provably the
-  user's (`trs-buildsig`, shared by both hosts through the core):
+  user's (`seedwell-buildsig`, shared by both hosts through the core):
   - `build.json` is `{"manifest": "<JSON text>", "key", "signature"}`: an Ed25519 signature by the **build key** over
     `"seedwell-build-manifest/v1\n"` and the manifest's text, which names each system's build (`"builds": {"macos":
     {...}, "windows": {...}}`, each `version`, `commit`, `zip`, `sha256`, `minimum_system`). The key must be one this
@@ -3244,7 +3364,7 @@ when the user asks.
    again (a newer one is). An app of another version that starts while the installer still runs (its process is
    alive and it started less than 5 minutes ago; a release install the host started, by the time alone) says
    "Installing 0.1.10.4…" and decides nothing: the pending install stays for the new version to report.
-4. **Crash loop.** Before the core starts, the host calls `trs_ffi::launch_guard(state_dir, version, …)`: each launch
+4. **Crash loop.** Before the core starts, the host calls `seedwell_ffi::launch_guard(state_dir, version, …)`: each launch
    counts; `started` and a clean quit (the app's own quit path, SIGTERM included: `Updates::quitting`) clear the
    count. The third launch in a row that ended neither way, of a development build with a kept app, starts the
    installer that puts the kept app back, and the app quits instead of starting.
@@ -3255,7 +3375,7 @@ when the user asks.
    newer build survive a save).
 6. **Recovery window.** When the core cannot start (any reason), the start-failure window offers, besides Quit,
    **Go Back to <kept version>** while an app is kept, and **Install the Release** (the latest from GitHub). Both
-   start the installer (`trs_ffi::recovery_actions`, no core needed); neither touches data.
+   start the installer (`seedwell_ffi::recovery_actions`, no core needed); neither touches data.
 7. **Last resort**, from outside the app: the install page's one-line installer puts the latest release back over
    any build and never touches data; `install.sh --rollback --state-dir <state>` puts the kept app back.
 

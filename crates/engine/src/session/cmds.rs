@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use tokio::sync::oneshot;
-use trs_metainfo::Metainfo;
-use trs_wire::Handshake;
+use seedwell_metainfo::Metainfo;
+use seedwell_wire::Handshake;
 
 use super::cold::*;
 use super::pending::PendingAct;
@@ -723,7 +723,7 @@ impl Session {
             return Some(0);
         }
         let n = mi.piece_count() as u32;
-        let bf = trs_wire::Bitfield::from_wire(&r.bitfield, n).ok()?;
+        let bf = seedwell_wire::Bitfield::from_wire(&r.bitfield, n).ok()?;
         let pp = crate::picker::piece_priorities(
             mi.piece_length,
             n,
@@ -745,7 +745,7 @@ impl Session {
         if !e.cold.has_metadata() {
             return Err(EngineError::NoMetadata);
         }
-        if p.len() > trs_metainfo::MAX_FILES {
+        if p.len() > seedwell_metainfo::MAX_FILES {
             return Err(EngineError::Invalid("too many file priorities".into()));
         }
         let raw: Vec<u8> = p.iter().map(|x| x.to_u8()).collect();
@@ -966,7 +966,7 @@ fn delete_data(
         }
         dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
         for d in dirs {
-            let _ = trs_storage::remove_dir_if_empty(&d);
+            let _ = seedwell_storage::remove_dir_if_empty(&d);
         }
     }
     // Staged copies of custom-path files and the move journal.

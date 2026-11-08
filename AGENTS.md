@@ -30,7 +30,7 @@ release procedure.
   their own Cloudflare API token. Agents never ask for, handle or store that token and never set the rendezvous up
   through the CLI. An agent may deploy the Worker with the README's developer path (`npx wrangler login`,
   `npx wrangler deploy` in that folder) only when the user explicitly allows that deploy: it is an outward-facing
-  step like a push. Tests use the loopback fakes (`trs-rendezvous`'s `testkit`, `node --test`), never Cloudflare.
+  step like a push. Tests use the loopback fakes (`seedwell-rendezvous`'s `testkit`, `node --test`), never Cloudflare.
 - Releases are built by GitHub Actions when a `vX.Y.Z` tag is pushed (`docs/RELEASING.md`); the result is a draft
   that a person publishes.
 - Agents do not commit unless the coordinator asks. Commit messages end with the attribution trailer the session
@@ -125,15 +125,15 @@ trip; most can be caught in the first minutes on the Mac.
   (QA scripts, renders, reviews, git) doesn't wait for it.
   Machine-specific settings go in the untracked `tools/sysguard/local.env`.
 - **Check with `tools/check.sh`.** It runs clippy and the tests (cargo nextest) for the crates a change touches
-  plus the crates that depend on them, and the app build and Swift tests only when `app/` or `trs-ffi` is affected.
+  plus the crates that depend on them, and the app build and Swift tests only when `app/` or `seedwell-ffi` is affected.
   It takes the heavy lock itself (do not wrap it in `heavy.sh`).
   - On macOS it runs the timing tests (`tools/timing-tests.txt`) a second time at utility priority, where timers
     are late as on CI's Mac runner, and it scans the affected crates' tests for Mac assumptions
     (`tools/test-portability.py`). docs/ENGINEERING.md §5 says how a test joins the one and passes the other.
-  - While iterating, narrow it further: `tools/check.sh --quick -p trs-tracker -- -E 'test(/host_recovery/)'`.
+  - While iterating, narrow it further: `tools/check.sh --quick -p seedwell-tracker -- -E 'test(/host_recovery/)'`.
   - **While working: `tools/check.sh --quick`.** It runs the tests of the crates that changed only (not of the
     crates that depend on them), clippy over those and their dependents (which compiles them, no tests), the app and
-    Swift tests only when `app/` or `trs-ffi` itself changed, and the Windows compile check.
+    Swift tests only when `app/` or `seedwell-ffi` itself changed, and the Windows compile check.
   - **A worker hands back once `tools/check.sh --base master` passes:** every crate the branch changed and every
     crate that depends on them, the app and Swift tests when they are affected, the timing pass at utility priority,
     the portability and FFI-name scans. That is what CI would run for that change: crates it cannot reach cannot

@@ -4,7 +4,7 @@ use crate::common;
 use std::time::{Duration, Instant};
 
 use common::*;
-use trs_engine::*;
+use seedwell_engine::*;
 
 fn uri_of(i: u32) -> String {
     // 20 distinct bytes per torrent; nothing will ever answer for them.
@@ -135,7 +135,7 @@ async fn a_users_pause_survives_a_quit() {
 /// take no actor and no download slot at start; a resume brings each back where it was.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn paused_downloads_and_queued_ones_stay_paused_after_a_restart() {
-    let one = |c: &mut trs_engine::EngineConfig| c.max_active_downloads = 1;
+    let one = |c: &mut seedwell_engine::EngineConfig| c.max_active_downloads = 1;
     let mut a = node(one).await;
     // Nobody seeds these: they stay at 0 %.
     let (t1, t2, t3) = (standard_torrent(0, None, false, 361), standard_torrent(0, None, false, 365), standard_torrent(0, None, false, 367));
@@ -249,7 +249,7 @@ async fn a_stored_private_refusal_from_an_older_build_clears_itself() {
     a.shutdown(Duration::from_secs(3)).await;
     let (dir, store) = (a.dir, a.store.clone());
     let mut st = store.torrent(&t.id).unwrap();
-    st.record.state = trs_engine::persist::StoredState::Error("pre-release build: private trackers are disabled".into());
+    st.record.state = seedwell_engine::persist::StoredState::Error("pre-release build: private trackers are disabled".into());
     store.put(st.record, st.counters, None, None);
     let b = node_in(dir, store, |_| {}).await;
     wait_for("sharing again", 10, || async {

@@ -317,15 +317,21 @@ import os
     }
 
     /// A stall of the main thread over a second is noted (the developer log's `ui-stall`, with its length and the last UI
-    /// action; stderr in debug builds and test runs). A snapshot render or QA run that hangs for two seconds fails.
+    /// action; stderr in debug builds and test runs), and so is a stutter (`ui-stutter`: shorter stalls holding it up for
+    /// most of a few seconds). A snapshot render or QA run that hangs for two seconds, or stutters, fails; the renderer's
+    /// own captures (`RendererCaptures`) are not a stutter.
     private func startWatchdog() {
         let testRun = options.renderSnapshots != nil || options.qaControl != nil
         let log = self.log
-        let wd = HangWatchdog(failing: testRun) { [weak self] ms, action in
+        let wd = HangWatchdog(failing: testRun) { [weak self] late, action in
             // On the main thread (the late beat itself).
             MainActor.assumeIsolated {
                 let core: Core? = self?.core
-                let line = core?.uiStall(stalledMs: ms, lastAction: action) ?? uiStallLine(stalledMs: ms, lastAction: action, failing: false)
+                let noted: String? = switch late {
+                case .stall(let ms): core?.uiStall(stalledMs: ms, lastAction: action)
+                case .stutter(let busy, let window): core?.uiStutter(busyMs: busy, windowMs: window, lastAction: action)
+                }
+                let line = noted ?? late.line(lastAction: action, failing: false)
                 log.error("hang: \(line, privacy: .public)")
                 #if DEBUG
                 let toStderr = true

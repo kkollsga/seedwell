@@ -1,11 +1,20 @@
 import Foundation
+import SwiftUI
 import Testing
 @testable import SeedwellApp
 
-/// Folder sync in the app (SPEC 7G.5, 8.2 item 5). The words, states and the submenu are the core's (trs-ffi
+/// Folder sync in the app (SPEC 7G.5, 8.2 item 5). The words, states and the submenu are the core's (seedwell-ffi
 /// `sync_text.rs`, `sync_menu.rs`, tested there); these check that the app reaches them, and what stays here: the date
 /// in the user's style and the Share dialog's target.
 @Suite(.timeLimit(.minutes(1))) struct SyncTests {
+    /// Until the Share dialog is drawn as it is now (its links read and drawn). `ready()`'s own limit (5 s, for the
+    /// window and the renderer) passes first in a full parallel run (one pool thread, the main thread shared: 5 to 9 s
+    /// there), and a test then counted the drawing that came after it as one "shown again" (2026-11-07).
+    @MainActor func untilDrawn(_ m: SyncShareModel) async throws {
+        await m.ready(within: .seconds(30))
+        try #require(m.isReady, "the Share dialog was not drawn within 30 s")
+    }
+
     static func folder(_ name: String = "Photos", _ state: SyncState = .upToDate, id: String? = nil, bytes: UInt64 = 1_000_000_000,
                        need: UInt64 = 0, rate: UInt64 = 0, connected: UInt32 = 0, conflicts: UInt32 = 0,
                        access: SyncAccess = .readWrite, role: SyncRole = .owner) -> SyncFolder {
@@ -110,14 +119,115 @@ import Testing
         #expect(m.error == nil && m.form.key == "seedwell://sync/x", "a new link is a fresh start")
     }
 
-    @MainActor @Test func theShareMenuSharesAFolderNotSyncedYetInOneStep() throws {
+    /// The Add dialog's calls on the main thread never look at the disk: a pasted link's places (where it goes, a folder
+    /// of that name there already) are read off it and handed back. The failure this targets: that answer never reaches
+    /// the form (the Location stays empty, Start disabled), or an answer for a link pasted before replaces the new one's.
+    @MainActor @Test func theAddDialogShowsAPastedLinksPlaceReadOffTheMainThread() async throws {
+        let dir = NSTemporaryDirectory() + "seedwell-sync-add-places-\(getpid())"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let core = try Core(options: CoreOptions(configDir: dir, mock: true, allowLoopbackTrackers: false, forbiddenRoot: nil))
+        var settings = core.syncSettings()
+        settings.defaultLocation = dir
+        try await core.setSyncSettings(settings: settings)
+        let folder = try #require(core.syncSnapshot().folders.first { $0.role == .owner })
+        let link = try await core.syncCreateInvite(id: folder.id, role: .readWrite, maxUses: 1, validDays: 7, channelId: nil).link
+        _ = try await core.syncRemove(id: folder.id, trashFiles: false)
+        let m = SyncAddModel(core: core, prefill: link)
+        #expect(m.form.placesPending && !m.window.canStart, "the places are read apart")
+        await m.ready()
+        #expect(!m.form.placesPending && m.window.location.hasPrefix(dir + "/") && m.window.canStart, "\(m.form)")
+        // A new link while the first one's places are read: only the new one's are kept.
+        m.setKey("hello")
+        m.setKey(link)
+        m.setKey("SWW-NOTAKEY")
+        await m.ready()
+        #expect(m.form.key == "SWW-NOTAKEY" && m.window.location.isEmpty && !m.window.canStart, "\(m.form)")
+    }
+
+    @MainActor @Test func theShareMenuSharesAFolderNotSyncedYetInOneStep() async throws {
         let dir = NSTemporaryDirectory() + "seedwell-sync-share-\(getpid())"
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let core = try Core(options: CoreOptions(configDir: dir, mock: true, allowLoopbackTrackers: false, forbiddenRoot: nil))
         let m = SyncShareModel(core: core, newFolder: "/Users/me/Novel")
-        let w = m.window()
+        try await untilDrawn(m)
+        let w = try #require(m.window)
         #expect(m.id.isEmpty && w.title == "Share “Novel”" && w.newNote != nil && w.closeTitle == "Cancel" && w.copyTitle == "Copy Link")
+    }
+
+    /// The failure this targets: **the Share dialog asks the core for its whole drawing on every SwiftUI render** of its
+    /// view, on the main thread (each a snapshot of every folder and every channel's messages counted, 2026-11-06: the
+    /// user's app froze while a big folder was added and its Share window was open). Renders of the view must ask the
+    /// core nothing; a change of the form is drawn once, off the main thread. Opening, the dialog says so until the
+    /// first drawing is there.
+    @MainActor @Test func theShareDialogIsDrawnAfterAChangeNeverOnARender() async throws {
+        let dir = NSTemporaryDirectory() + "seedwell-sync-share-draws-\(getpid())"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let core = try Core(options: CoreOptions(configDir: dir, mock: true, allowLoopbackTrackers: false, forbiddenRoot: nil))
+        let id = try #require(core.syncSnapshot().folders.first { SyncText.canShare($0.role) }?.id)
+        let m = SyncShareModel(core: core, id: id)
+        #expect(m.window == nil, "opening: drawn once its form is read, off the main thread")
+        try await untilDrawn(m)
+        let w = try #require(m.window)
+        #expect(w.gone == nil && w.copyTitle != nil, "\(w)")
+        let drawn = m.draws
+        // SwiftUI draws the view again and again (here: twenty renders, each after a change the view observes).
+        let actions = SyncActions(core: core)
+        for n in 0..<20 {
+            m.copied = n.isMultiple(of: 2)
+            let r = ImageRenderer(content: SyncShareView(model: m, actions: actions))
+            #expect(r.nsImage != nil)
+        }
+        #expect(m.draws == drawn, "a render asked the core to draw the dialog: \(m.draws - drawn) times")
+        // A change of the form is drawn (once), and the drawing follows it.
+        m.form.singleUse = false
+        try await untilDrawn(m)
+        #expect(m.draws == drawn + 1 && m.window?.singleUse.on == false, "\(m.draws - drawn) drawings")
+    }
+
+    /// The failure this targets: **an open Share dialog keeps a stale drawing when its folder changes elsewhere** (Read
+    /// only switched in another window or on the owner's other device, the folder removed): nothing in the dialog
+    /// changes, and it was drawn after a change only. While it is open it reads the folder again as often as the core
+    /// asks, off the main thread, and shows a drawing only when it differs (a refresh that finds nothing is not drawn).
+    @MainActor @Test func anOpenShareDialogSeesAChangeMadeElsewhere() async throws {
+        let dir = NSTemporaryDirectory() + "seedwell-sync-share-refresh-\(getpid())"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let core = try Core(options: CoreOptions(configDir: dir, mock: true, allowLoopbackTrackers: false, forbiddenRoot: nil))
+        let id = try #require(core.syncSnapshot().folders.first { $0.role == .owner }?.id)
+        let m = SyncShareModel(core: core, id: id)
+        // The core's minute, shortened: the test waits for the refresh, not for the clock.
+        m.refreshAfter = { _ in .milliseconds(20) }
+        try await untilDrawn(m)
+        let w = try #require(m.window)
+        #expect(w.refreshMs != nil && w.readOnly?.on == false, "\(w)")
+        func until(_ what: String, _ done: () -> Bool) async throws {
+            let start = ContinuousClock.now
+            while !done(), ContinuousClock.now - start < .seconds(10) { try await Task.sleep(for: .milliseconds(10)) }
+            #expect(done(), "\(what): \(String(describing: m.window))")
+        }
+        // Nothing changed: read again, nothing new shown.
+        let (draws, shown) = (m.draws, m.shown)
+        try await until("never read again") { m.draws >= draws + 3 }
+        #expect(m.shown == shown, "an unchanged drawing was shown again: \(m.shown - shown) times")
+        // Read only switched elsewhere: the open dialog shows it.
+        _ = try await core.syncShareSetReadOnly(form: core.syncShareForm(id: id), on: true)
+        try await until("Read only switched elsewhere never reached the dialog") { m.window?.readOnly?.on == true }
+        // The folder removed: the dialog says it is gone.
+        _ = try await core.syncRemove(id: id, trashFiles: false)
+        try await until("the folder removed never reached the dialog") { m.window?.gone != nil }
+    }
+
+    /// A Share window shown while it was opening grows to its content from a corner; centring it again then is right
+    /// unless the user moved it meanwhile. The failure this targets: the window left below centre, or one the user moved
+    /// pulled back.
+    @Test func aShareWindowIsCentredAgainOnlyIfTheUserDidNotMoveIt() {
+        let placed = NSRect(x: 500, y: 400, width: 460, height: 160)
+        #expect(SyncWindows.unmoved(NSRect(x: 500, y: 140, width: 460, height: 420), placed: placed), "grown from its top-left corner")
+        #expect(SyncWindows.unmoved(NSRect(x: 500, y: 400, width: 460, height: 420), placed: placed), "grown from its bottom-left corner")
+        #expect(!SyncWindows.unmoved(NSRect(x: 620, y: 300, width: 460, height: 160), placed: placed), "moved by the user")
     }
 
     /// The page draws the core's model: what the Mac passes keeps every item.

@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tokio::sync::oneshot;
-use trs_metainfo::Metainfo;
+use seedwell_metainfo::Metainfo;
 
 use super::cold::*;
 use super::{DetailJob, Entry, Session, SessionMsg};
@@ -130,7 +130,7 @@ impl Session {
             linked_rule: profile.and_then(|p| pol.profiles.get(p)).and_then(|p| p.rule.clone()),
         };
         let forced = ColdTorrent::opt(c.rule).and_then(|i| self.ids.get(i));
-        crate::policy::resolve(&pol.rules, &m, forced, c.private(), c.category().unwrap_or(trs_classify::Category::Other), pol.private_min_seed, pol.idle).rule
+        crate::policy::resolve(&pol.rules, &m, forced, c.private(), c.category().unwrap_or(seedwell_classify::Category::Other), pol.private_min_seed, pol.idle).rule
     }
 
     /// Sums over the table: no rows, no strings.

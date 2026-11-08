@@ -219,7 +219,7 @@ impl Session {
         let Some(e) = self.table.get(&id) else { return false };
         let need = (u64::from(e.cold.piece_len) * 4).max(32 << 20);
         let dest = self.save_path(&e.cold);
-        let free = self.sh.cfg().smart_add.free_space_override.or_else(|| trs_storage::available_space(&dest).ok());
+        let free = self.sh.cfg().smart_add.free_space_override.or_else(|| seedwell_storage::available_space(&dest).ok());
         free.is_none_or(|f| f >= need)
     }
 
@@ -402,7 +402,7 @@ fn stall_interval(after: Duration) -> Duration {
 fn path_present(p: &Path) -> bool {
     match std::fs::metadata(p) {
         Ok(_) => true,
-        Err(e) => !trs_platform::fs::is_not_found(&e),
+        Err(e) => !seedwell_platform::fs::is_not_found(&e),
     }
 }
 

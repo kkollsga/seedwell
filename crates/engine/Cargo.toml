@@ -1,5 +1,5 @@
 [package]
-name = "trs-engine"
+name = "seedwell-engine"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,38 +8,38 @@ publish = false
 description = "BitTorrent session engine: torrents, peers, picker, choker, limits, queue, tiers, persistence boundary and control API"
 
 [dependencies]
-trs-platform = { path = "../platform" }
-trs-bencode = { path = "../bencode" }
-trs-metainfo = { path = "../metainfo" }
-trs-wire = { path = "../wire" }
-trs-storage = { path = "../storage" }
-trs-tracker = { path = "../tracker" }
+seedwell-platform = { path = "../platform" }
+seedwell-bencode = { path = "../bencode" }
+seedwell-metainfo = { path = "../metainfo" }
+seedwell-wire = { path = "../wire" }
+seedwell-storage = { path = "../storage" }
+seedwell-tracker = { path = "../tracker" }
 # Developer mode: the masked, bounded log of tracker exchanges.
-trs-devlog = { path = "../devlog" }
-trs-dht = { path = "../dht" }
+seedwell-devlog = { path = "../devlog" }
+seedwell-dht = { path = "../dht" }
 # Persistence adapter (`state_store`), settings types, rules and tracker profiles.
-trs-state = { path = "../state" }
+seedwell-state = { path = "../state" }
 # Content detection and placement templates (organizer, SPEC 7A).
-trs-classify = { path = "../classify" }
+seedwell-classify = { path = "../classify" }
 # Direct HTTP(S) downloads (SPEC 7D).
-trs-http = { path = "../http" }
+seedwell-http = { path = "../http" }
 # uTP (BEP 29) on the shared UDP port.
-trs-utp = { path = "../utp" }
+seedwell-utp = { path = "../utp" }
 # NAT-PMP / PCP / UPnP port mapping for the listen port.
-trs-portmap = { path = "../portmap" }
+seedwell-portmap = { path = "../portmap" }
 # Torrent traffic through a SOCKS5 proxy (SPEC §7H).
-trs-socks = { path = "../socks" }
+seedwell-socks = { path = "../socks" }
 # Play while downloading (SPEC 7F): the loopback range server and its `PieceSource` contract.
-trs-stream = { path = "../stream" }
+seedwell-stream = { path = "../stream" }
 # Runtime, sockets, timers, channels. No `full`: only what the engine uses.
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros", "io-util", "fs"] }
-# Zero-copy receive buffers shared with trs-wire.
+# Zero-copy receive buffers shared with seedwell-wire.
 bytes = { version = "1", default-features = false }
 # OS entropy for the per-process tracker `key` and the engine's shuffle RNG seed.
 getrandom = { version = "0.4", default-features = false }
 
 [dev-dependencies]
-trs-socks = { path = "../socks", features = ["testkit"] }
+seedwell-socks = { path = "../socks", features = ["testkit"] }
 tokio = { version = "1", default-features = false, features = ["process"] }
 tempfile = "3"
 serde_json = { version = "1", default-features = false, features = ["std"] }

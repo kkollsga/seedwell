@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::watch;
-use trs_stream::{Geometry, PieceSource, Priority, StreamId, UrgentRange};
+use seedwell_stream::{Geometry, PieceSource, Priority, StreamId, UrgentRange};
 
 pub fn synth_byte(i: u64) -> u8 {
     (i.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 56) as u8
@@ -155,7 +155,7 @@ impl FakeSource {
     pub fn expected(&self, offset: u64, len: usize) -> Vec<u8> {
         let mut v = vec![0u8; len];
         match &self.content {
-            Content::File(f) => trs_platform::fs::read_exact_at(f, &mut v, offset).unwrap(),
+            Content::File(f) => seedwell_platform::fs::read_exact_at(f, &mut v, offset).unwrap(),
             Content::Synthetic => {
                 for (i, b) in v.iter_mut().enumerate() {
                     *b = synth_byte(offset + i as u64);
@@ -304,7 +304,7 @@ impl PieceSource for FakeSource {
             buf.clear();
             buf.resize(len, 0);
             match &self.content {
-                Content::File(f) => trs_platform::fs::read_exact_at(f, &mut buf, offset).map(|()| buf),
+                Content::File(f) => seedwell_platform::fs::read_exact_at(f, &mut buf, offset).map(|()| buf),
                 Content::Synthetic => {
                     for (i, b) in buf.iter_mut().enumerate() {
                         *b = synth_byte(offset + i as u64);

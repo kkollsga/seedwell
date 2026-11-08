@@ -51,7 +51,7 @@ pub fn make_torrent_ann(name: &str, files: &[(&str, usize)], seed: u64, announce
     }
     let mut pieces = Vec::new();
     for c in stream.chunks(piece_len) {
-        pieces.extend_from_slice(&trs_storage::hash::sha1(c));
+        pieces.extend_from_slice(&seedwell_storage::hash::sha1(c));
     }
     let mut info = b"d5:filesl".to_vec();
     for (p, d) in &data {
@@ -66,7 +66,7 @@ pub fn make_torrent_ann(name: &str, files: &[(&str, usize)], seed: u64, announce
     info.extend(format!("12:piece lengthi{piece_len}e6:pieces").bytes());
     put_bytes(&mut info, &pieces);
     info.push(b'e');
-    let id = hex(&trs_storage::hash::sha1(&info));
+    let id = hex(&seedwell_storage::hash::sha1(&info));
     let mut t = Vec::new();
     if let Some(a) = announce {
         t.extend(format!("d8:announce{}:{a}4:info", a.len()).bytes());
@@ -135,7 +135,7 @@ impl Daemon {
         let dl = root.join(name).join("dl");
         std::fs::create_dir_all(&state).unwrap();
         // Stoppable: terminate() asks it to quit the way a user would (SIGTERM, Ctrl+Break).
-        let mut cmd = trs_platform::proc::stoppable_command(BIN);
+        let mut cmd = seedwell_platform::proc::stoppable_command(BIN);
         cmd.args(["daemon", "--state-dir"])
             .arg(&state)
             .arg("--download-dir")
@@ -191,7 +191,7 @@ impl Daemon {
     }
 
     pub fn terminate(&mut self) {
-        let _ = trs_platform::proc::request_stop(&self.child);
+        let _ = seedwell_platform::proc::request_stop(&self.child);
         let t = Instant::now();
         while t.elapsed() < Duration::from_secs(20) {
             if self.child.try_wait().ok().flatten().is_some() {

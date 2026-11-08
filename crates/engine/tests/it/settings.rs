@@ -6,16 +6,16 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use common::*;
-use trs_engine::config::ClockFn;
-use trs_engine::*;
-use trs_state::config::{DaySet, Schedule, TimeOfDay};
-use trs_state::rules::{DefaultRule, Priority as SPrio, SeedingGoal};
-use trs_state::trackers::{Profile, UrlPattern};
-use trs_state::{Config, DocStore, RuleSet, TrackerProfiles};
+use seedwell_engine::config::ClockFn;
+use seedwell_engine::*;
+use seedwell_state::config::{DaySet, Schedule, TimeOfDay};
+use seedwell_state::rules::{DefaultRule, Priority as SPrio, SeedingGoal};
+use seedwell_state::trackers::{Profile, UrlPattern};
+use seedwell_state::{Config, DocStore, RuleSet, TrackerProfiles};
 
 /// 2026-10-12 was a Monday.
 fn monday(h: i64, m: i64, s: i64) -> i64 {
-    trs_state::fsutil::days_from_civil(2026, 10, 12) * 86_400 + h * 3600 + m * 60 + s
+    seedwell_state::fsutil::days_from_civil(2026, 10, 12) * 86_400 + h * 3600 + m * 60 + s
 }
 
 fn clocked(now: &Arc<AtomicI64>) -> ClockFn {
@@ -149,7 +149,7 @@ fn base_config(e: &Env) -> Config {
     c.folders.incomplete_dir = e.inc.path().join(".incomplete").to_string_lossy().into_owned();
     c.folders.watch.clear();
     // These tests add random-named multi-file torrents: smart add (SPEC 7A.6) would hold them.
-    c.transfers.ask_before_adding = trs_state::config::AskBeforeAdding::Never;
+    c.transfers.ask_before_adding = seedwell_state::config::AskBeforeAdding::Never;
     c.network.upnp = false;
     c.network.natpmp = false;
     c.network.dht = false;
@@ -345,7 +345,7 @@ async fn the_real_home_is_off_limits_under_test() {
 /// saved into it, which would write the default over the user's value).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_config_with_one_bad_value_keeps_the_rest_and_is_not_rewritten() {
-    use trs_state::config::{AfterAdd as SAfter, WatchFolder};
+    use seedwell_state::config::{AfterAdd as SAfter, WatchFolder};
     let e = env();
     let w = tempfile::tempdir().unwrap();
     let mut c = base_config(&e);
@@ -365,7 +365,7 @@ async fn a_config_with_one_bad_value_keeps_the_rest_and_is_not_rewritten() {
     assert!(w[0].starts_with("config.toml: general.play_with: 5 is not a valid value (") && w[0].ends_with("the default \"auto\" is used until it is fixed"), "{}", w[0]);
     let ec = host.handle().config().await.unwrap();
     assert_eq!(ec.max_active_downloads, 7, "the file's other values are in force");
-    assert_eq!(ec.torrent_after_add, trs_engine::config::AfterAdd::Leave);
+    assert_eq!(ec.torrent_after_add, seedwell_engine::config::AfterAdd::Leave);
     assert_eq!(ec.watch.len(), 1);
     assert_eq!(std::fs::read_to_string(docs.path()).unwrap(), text, "the user's file is left as it is");
     host.shutdown(Duration::from_secs(3)).await;
@@ -376,7 +376,7 @@ async fn a_config_with_one_bad_value_keeps_the_rest_and_is_not_rewritten() {
 /// files are never mass-added.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn host_stamps_watch_baselines_and_ignores_old_torrents() {
-    use trs_state::config::{AfterAdd as SAfter, WatchFolder};
+    use seedwell_state::config::{AfterAdd as SAfter, WatchFolder};
     let e = env();
     let w1 = tempfile::tempdir().unwrap();
     let w2 = tempfile::tempdir().unwrap();

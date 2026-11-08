@@ -25,7 +25,7 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   # Tests refuse to touch the real home folder.
-  TRS_FORBID_REAL_HOME: "1"
+  SEEDWELL_FORBID_REAL_HOME: "1"
   # The C# bindings' generator, pinned (the same in release.yml); its build is cached by this tag.
   UNIFFI_CS_TAG: v0.11.1+v0.31.0
 

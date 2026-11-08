@@ -3,14 +3,14 @@
 //! A channel is a folder without files: a [`Space`] (its key pair, membership, invitations and sharing period,
 //! all as for folders) and its messages. Every member keeps every message, up to a cap ([`MAX_MESSAGES`],
 //! [`MAX_BYTES`], the oldest dropped first), so a device that was offline catches up from any member. When two
-//! devices that both speak channels ([`trs_sync_proto::msg::FEATURE_CHAT`]) connect, each says what it holds
+//! devices that both speak channels ([`seedwell_sync_proto::msg::FEATURE_CHAT`]) connect, each says what it holds
 //! ([`ChatHave`]) and the other sends what it lacks; new messages are passed on as they come.
 //!
 //! A message counts only when its author may post when it arrives (Owner, Admin or Read & write, and the sharing
 //! has not ended): a removed or expired member's later messages are ignored, its earlier ones stay where they are.
 //!
 //! Agents: each channel is open to agents or not, **Agents: Yes/No**, one setting for the whole channel, signed into
-//! its membership by an owner or admin ([`trs_sync_proto::members::Body::Agents`]) so every member device applies the
+//! its membership by an owner or admin ([`seedwell_sync_proto::members::Body::Agents`]) so every member device applies the
 //! same: Yes lets agents on every member device read and post in it, No keeps it from them. It is chosen when the
 //! channel is made (an agent's channel is Yes) and can be changed later. While a device waits to be admitted, the link
 //! it joined with says (`agents=yes`). While agents may read a channel, a wake-up command can be set: the service runs
@@ -28,15 +28,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use trs_sync_proto::attach::Attachments;
-use trs_sync_proto::chat::{AuthorHave, ChatMessage, Draft};
-use trs_sync_proto::codec::{Reader, put_bytes, put_varint};
-use trs_sync_proto::ids::{DeviceId, FolderId};
-use trs_sync_proto::keys::{Access, FolderKey, FolderSecret};
-use trs_sync_proto::members::{Body, InviteLink, Membership, Role, Statement, hex};
-use trs_sync_proto::msg::{ChatHave, ChatJoin, ChatMessages, JoinChannel, MAX_CHAT_MESSAGES, Members, Message};
+use seedwell_sync_proto::attach::Attachments;
+use seedwell_sync_proto::chat::{AuthorHave, ChatMessage, Draft};
+use seedwell_sync_proto::codec::{Reader, put_bytes, put_varint};
+use seedwell_sync_proto::ids::{DeviceId, FolderId};
+use seedwell_sync_proto::keys::{Access, FolderKey, FolderSecret};
+use seedwell_sync_proto::members::{Body, InviteLink, Membership, Role, Statement, hex};
+use seedwell_sync_proto::msg::{ChatHave, ChatJoin, ChatMessages, JoinChannel, MAX_CHAT_MESSAGES, Members, Message};
 
-pub use trs_sync_proto::chat::MessageKind;
+pub use seedwell_sync_proto::chat::MessageKind;
 
 use crate::at_rest::{Sealer, channel_key_name};
 use crate::blobs::Blobs;
@@ -185,7 +185,7 @@ pub struct AttachmentInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// Its small preview as it came (a JPEG; empty: none). Not in JSON: a host gets it checked
-    /// ([`trs_media::thumb_png`]).
+    /// ([`seedwell_media::thumb_png`]).
     #[serde(skip)]
     pub thumb: Vec<u8>,
 }
@@ -196,8 +196,8 @@ fn is_zero(n: &u64) -> bool {
 
 impl AttachmentInfo {
     /// Its format, when this version knows it (an image).
-    pub fn media_kind(&self) -> Option<trs_media::Kind> {
-        trs_media::Kind::ALL.into_iter().find(|k| k.name() == self.kind)
+    pub fn media_kind(&self) -> Option<seedwell_media::Kind> {
+        seedwell_media::Kind::ALL.into_iter().find(|k| k.name() == self.kind)
     }
 
     /// A file (not an image): downloaded only when asked for.
@@ -219,7 +219,7 @@ pub enum NewAttachment {
     Path(std::path::PathBuf),
 }
 
-/// An image a caller sends: its file name and bytes (checked, cleaned and capped by [`trs_media::prepare`]).
+/// An image a caller sends: its file name and bytes (checked, cleaned and capped by [`seedwell_media::prepare`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewImage {
     /// The file name it had (only its last part is kept, with its format's extension).
@@ -280,12 +280,16 @@ pub struct ChannelStatus {
     pub waiting: Option<String>,
     /// As an owner: the members not connected for a day or more (or never here), which this device may remove.
     pub gone: Vec<crate::status::GoneDevice>,
+    /// The sidebar group it is listed under on this device ([`crate::chat_groups`]; `None`: none).
+    pub group: Option<String>,
 }
 
 /// This device's own settings of a channel.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Settings {
     pub(crate) muted: bool,
+    /// The sidebar group it is in on this device (empty: none).
+    pub(crate) group: String,
     pub(crate) wake: Option<String>,
     /// The last message read in General: its place in the order.
     pub(crate) read: Key,
@@ -315,12 +319,12 @@ pub struct ChannelShared {
 }
 
 impl Room for ChannelShared {
-    fn scope(&self) -> trs_sync_proto::msg::BlobScope {
-        trs_sync_proto::msg::BlobScope::Channel(self.id)
+    fn scope(&self) -> seedwell_sync_proto::msg::BlobScope {
+        seedwell_sync_proto::msg::BlobScope::Channel(self.id)
     }
 
     fn peers(&self, ctx: &Ctx) -> Vec<Arc<PeerHandle>> {
-        ctx.registry.peers().into_iter().filter(|p| p.has(trs_sync_proto::msg::FEATURE_BLOBS) && p.access(&self.id).is_some()).collect()
+        ctx.registry.peers().into_iter().filter(|p| p.has(seedwell_sync_proto::msg::FEATURE_BLOBS) && p.access(&self.id).is_some()).collect()
     }
 
     fn blobs(&self) -> &Blobs {
@@ -678,7 +682,7 @@ fn now_ms() -> u64 {
 }
 
 fn id_from_hex(s: &str) -> Option<[u8; 16]> {
-    trs_sync_proto::members::invite_id_from_hex(s)
+    seedwell_sync_proto::members::invite_id_from_hex(s)
 }
 
 fn settings_of(e: &ChannelEntry) -> Settings {
@@ -702,6 +706,7 @@ fn settings_of(e: &ChannelEntry) -> Settings {
         .collect();
     Settings {
         muted: e.muted,
+        group: e.group.clone(),
         agent_read,
         wake: Some(e.wake.trim().to_string()).filter(|w| !w.is_empty()),
         read: (e.read_at, e.read_seq, id_from_hex(&e.read_id).unwrap_or([0; 16])),
@@ -872,7 +877,7 @@ impl SyncHandle {
         }
         let id = l.invite.folder_id();
         if self.inner.ctx.registry.channel(&id).is_some() {
-            return Err(invalid(concat!("this channel is already on this ", trs_platform::computer!())));
+            return Err(invalid(concat!("this channel is already on this ", seedwell_platform::computer!())));
         }
         self.inner.secrets.put(&crate::roles::invite_name(&id), l.format_chat().as_bytes())?;
         let name = l.name.clone().and_then(|n| clean_name(&n)).unwrap_or_else(|| "Channel".into());
@@ -925,6 +930,7 @@ impl SyncHandle {
     }
 
     fn status_of_channel(&self, c: &ChannelShared) -> ChannelStatus {
+        crate::shared::note_status();
         let me = *self.inner.ctx.key.public_key();
         let (role, share_until, members, expired) = {
             let m = c.membership.read().unwrap_or_else(|e| e.into_inner());
@@ -935,7 +941,7 @@ impl SyncHandle {
         let error = match (role, joining) {
             (Some(_), _) => None,
             (None, true) => refused,
-            (None, false) => Some(if expired { "this channel is no longer shared" } else { concat!("this ", trs_platform::computer!(), " was removed from the channel") }.into()),
+            (None, false) => Some(if expired { "this channel is no longer shared" } else { concat!("this ", seedwell_platform::computer!(), " was removed from the channel") }.into()),
         };
         let online = 1 + self.inner.ctx.registry.peers().iter().filter(|p| p.access(&c.id).is_some()).count() as u32;
         let (progress, problem, join_attempts) = self.join_status(c);
@@ -970,6 +976,7 @@ impl SyncHandle {
             join_attempts,
             waiting: away.waiting().filter(|_| role.is_some()),
             gone: away.removable(),
+            group: Some(s.group).filter(|g| !g.is_empty()),
         }
     }
 
@@ -1135,7 +1142,7 @@ impl SyncHandle {
         if !c.may_post(&me) {
             return Err(invalid(match c.role_of(&me) {
                 Some(_) => "Read only members of a channel cannot post",
-                None => concat!("this ", trs_platform::computer!(), " is not a member of the channel (yet)"),
+                None => concat!("this ", seedwell_platform::computer!(), " is not a member of the channel (yet)"),
             }));
         }
         if kind == MessageKind::Json && serde_json::from_str::<serde_json::Value>(body).is_err() {
@@ -1213,22 +1220,26 @@ impl SyncHandle {
     }
 
     /// Sets the channel's Agents: Yes/No for every member device: signed into its membership (with the channel's key
-    /// by an owner that holds it, else with this device's key) and passed on. Owners and admins only.
+    /// by an owner that holds it, else with this device's key) and passed on. Owners and admins only. Decided on the
+    /// membership as it is when it is added ([`crate::roles::add_decided`]): of two changes at once the later one counts.
     pub fn chat_set_agents(&self, id: &FolderId, open: bool) -> Result<(), SyncError> {
         let c = self.channel(id)?;
-        if !c.role_of(self.inner.ctx.key.public_key()).is_some_and(Role::admits) {
+        let key = &self.inner.ctx.key;
+        if !c.role_of(key.public_key()).is_some_and(Role::admits) {
             return Err(invalid("Only the channel's owners and admins can change whether agents may use it."));
         }
-        let (now_open, serial) = {
-            let m = c.membership.read().unwrap_or_else(|e| e.into_inner());
-            (m.agents(), m.next_agents_serial())
+        let secret = c.secret.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let say = |m: &Membership| {
+            if m.agents() == open {
+                return Vec::new();
+            }
+            let body = Body::Agents { open, serial: m.next_agents_serial(), at_s: now_s() };
+            vec![match &secret {
+                Some(s) => Statement::by_owner(s, body),
+                None => Statement::by_device(key, id, body),
+            }]
         };
-        if now_open == open {
-            return Ok(());
-        }
-        let body = Body::Agents { open, serial, at_s: now_s() };
-        let st = crate::roles::by_owner(&c, body.clone()).or_else(|| Some(Statement::by_device(&self.inner.ctx.key, id, body)));
-        if crate::roles::add(&c, st) {
+        if crate::roles::add_decided(&c, say) {
             self.spawn_changed(&c.space);
         }
         Ok(())
@@ -1292,14 +1303,14 @@ impl SyncHandle {
     #[doc(hidden)]
     pub fn test_keep_from(&self, id: &FolderId, seed: [u8; 32], seq: u64, body: &str) -> Result<bool, SyncError> {
         let c = self.channel(id)?;
-        let key = trs_sync_proto::device::DeviceKey::from_seed(&seed);
+        let key = seedwell_sync_proto::device::DeviceKey::from_seed(&seed);
         let draft = Draft { id: random_id(), seq, at_ms: now_ms(), reply_to: None, topic: None, agent: None, kind: MessageKind::Text, body: body.as_bytes().to_vec() };
         let msg = ChatMessage::sign(&key, id, draft).map_err(|e| invalid(e.to_string()))?;
         Ok(c.keep(msg, now_ms())?)
     }
 }
 
-fn clean_name(name: &str) -> Option<String> {
+pub(crate) fn clean_name(name: &str) -> Option<String> {
     let n: String = name.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(100).collect();
     (!n.is_empty()).then_some(n)
 }
@@ -1487,14 +1498,14 @@ pub(crate) fn run_wake(command: &str, channel: &FolderId, json: &str, dir: &std:
     {
         let mut o = std::fs::OpenOptions::new();
         o.write(true).create_new(true);
-        let mut f = trs_platform::fs::set_create_mode(&mut o, 0o600).open(&path)?;
+        let mut f = seedwell_platform::fs::set_create_mode(&mut o, 0o600).open(&path)?;
         f.write_all(json.as_bytes())?;
         f.write_all(b"\n")?;
     }
     let input = std::fs::File::open(&path);
     let _ = std::fs::remove_file(&path);
     let input = input?;
-    let mut child = trs_platform::proc::Shell::spawn(command, |c| {
+    let mut child = seedwell_platform::proc::Shell::spawn(command, |c| {
         c.env("SEEDWELL_CHANNEL", channel.to_string()).stdin(Stdio::from(input)).stdout(Stdio::null()).stderr(Stdio::null());
     })?;
     let end = std::time::Instant::now() + timeout;
@@ -1568,7 +1579,7 @@ pub(crate) fn start_chat_link(ctx: &Arc<Ctx>, peer: &Arc<PeerHandle>, id: Folder
         let _ = peer.control.send(Message::Members(Members { folder_id: id, statements })).await;
         let _ = peer.control.send(Message::ChatHave(have)).await;
         // A member that may hold images this device waits for, or files it downloads.
-        if peer.has(trs_sync_proto::msg::FEATURE_BLOBS) {
+        if peer.has(seedwell_sync_proto::msg::FEATURE_BLOBS) {
             let room: Arc<dyn Room> = c.clone();
             crate::blobs::kick(&ctx, &room);
             crate::files::resume(&ctx, &room);
@@ -1633,7 +1644,7 @@ pub(crate) fn seen_names(ctx: &Ctx) -> HashMap<DeviceId, Names> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trs_sync_proto::device::DeviceKey;
+    use seedwell_sync_proto::device::DeviceKey;
 
     fn msg(key: &DeviceKey, ch: &FolderId, seq: u64, at_ms: u64, body: &str) -> ChatMessage {
         let mut id = [0u8; 16];
@@ -1839,7 +1850,7 @@ mod tests {
     #[test]
     fn a_command_that_never_reads_is_stopped_and_the_next_message_still_runs() {
         let dir = tempfile::tempdir().unwrap();
-        let s = trs_sync_proto::keys::FolderSecret::from_bytes([3; 32]);
+        let s = seedwell_sync_proto::keys::FolderSecret::from_bytes([3; 32]);
         let id = FolderId::of_public_key(s.public_key());
         let space = Space::new(id, SpaceKind::Channel, FolderKey::Member(*s.public_key()), None, Membership::new(*s.public_key()), dir.path().join("m"), None, BTreeMap::new(), "x".into());
         let store = Store::open(dir.path().join("x.chat"), (10, MAX_BYTES), seal()).unwrap();

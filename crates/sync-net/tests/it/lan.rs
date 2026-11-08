@@ -7,13 +7,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::net::TcpListener;
-use trs_sync_net::lan::{Announcement, unix_hour};
-use trs_sync_net::secrets::FileSecrets;
-use trs_sync_net::{Options, SyncHandle};
-use trs_sync_proto::device::DeviceKey;
-use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::keys::{FolderKey, FolderSecret};
-use trs_sync_proto::members::{InviteLink, Role};
+use seedwell_sync_net::lan::{Announcement, unix_hour};
+use seedwell_sync_net::secrets::FileSecrets;
+use seedwell_sync_net::{Options, SyncHandle};
+use seedwell_sync_proto::device::DeviceKey;
+use seedwell_sync_proto::ids::FolderId;
+use seedwell_sync_proto::keys::{FolderKey, FolderSecret};
+use seedwell_sync_proto::members::{InviteLink, Role};
 
 struct Device {
     h: SyncHandle,
@@ -153,7 +153,7 @@ async fn an_announcement_for_another_folder_or_hour_is_not_dialed() {
 /// shown as the IPv4 address.
 #[test]
 fn ipv4_mapped_addresses_count_as_the_lan() {
-    use trs_sync_net::session::{canonical, is_lan};
+    use seedwell_sync_net::session::{canonical, is_lan};
     let mapped: SocketAddr = "[::ffff:192.168.68.66]:57112".parse().unwrap();
     assert!(is_lan(mapped.ip()));
     assert_eq!(canonical(mapped).to_string(), "192.168.68.66:57112");

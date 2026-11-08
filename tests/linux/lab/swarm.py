@@ -1,5 +1,5 @@
 #!/usr/bin/env python3 -I
-"""Local swarm lab (run on the Mac; everything happens in containers on the docker network `trslab`).
+"""Local swarm lab (run on the Mac; everything happens in containers on the docker network `seedwelllab`).
 
   swarm.py up                      create the network, start trackers and clients
   swarm.py matrix [--trackers ot,ch,aq] [--protos http,udp] [--size-mb 24]
@@ -11,7 +11,7 @@
   swarm.py down
 
 Tracker addresses are RFC 5737 documentation addresses (198.51.100.0/24) on purpose: Seedwell's production
-destination policy refuses loopback and private-network trackers.  Needs the images trs-lab and trs-trackers
+destination policy refuses loopback and private-network trackers.  Needs the images seedwell-lab and seedwell-trackers
 (see lab/Dockerfile and lab/Dockerfile.trackers).
 """
 import hashlib
@@ -21,14 +21,14 @@ import subprocess
 import sys
 import time
 
-NET, SUBNET = "trslab", "198.51.100.0/24"
+NET, SUBNET = "seedwelllab", "198.51.100.0/24"
 NODES = {  # name: (image, ip)
-    "ot": ("trs-lab", "198.51.100.10"),
-    "ch": ("trs-trackers", "198.51.100.11"),
-    "aq": ("trs-trackers", "198.51.100.12"),
-    "sw": ("trs-lab", "198.51.100.20"),
-    "tr": ("trs-lab", "198.51.100.21"),
-    "qb": ("trs-lab", "198.51.100.22"),
+    "ot": ("seedwell-lab", "198.51.100.10"),
+    "ch": ("seedwell-trackers", "198.51.100.11"),
+    "aq": ("seedwell-trackers", "198.51.100.12"),
+    "sw": ("seedwell-lab", "198.51.100.20"),
+    "tr": ("seedwell-lab", "198.51.100.21"),
+    "qb": ("seedwell-lab", "198.51.100.22"),
 }
 SW_PORT, TR_PORT, QB_PORT = 51500, 51413, 51600
 TRACKER_URL = {  # (tracker, proto): announce URL
@@ -36,7 +36,7 @@ TRACKER_URL = {  # (tracker, proto): announce URL
     ("ch", "http"): "http://198.51.100.11:6969/announce", ("ch", "udp"): "udp://198.51.100.11:6969/announce",
     ("aq", "http"): "http://198.51.100.12:3000/announce", ("aq", "udp"): "udp://198.51.100.12:3001/announce",
 }
-SW_ENV = "export HOME=/tmp/home-sw TRS_FORBID_REAL_HOME=1; mkdir -p $HOME; "
+SW_ENV = "export HOME=/tmp/home-sw SEEDWELL_FORBID_REAL_HOME=1; mkdir -p $HOME; "
 SW_STATE = ["/data/sw/state"]  # a fresh state dir per client (re)start: Seedwell's crash-loop guard holds trackers after 3 launches in 10 min
 
 
@@ -205,7 +205,7 @@ def make_data(node, path, mb):
 
 def make_torrent(node, path, announce, out):
     ex(node, f"transmission-create -o {out} -t '{announce}' -c 'seedwell lab' {path}")
-    local = f"/tmp/trs-lab-{os.path.basename(out)}"
+    local = f"/tmp/seedwell-lab-{os.path.basename(out)}"
     run(["docker", "cp", f"lab-{node}:{out}", local])
     return local
 
@@ -320,9 +320,9 @@ def matrix(trackers, protos, mb):
         for p in protos:
             cell = (t, p)
             scenario(cell, "sws", "sw", ["tr", "qb"], mb)
-            scenario(cell, "trs", "tr", ["sw"], mb)
+            scenario(cell, "seedwell", "tr", ["sw"], mb)
             scenario(cell, "qbs", "qb", ["sw"], mb)
-    json.dump(RESULTS, open("/tmp/trs-lab-matrix.json", "w"), indent=1)
+    json.dump(RESULTS, open("/tmp/seedwell-lab-matrix.json", "w"), indent=1)
 
 
 def transports(mb):
@@ -348,10 +348,10 @@ def transports(mb):
         start_clients(sw_utp, tr_utp, qb)
         log("transport scenario:", label)
         r1 = scenario(cell, "tp-sws", "sw", ["tr", "qb"], mb, timeout=90)
-        r2 = scenario(cell, "tp-trs", "tr", ["sw"], mb, timeout=90)
+        r2 = scenario(cell, "tp-seedwell", "tr", ["sw"], mb, timeout=90)
         r3 = scenario(cell, "tp-qbs", "qb", ["sw"], mb, timeout=90)
         out.append({"label": label, "runs": [r1, r2, r3]})
-    json.dump(out, open("/tmp/trs-lab-transports.json", "w"), indent=1)
+    json.dump(out, open("/tmp/seedwell-lab-transports.json", "w"), indent=1)
 
 
 def handshake(outdir):
@@ -362,7 +362,7 @@ def handshake(outdir):
     time.sleep(1)
     cell = ("ot", "http")
     scenario(cell, "hs-sws", "sw", ["tr", "qb"], 4, timeout=60)
-    scenario(cell, "hs-trs", "tr", ["sw"], 4, timeout=60)
+    scenario(cell, "hs-seedwell", "tr", ["sw"], 4, timeout=60)
     scenario(cell, "hs-qbs", "qb", ["sw"], 4, timeout=60)
     time.sleep(2)
     ex("sw", "pkill tcpdump", check=False)

@@ -2,7 +2,7 @@
 //! collision suffixes stay within the file-name limit.
 
 use proptest::prelude::*;
-use trs_classify::{
+use seedwell_classify::{
     Classification, FileEntry, Input, classify, collision_suffix, unique_path,
 };
 

@@ -1,4 +1,4 @@
-//! Messages over a byte stream: `trs-sync-proto` frames, with deflate for the big metadata messages.
+//! Messages over a byte stream: `seedwell-sync-proto` frames, with deflate for the big metadata messages.
 
 use std::io::{self, Read, Write};
 
@@ -6,8 +6,8 @@ use flate2::Compression;
 use flate2::read::DeflateDecoder;
 use flate2::write::DeflateEncoder;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use trs_sync_proto::codec::{FLAG_COMPRESSED, FRAME_HEADER, Frame, MAX_FRAME};
-use trs_sync_proto::msg::Message;
+use seedwell_sync_proto::codec::{FLAG_COMPRESSED, FRAME_HEADER, Frame, MAX_FRAME};
+use seedwell_sync_proto::msg::Message;
 
 /// Payloads at least this big are compressed when the message is metadata (index, writers, addresses).
 /// File data is not: most of it is compressed already, and the CPU is better spent elsewhere.
@@ -123,7 +123,7 @@ impl<W: AsyncWrite + Unpin> Writer<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trs_sync_proto::msg::{Close, Hello};
+    use seedwell_sync_proto::msg::{Close, Hello};
 
     #[tokio::test]
     async fn messages_roundtrip_over_a_stream() {

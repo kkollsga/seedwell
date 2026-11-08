@@ -2,7 +2,7 @@
 # heavy: runs one heavy command (cargo build/test, a bench, a VM) only when the Mac has room, and
 # only one at a time across every agent and shell.
 #
-#   tools/sysguard/heavy.sh cargo test --release -p trs-engine
+#   tools/sysguard/heavy.sh cargo test --release -p seedwell-engine
 #
 # Waits (printing why) while another heavy job holds the lock or memory is at or below MIN_FREE
 # (default 40 %, from kern.memorystatus_level), then runs the command with CARGO_BUILD_JOBS=8 (of 10 cores; the memory gate

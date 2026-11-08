@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use trs_engine::{Engine, EngineConfig, EngineHandle, MemStore, PolicyData, StateStore, TorrentId, TorrentState};
+use seedwell_engine::{Engine, EngineConfig, EngineHandle, MemStore, PolicyData, StateStore, TorrentId, TorrentState};
 
 /// Deterministic xorshift for test data.
 pub struct Rng(pub u64);
@@ -76,7 +76,7 @@ pub fn make_torrent(spec: &TorrentSpec) -> TestTorrent {
     let multi = spec.files.len() > 1 || spec.files.first().is_some_and(|f| f.0.contains('/'));
     let mut pieces = Vec::new();
     for chunk in stream.chunks(spec.piece_len as usize) {
-        pieces.extend_from_slice(&trs_storage::hash::sha1(chunk));
+        pieces.extend_from_slice(&seedwell_storage::hash::sha1(chunk));
     }
     let piece_count = (pieces.len() / 20) as u32;
     // info dictionary, keys sorted
@@ -106,7 +106,7 @@ pub fn make_torrent(spec: &TorrentSpec) -> TestTorrent {
         put_int(&mut info, "private", 1);
     }
     info.push(b'e');
-    let id: [u8; 20] = trs_storage::hash::sha1(&info);
+    let id: [u8; 20] = seedwell_storage::hash::sha1(&info);
     let mut t = Vec::new();
     t.push(b'd');
     if let Some(a) = &spec.announce {
@@ -213,7 +213,7 @@ pub fn test_config(dir: &Path) -> EngineConfig {
         dht_enabled: false,
         // Plain handshakes unless a test is about encryption (`tests/encryption.rs`): several tests talk to
         // hand-written raw-wire peers, and an encrypted dial to one of those only times out.
-        encryption: trs_engine::config::EncryptionPolicy::Off,
+        encryption: seedwell_engine::config::EncryptionPolicy::Off,
         trackers_enabled: false,
         io_threads: 2,
         hash_threads: 2,
@@ -221,7 +221,7 @@ pub fn test_config(dir: &Path) -> EngineConfig {
         fd_cache: 128,
         max_active_downloads: 10,
         // The mock tracker lives on loopback.
-        tracker_destinations: trs_tracker::policy::DestinationPolicy::LOCAL,
+        tracker_destinations: seedwell_tracker::policy::DestinationPolicy::LOCAL,
         ..EngineConfig::default()
     }
 }
@@ -255,11 +255,11 @@ impl Node {
         self.h.snapshot().await.ok()?.rows.iter().find(|r| r.id == *id).map(|r| r.state)
     }
 
-    pub async fn row(&self, id: &TorrentId) -> Option<trs_engine::TorrentRow> {
+    pub async fn row(&self, id: &TorrentId) -> Option<seedwell_engine::TorrentRow> {
         self.h.snapshot().await.ok()?.rows.into_iter().find(|r| r.id == *id)
     }
 
-    pub async fn shutdown(&mut self, d: Duration) -> trs_engine::ShutdownReport {
+    pub async fn shutdown(&mut self, d: Duration) -> seedwell_engine::ShutdownReport {
         match self.engine.take() {
             Some(e) => e.shutdown(d).await,
             None => Default::default(),
@@ -290,7 +290,7 @@ pub async fn wait_done(n: &Node, id: &TorrentId, secs: u64) {
     wait_done_h(&n.h, id, secs).await
 }
 
-pub async fn row_h(h: &EngineHandle, id: &TorrentId) -> Option<trs_engine::TorrentRow> {
+pub async fn row_h(h: &EngineHandle, id: &TorrentId) -> Option<seedwell_engine::TorrentRow> {
     h.snapshot().await.ok()?.rows.into_iter().find(|r| r.id == *id)
 }
 
@@ -315,7 +315,7 @@ pub async fn wait_done_h(h: &EngineHandle, id: &TorrentId, secs: u64) {
     }
 }
 
-/// A node whose state lives in a `trs-state` directory (redb), restartable on the same directory.
+/// A node whose state lives in a `seedwell-state` directory (redb), restartable on the same directory.
 pub struct SNode {
     pub engine: Option<Engine>,
     pub h: EngineHandle,
@@ -346,11 +346,11 @@ impl SNode {
         SocketAddr::from(([127, 0, 0, 1], self.h.listen_port()))
     }
 
-    pub async fn row(&self, id: &TorrentId) -> Option<trs_engine::TorrentRow> {
+    pub async fn row(&self, id: &TorrentId) -> Option<seedwell_engine::TorrentRow> {
         row_h(&self.h, id).await
     }
 
-    pub async fn shutdown(&mut self, d: Duration) -> trs_engine::ShutdownReport {
+    pub async fn shutdown(&mut self, d: Duration) -> seedwell_engine::ShutdownReport {
         match self.engine.take() {
             Some(e) => e.shutdown(d).await,
             None => Default::default(),
@@ -681,10 +681,10 @@ pub fn hex_of(b: &[u8]) -> String {
 
 /// Wait for an engine event matching `f`.
 pub async fn wait_event(
-    rx: &mut tokio::sync::broadcast::Receiver<trs_engine::EngineEvent>,
+    rx: &mut tokio::sync::broadcast::Receiver<seedwell_engine::EngineEvent>,
     secs: u64,
-    mut f: impl FnMut(&trs_engine::EngineEvent) -> bool,
-) -> trs_engine::EngineEvent {
+    mut f: impl FnMut(&seedwell_engine::EngineEvent) -> bool,
+) -> seedwell_engine::EngineEvent {
     let end = Instant::now() + Duration::from_secs(secs);
     loop {
         let left = end.saturating_duration_since(Instant::now());
@@ -837,7 +837,7 @@ pub fn free_port() -> u16 {
 }
 
 /// A TCP port that refuses connections on each of `ips`, and nothing else can listen at
-/// ([`trs_platform::net::closed_tcp_port`]).
+/// ([`seedwell_platform::net::closed_tcp_port`]).
 pub fn closed_port(ips: &[std::net::IpAddr]) -> u16 {
-    trs_platform::net::closed_tcp_port(ips)
+    seedwell_platform::net::closed_tcp_port(ips)
 }

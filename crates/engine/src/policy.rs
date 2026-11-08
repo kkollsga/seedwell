@@ -7,10 +7,10 @@
 
 use std::sync::Arc;
 
-use trs_classify::Category;
-use trs_state::rules::{OnGoal, PolicySource, ResolvedPolicy, TorrentAttrs};
-use trs_state::trackers::Bucket;
-use trs_state::{RuleSet, TrackerProfiles};
+use seedwell_classify::Category;
+use seedwell_state::rules::{OnGoal, PolicySource, ResolvedPolicy, TorrentAttrs};
+use seedwell_state::trackers::Bucket;
+use seedwell_state::{RuleSet, TrackerProfiles};
 
 use crate::api::{AtGoal, Priority, ProfileBucket, SeedGoal};
 
@@ -23,10 +23,10 @@ pub struct PolicyData {
     pub profiles: TrackerProfiles,
     /// `transfers.private_min_seed_secs` of `config.toml` (SPEC §7): the hit-and-run floor of
     /// private torrents whose rule has none. `None` = off.
-    pub private_min_seed: Option<trs_state::duration::Secs>,
+    pub private_min_seed: Option<seedwell_state::duration::Secs>,
     /// `transfers.idle_*` of `config.toml` (SPEC §7.5): the global inactive stop condition a rule
     /// may override. `None` = off.
-    pub idle: Option<trs_state::rules::IdleStop>,
+    pub idle: Option<seedwell_state::rules::IdleStop>,
 }
 
 impl PolicyData {
@@ -35,15 +35,15 @@ impl PolicyData {
         PolicyData {
             rules,
             profiles,
-            private_min_seed: (private_min_seed_secs > 0).then_some(trs_state::duration::Secs(private_min_seed_secs)),
+            private_min_seed: (private_min_seed_secs > 0).then_some(seedwell_state::duration::Secs(private_min_seed_secs)),
             idle: None,
         }
     }
 
     /// With the global inactive condition of `transfers` (`idle_min_upload_bytes` 0 = off).
-    pub fn with_idle(mut self, t: &trs_state::config::Transfers) -> Self {
+    pub fn with_idle(mut self, t: &seedwell_state::config::Transfers) -> Self {
         self.idle = (t.idle_min_upload_bytes > 0)
-            .then_some(trs_state::rules::IdleStop { below: t.idle_min_upload_bytes, hours: t.idle_window_hours });
+            .then_some(seedwell_state::rules::IdleStop { below: t.idle_min_upload_bytes, hours: t.idle_window_hours });
         self
     }
 }
@@ -142,19 +142,19 @@ impl Default for Resolved {
     }
 }
 
-fn engine_priority(p: trs_state::rules::Priority) -> Priority {
+fn engine_priority(p: seedwell_state::rules::Priority) -> Priority {
     match p {
-        trs_state::rules::Priority::High => Priority::High,
-        trs_state::rules::Priority::Normal => Priority::Normal,
-        trs_state::rules::Priority::Low => Priority::Low,
+        seedwell_state::rules::Priority::High => Priority::High,
+        seedwell_state::rules::Priority::Normal => Priority::Normal,
+        seedwell_state::rules::Priority::Low => Priority::Low,
     }
 }
 
-pub(crate) fn state_priority(p: Priority) -> trs_state::rules::Priority {
+pub(crate) fn state_priority(p: Priority) -> seedwell_state::rules::Priority {
     match p {
-        Priority::High => trs_state::rules::Priority::High,
-        Priority::Normal => trs_state::rules::Priority::Normal,
-        Priority::Low => trs_state::rules::Priority::Low,
+        Priority::High => seedwell_state::rules::Priority::High,
+        Priority::Normal => seedwell_state::rules::Priority::Normal,
+        Priority::Low => seedwell_state::rules::Priority::Low,
     }
 }
 
@@ -164,7 +164,7 @@ fn secs32(s: u64) -> u32 {
 
 /// Engine goal from a rule's goal.
 pub(crate) fn engine_goal(p: &ResolvedPolicy) -> SeedGoal {
-    use trs_state::rules::SeedingGoal as G;
+    use seedwell_state::rules::SeedingGoal as G;
     let mut g = SeedGoal::FOREVER;
     match p.goal {
         G::StopWhenFinished => g.stop_on_finish = true,
@@ -196,9 +196,9 @@ pub(crate) fn engine_goal(p: &ResolvedPolicy) -> SeedGoal {
 
 /// The goal *kind* of an engine goal, for persisting a user override. The floor and the action at
 /// goal always come from the rule.
-pub(crate) fn state_goal(g: &SeedGoal) -> trs_state::rules::SeedingGoal {
-    use trs_state::duration::Secs;
-    use trs_state::rules::SeedingGoal as S;
+pub(crate) fn state_goal(g: &SeedGoal) -> seedwell_state::rules::SeedingGoal {
+    use seedwell_state::duration::Secs;
+    use seedwell_state::rules::SeedingGoal as S;
     if g.stop_on_finish {
         return S::StopWhenFinished;
     }
@@ -214,12 +214,12 @@ pub(crate) fn state_goal(g: &SeedGoal) -> trs_state::rules::SeedingGoal {
 }
 
 /// Engine goal from a persisted goal kind (the floor and action are filled in by the rule later).
-pub(crate) fn goal_from_state(g: &trs_state::rules::SeedingGoal) -> SeedGoal {
+pub(crate) fn goal_from_state(g: &seedwell_state::rules::SeedingGoal) -> SeedGoal {
     let p = ResolvedPolicy {
         source: PolicySource::Default,
         goal: *g,
         min_seed_time: None,
-        priority: trs_state::rules::Priority::Normal,
+        priority: seedwell_state::rules::Priority::Normal,
         on_goal: OnGoal::StopKeep,
         finished_dir: None,
         up_limit: None,
@@ -236,8 +236,8 @@ pub(crate) fn resolve(
     forced: Option<&str>,
     private: bool,
     category: Category,
-    private_floor: Option<trs_state::duration::Secs>,
-    idle: Option<trs_state::rules::IdleStop>,
+    private_floor: Option<seedwell_state::duration::Secs>,
+    idle: Option<seedwell_state::rules::IdleStop>,
 ) -> Resolved {
     let attrs = TorrentAttrs {
         tracker: m.profile.as_deref(),
@@ -252,7 +252,7 @@ pub(crate) fn resolve(
             ResolvedPolicy {
                 source: PolicySource::Rule(rule.id.clone()),
                 goal: rule.goal.unwrap_or(d.goal),
-                min_seed_time: trs_state::rules::effective_min_seed(rule.min_seed_time, d.min_seed_time, private, private_floor),
+                min_seed_time: seedwell_state::rules::effective_min_seed(rule.min_seed_time, d.min_seed_time, private, private_floor),
                 priority: rule.priority.unwrap_or(d.priority),
                 on_goal: rule.on_goal.unwrap_or(d.on_goal),
                 finished_dir: rule.finished_dir.clone().or_else(|| d.finished_dir.clone()),
@@ -286,8 +286,8 @@ pub(crate) type SharedPolicy = std::sync::RwLock<Option<Arc<PolicyData>>>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trs_state::duration::Secs;
-    use trs_state::rules::{Rule, SeedingGoal};
+    use seedwell_state::duration::Secs;
+    use seedwell_state::rules::{Rule, SeedingGoal};
 
     fn rules() -> RuleSet {
         let mut rs = RuleSet::default();
@@ -296,10 +296,10 @@ mod tests {
                 id: "tz".into(),
                 name: "Z".into(),
                 // Matches only one tracker, so it applies to others only when forced.
-                when: trs_state::rules::Match { tracker: vec!["z".into()], ..Default::default() },
+                when: seedwell_state::rules::Match { tracker: vec!["z".into()], ..Default::default() },
                 goal: Some(SeedingGoal::Ratio { ratio: 2.0 }),
                 min_seed_time: Some(Secs::hours(72)),
-                priority: Some(trs_state::rules::Priority::High),
+                priority: Some(seedwell_state::rules::Priority::High),
                 on_goal: Some(OnGoal::RemoveKeepFiles),
                 up_limit: Some(1_000_000),
                 ..Rule::default()

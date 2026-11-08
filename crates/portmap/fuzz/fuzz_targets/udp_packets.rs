@@ -2,7 +2,7 @@
 //! Arbitrary bytes into every UDP packet decoder. Must never panic.
 
 use libfuzzer_sys::fuzz_target;
-use trs_portmap::{natpmp, pcp, ssdp};
+use seedwell_portmap::{natpmp, pcp, ssdp};
 
 fuzz_target!(|data: &[u8]| {
     let _ = natpmp::decode_response(data);

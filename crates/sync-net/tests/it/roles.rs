@@ -4,9 +4,9 @@
 use std::path::Path;
 use std::time::Duration;
 
-use trs_sync_net::status::FolderState;
-use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::members::Role;
+use seedwell_sync_net::status::FolderState;
+use seedwell_sync_proto::ids::FolderId;
+use seedwell_sync_proto::members::Role;
 
 use crate::utp::{Device, addr, device_with, read, until};
 

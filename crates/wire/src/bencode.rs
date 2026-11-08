@@ -1,6 +1,6 @@
 //! Minimal allocation-free bencode reader/writer for the small extension dictionaries.
 //!
-//! Why not `trs-bencode`: extension payloads are tiny, flat and arrive at line rate
+//! Why not `seedwell-bencode`: extension payloads are tiny, flat and arrive at line rate
 //! from untrusted peers, and `ut_metadata` data messages append raw bytes after the
 //! dictionary. A borrowed, depth-limited walker with no heap use is all we need, and it
 //! keeps this crate dependency-free. Semantics follow the same strict integer rules.

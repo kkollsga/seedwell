@@ -22,7 +22,7 @@
 use std::io;
 
 use sha2::{Digest, Sha256};
-use trs_sync_proto::model::{ChunkRef, MAX_CHUNK};
+use seedwell_sync_proto::model::{ChunkRef, MAX_CHUNK};
 
 use crate::fs::FileHandle;
 
@@ -472,7 +472,7 @@ mod tests {
         assert!(total <= 32 * 2, "{total} chunks changed for 32 inserted bytes");
     }
 
-    /// `cargo test --release -p trs-sync chunk_bench -- --ignored --nocapture`
+    /// `cargo test --release -p seedwell-sync chunk_bench -- --ignored --nocapture`
     #[test]
     #[ignore = "benchmark: run in release by hand"]
     fn chunk_bench() {

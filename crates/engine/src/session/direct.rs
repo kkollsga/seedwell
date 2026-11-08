@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::task::JoinHandle;
-use trs_http::{BoxFuture, DownloadRequest, DownloadTask, Downloader, DownloaderConfig, Progress, RateGate, State};
+use seedwell_http::{BoxFuture, DownloadRequest, DownloadTask, Downloader, DownloaderConfig, Progress, RateGate, State};
 
 use super::{Job, Session, SessionMsg};
 use crate::api::*;
@@ -22,7 +22,7 @@ const KEEP_FINISHED: usize = 50;
 /// Longest URL accepted.
 const MAX_URL: usize = 8192;
 
-/// The global download limiter as trs-http's admission gate: torrent and direct traffic share one budget.
+/// The global download limiter as seedwell-http's admission gate: torrent and direct traffic share one budget.
 pub(crate) struct DownGate(pub Arc<RateLimiter>);
 
 impl RateGate for DownGate {
@@ -193,15 +193,15 @@ impl Session {
             // tracker's carries the passkey), and which one is known only once it is fetched. The proxy resolves the
             // name; with no working server the request waits, never directly.
             let proxy = self.sh.proxy.clone();
-            let route: trs_http::RouteFn = Arc::new(move || match proxy.route() {
-                crate::proxy::Route::Direct => trs_http::HttpRoute::Direct,
-                crate::proxy::Route::Via(p) => trs_http::HttpRoute::Via((*p).clone()),
-                crate::proxy::Route::Held => trs_http::HttpRoute::Held,
+            let route: seedwell_http::RouteFn = Arc::new(move || match proxy.route() {
+                crate::proxy::Route::Direct => seedwell_http::HttpRoute::Direct,
+                crate::proxy::Route::Via(p) => seedwell_http::HttpRoute::Via((*p).clone()),
+                crate::proxy::Route::Held => seedwell_http::HttpRoute::Held,
             });
             let dc = DownloaderConfig {
                 version: cfg.client_version.clone(),
                 max_connections_per_host: cfg.direct.max_connections_per_host.max(1),
-                route: Some(trs_http::Route(route)),
+                route: Some(seedwell_http::Route(route)),
                 ..DownloaderConfig::default()
             };
             self.downloader = Some(Downloader::new(dc, Arc::new(DownGate(self.sh.limiter.clone()))));
@@ -342,13 +342,13 @@ impl Session {
                                     None => std::future::pending().await,
                                 }
                             } => {
-                                if let trs_http::Event::Restarted(why) = ev {
+                                if let seedwell_http::Event::Restarted(why) = ev {
                                     let text = match why {
-                                        trs_http::RestartReason::ValidatorChanged => "the file changed on the server",
-                                        trs_http::RestartReason::RangeIgnored => "the server does not support resuming",
-                                        trs_http::RestartReason::SizeChanged => "the file size changed on the server",
-                                        trs_http::RestartReason::NoValidator => "the server gave no way to verify a resume",
-                                        trs_http::RestartReason::PartMismatch => "the partial file did not match its record",
+                                        seedwell_http::RestartReason::ValidatorChanged => "the file changed on the server",
+                                        seedwell_http::RestartReason::RangeIgnored => "the server does not support resuming",
+                                        seedwell_http::RestartReason::SizeChanged => "the file size changed on the server",
+                                        seedwell_http::RestartReason::NoValidator => "the server gave no way to verify a resume",
+                                        seedwell_http::RestartReason::PartMismatch => "the partial file did not match its record",
                                     };
                                     let _ = tx.send(SessionMsg::Direct(DirectMsg::Restarted(id, text.to_owned()))).await;
                                 }
@@ -434,7 +434,7 @@ impl Session {
                     t.cancel(false);
                     let _ = tokio::time::timeout(Duration::from_secs(10), t.wait()).await;
                 }
-                trs_http::discard_staged(&incomplete, &hex_id);
+                seedwell_http::discard_staged(&incomplete, &hex_id);
                 for w in waits {
                     w.done();
                 }
@@ -640,7 +640,7 @@ impl Session {
         }
     }
 
-    /// Persist progress of running downloads now and then (the `.part` sidecar is trs-http's own).
+    /// Persist progress of running downloads now and then (the `.part` sidecar is seedwell-http's own).
     pub(super) fn direct_tick(&mut self) {
         let mut dirty = Vec::new();
         let mut any = false;
@@ -699,6 +699,6 @@ fn read_capped(path: &Path) -> Option<Vec<u8>> {
     use std::io::Read;
     let f = std::fs::File::open(path).ok()?;
     let mut buf = Vec::new();
-    f.take(trs_state::store::MAX_TORRENT_FILE as u64 + 1).read_to_end(&mut buf).ok()?;
-    (buf.len() <= trs_state::store::MAX_TORRENT_FILE).then_some(buf)
+    f.take(seedwell_state::store::MAX_TORRENT_FILE as u64 + 1).read_to_end(&mut buf).ok()?;
+    (buf.len() <= seedwell_state::store::MAX_TORRENT_FILE).then_some(buf)
 }

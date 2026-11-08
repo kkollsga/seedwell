@@ -113,7 +113,7 @@ pub fn parse_conflict(path: &str) -> Option<ConflictName> {
 pub fn archive_path(path: &str, compact_stamp: &str) -> String {
     let (stem, ext) = split_ext(path);
     let suffix = format!("~{compact_stamp}");
-    format!("{}/Archive/{}", trs_sync_proto::model::STATE_DIR, fit(stem, &suffix, ext))
+    format!("{}/Archive/{}", seedwell_sync_proto::model::STATE_DIR, fit(stem, &suffix, ext))
 }
 
 /// What an archived version (its path below `.seedwell/Archive/`) is a version of, and when it was

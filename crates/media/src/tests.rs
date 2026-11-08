@@ -242,7 +242,7 @@ fn an_svg_is_drawn_here_as_png_and_its_size_is_kept() {
 
 #[test]
 fn scripts_foreign_objects_and_external_references_do_nothing() {
-    let dir = std::env::temp_dir().join(format!("trs-media-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("seedwell-media-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let outside = dir.join("outside.png");
     std::fs::write(&outside, png_of(&DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 255, 0, 255]))))).unwrap();

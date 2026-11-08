@@ -113,7 +113,7 @@ pub const QA_LIMIT_LAN: &str = "SEEDWELL_QA_LIMIT_LAN";
 /// Whether the speed limits apply to LAN sessions too: [`QA_LIMIT_LAN`] is `1` (`value`) and the service's state
 /// folder (`state`) is inside a temporary folder.
 pub fn qa_limit_lan(value: Option<&std::ffi::OsStr>, state: &std::path::Path) -> bool {
-    value.is_some_and(|v| v == "1") && trs_platform::dirs::in_temp_folder(state)
+    value.is_some_and(|v| v == "1") && seedwell_platform::dirs::in_temp_folder(state)
 }
 
 /// The Internet limits of the whole service.
@@ -163,7 +163,7 @@ mod tests {
         // A state folder outside any temporary folder (as the user's own is; here one in the source tree, never touched),
         // and a relative path.
         let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("state");
-        assert!(!trs_platform::dirs::in_temp_folder(&here), "the source tree is not in a temporary folder: {}", here.display());
+        assert!(!seedwell_platform::dirs::in_temp_folder(&here), "the source tree is not in a temporary folder: {}", here.display());
         assert!(!qa_limit_lan(on, &here));
         assert!(!qa_limit_lan(on, std::path::Path::new("state")));
     }

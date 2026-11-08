@@ -25,7 +25,7 @@ use super::*;
 
 /// The hub's domain identifier: never a folder's (folder ids are upper-case base32).
 pub const HUB_ID: &str = "seedwell";
-const ROOT: &str = trs_sync::ondemand::ROOT_ID;
+const ROOT: &str = seedwell_sync::ondemand::ROOT_ID;
 /// Between a folder's id and the core's id of an item in it.
 const SEP: char = ':';
 
@@ -38,10 +38,21 @@ pub enum SyncHostMode {
     Hub,
 }
 
-/// The hub's domain: *Seedwell*.
+/// The hub's domain, with no name of its own, so the Finder's sidebar says *Seedwell* (the user's wish, 2026-11-06).
+/// macOS labels a domain "<the app's name> - <the domain's name>" and keeps it in
+/// `~/Library/CloudStorage/<the app's name>-<the domain's name>`: named *Seedwell*, as 0.1.20 had it, the sidebar said
+/// "Seedwell - Seedwell". With no name the app's name stands alone (as Dropbox's one domain is
+/// `~/Library/CloudStorage/Dropbox`). A hub registered under another name takes this one in place: the host adds it
+/// again under the same identifier, which only updates its name (`NSFileProviderManager.h`, `addDomain`), keeping
+/// what the system has of it and its switch in System Settings. Nothing may depend on the folder's name: the host
+/// asks the system where an item is (`getUserVisibleURL`).
 pub(crate) fn hub_domain() -> SyncHostDomain {
-    SyncHostDomain { id: HUB_ID.into(), name: crate::menu::APP_NAME.into() }
+    SyncHostDomain { id: HUB_ID.into(), name: String::new() }
 }
+
+/// What a domain is named when the system refuses an empty name (`Core::sync_host_domain_fallback_name`): the app's,
+/// as 0.1.20 named the hub.
+pub(crate) const DOMAIN_FALLBACK_NAME: &str = crate::menu::APP_NAME;
 
 /// A synced folder as the hub needs it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -398,11 +409,13 @@ impl Host {
         Some(tops(all))
     }
 
+    /// The hub's root. Its name is the app's: the domain has none of its own ([`hub_domain`]), and the extension
+    /// names the root after the domain only when the core gives it no name.
     fn hub_root_wire() -> WireItem {
         WireItem {
             id: ROOT.into(),
             parent: ROOT.into(),
-            name: String::new(),
+            name: crate::menu::APP_NAME.into(),
             kind: "dir",
             size: 0,
             mtime_ns: 0,

@@ -2,7 +2,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Unix time in milliseconds. This is the clock handed to `trs-tracker`: it keeps advancing
+/// Unix time in milliseconds. This is the clock handed to `seedwell-tracker`: it keeps advancing
 /// while the Mac sleeps and is stable across launches, which persisted tracker timings need.
 pub fn unix_ms() -> u64 {
     SystemTime::now()
@@ -17,7 +17,7 @@ pub fn unix_secs() -> u64 {
 
 /// Lower-case hex of `bytes`.
 pub fn hex(bytes: &[u8]) -> String {
-    trs_metainfo::hex_encode(bytes)
+    seedwell_metainfo::hex_encode(bytes)
 }
 
 /// xorshift64* generator. Not cryptographic: it only shuffles peers and breaks ties.
@@ -122,7 +122,7 @@ pub fn local_utc_offset(unix: i64) -> i32 {
                 return off;
             }
     }
-    let off = trs_platform::proc::utc_offset(unix);
+    let off = seedwell_platform::proc::utc_offset(unix);
     *CACHE.lock().unwrap_or_else(|p| p.into_inner()) = Some((window, off));
     off
 }

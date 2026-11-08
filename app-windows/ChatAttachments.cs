@@ -4,13 +4,13 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
 /// <summary>
 /// Images and files in chat on Windows (the Mac's ChatImages and ChatFiles): drawing only. Each image's state and words
-/// and each file card's state, line and buttons are the core's (trs-ffi chat_images.rs, chat_files.rs). Every picture
+/// and each file card's state, line and buttons are the core's (seedwell-ffi chat_images.rs, chat_files.rs). Every picture
 /// drawn is the PNG or JPEG the core made (<c>chat_image_view</c>, <c>chat_image_preview</c>), never another device's
 /// bytes as they came. Nothing downloads or opens by itself; opening an app or a script asks the core's question first.
 /// </summary>
@@ -114,7 +114,7 @@ sealed class ChatAttachments
             var i = images[current];
             var (w, h) = Fit(i.Width, i.Height, maxWidth, scale);
             picture.Child = Image(place, i, w, h, scale, source, changed);
-            counter.Text = TrsFfiMethods.ChatGalleryCounter((uint)current + 1, (uint)images.Length);
+            counter.Text = SeedwellFfiMethods.ChatGalleryCounter((uint)current + 1, (uint)images.Length);
             for (int t = 0; t < thumbs.Count; t++)
             {
                 var on = t == current;
@@ -306,7 +306,7 @@ sealed class ChatAttachments
         {
             if (!t.IsCompletedSuccessfully) { Failed(t.Exception); return; }
             AppLog.Write("chat image: open");
-            if (!Quiet.On) System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(t.Result) { UseShellExecute = true });
+            if (!Quiet.On) Shell.Start(new System.Diagnostics.ProcessStartInfo(t.Result) { UseShellExecute = true });
         }));
     }
 
@@ -425,7 +425,7 @@ sealed class ChatAttachments
                 if (card.Path is string shown)
                 {
                     if (Quiet.On) AppLog.Write("explorer: the downloaded file");
-                    else System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"/select,\"{shown}\"") { UseShellExecute = true });
+                    else Shell.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"/select,\"{shown}\"") { UseShellExecute = true });
                 }
                 break;
             case ChatFileActionKind.Open:
@@ -434,7 +434,7 @@ sealed class ChatAttachments
                 catch (Exception e) { Failed(new AggregateException(e)); return; }
                 if (open.Confirm is ChatFileConfirm ask && !await Confirm(ask)) return;
                 AppLog.Write("chat file: open");
-                if (!Quiet.On) System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(open.Path) { UseShellExecute = true });
+                if (!Quiet.On) Shell.Start(new System.Diagnostics.ProcessStartInfo(open.Path) { UseShellExecute = true });
                 break;
             case ChatFileActionKind.Download or ChatFileActionKind.Retry:
                 Background(() => app.Core.ChatFileDownload(place, hash, null), "file download", changed);
@@ -487,7 +487,7 @@ sealed class ChatAttachments
 
     void Failed(AggregateException? e)
     {
-        var message = e?.InnerException is CoreException ce ? TrsFfiMethods.CoreErrorMessage(ce) : e?.InnerException?.Message ?? "";
+        var message = e?.InnerException is CoreException ce ? SeedwellFfiMethods.CoreErrorMessage(ce) : e?.InnerException?.Message ?? "";
         app.Alert(new SyncAlert(message, ""));
     }
 

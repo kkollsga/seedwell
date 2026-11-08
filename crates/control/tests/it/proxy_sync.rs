@@ -5,11 +5,11 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use trs_engine::{Engine, EngineConfig, MemStore, ProxyConfig, ProxyHealth};
-use trs_socks::testkit::FakeProxy;
-use trs_sync_net::SyncHandle;
-use trs_sync_net::chat::MessageKind;
-use trs_sync_net::secrets::FileSecrets;
+use seedwell_engine::{Engine, EngineConfig, MemStore, ProxyConfig, ProxyHealth};
+use seedwell_socks::testkit::FakeProxy;
+use seedwell_sync_net::SyncHandle;
+use seedwell_sync_net::chat::MessageKind;
+use seedwell_sync_net::secrets::FileSecrets;
 
 struct Device {
     root: tempfile::TempDir,
@@ -29,7 +29,7 @@ async fn device(fake: &FakeProxy, name: &str) -> Device {
         proxy: Some(ProxyConfig {
             servers: vec![fake.addr().ip().to_string()],
             port: fake.addr().port(),
-            auth: Some(trs_engine::proxy::Credentials::new("user", "pass").unwrap()),
+            auth: Some(seedwell_engine::proxy::Credentials::new("user", "pass").unwrap()),
             ..Default::default()
         }),
         ..EngineConfig::default()
@@ -37,7 +37,7 @@ async fn device(fake: &FakeProxy, name: &str) -> Device {
     let engine = Engine::start(ec, Arc::new(MemStore::new())).await.unwrap();
     let secrets = Arc::new(FileSecrets::new(state.join("secrets")));
     let name = name.to_owned();
-    let h = trs_control::sync::start_sync_with(&state, "Seedwell test".into(), secrets, Some(&engine.handle()), move |o| {
+    let h = seedwell_control::sync::start_sync_with(&state, "Seedwell test".into(), secrets, Some(&engine.handle()), move |o| {
         o.bind = IpAddr::V4(Ipv4Addr::LOCALHOST);
         o.lan_discovery = false;
         o.default_device_name = name;
@@ -62,8 +62,8 @@ async fn chat_and_folder_sync_between_devices_never_go_through_the_torrent_proxy
     let fake = FakeProxy::start("user", "pass").await;
     let mut mac = device(&fake, "Mac").await;
     let mut pc = device(&fake, "PC").await;
-    let id: trs_sync_proto::ids::FolderId = mac.h.chat_new("Proxy test", false).await.unwrap().id.parse().unwrap();
-    let link = mac.h.create_invite(&id, trs_sync_proto::members::Role::ReadWrite, 2, 7).unwrap().link;
+    let id: seedwell_sync_proto::ids::FolderId = mac.h.chat_new("Proxy test", false).await.unwrap().id.parse().unwrap();
+    let link = mac.h.create_invite(&id, seedwell_sync_proto::members::Role::ReadWrite, 2, 7).unwrap().link;
     pc.h.chat_join(&link).await.unwrap();
     pc.h.add_address(&id, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), mac.h.port())).unwrap();
     wait_until(30, "the PC is admitted", || pc.h.channel_status(&id).is_some_and(|c| c.role.is_some())).await;
@@ -73,8 +73,8 @@ async fn chat_and_folder_sync_between_devices_never_go_through_the_torrent_proxy
     let docs = mac.root.path().join("Docs");
     std::fs::create_dir_all(&docs).unwrap();
     std::fs::write(docs.join("a.txt"), b"first file").unwrap();
-    let folder: trs_sync_proto::ids::FolderId = mac.h.add_folder(docs.clone()).await.unwrap().id.parse().unwrap();
-    let flink = mac.h.create_invite(&folder, trs_sync_proto::members::Role::ReadWrite, 2, 7).unwrap().link;
+    let folder: seedwell_sync_proto::ids::FolderId = mac.h.add_folder(docs.clone()).await.unwrap().id.parse().unwrap();
+    let flink = mac.h.create_invite(&folder, seedwell_sync_proto::members::Role::ReadWrite, 2, 7).unwrap().link;
     let there = pc.root.path().join("Docs");
     pc.h.join_folder(&flink, there.clone()).await.unwrap();
     pc.h.add_address(&folder, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), mac.h.port())).unwrap();
@@ -89,7 +89,7 @@ async fn chat_and_folder_sync_between_devices_never_go_through_the_torrent_proxy
         e.set_proxy(Some(ProxyConfig {
             servers: vec![fake.addr().ip().to_string()],
             port: fake.addr().port(),
-            auth: Some(trs_engine::proxy::Credentials::new("user", "other").unwrap()),
+            auth: Some(seedwell_engine::proxy::Credentials::new("user", "other").unwrap()),
             ..Default::default()
         }));
         wait_until(20, "the proxy is down", || e.proxy_status().health == ProxyHealth::Down).await;

@@ -222,7 +222,7 @@ enum Dialer {
 }
 
 struct SocksDial {
-    proxy: trs_socks::Proxy,
+    proxy: seedwell_socks::Proxy,
     timeout: Duration,
     policy: DestinationPolicy,
 }
@@ -255,7 +255,7 @@ impl Service<Uri> for Dialer {
                     if !d.policy.allow_loopback && (host == "localhost" || host.ends_with(".localhost")) {
                         return Err(Box::new(ResolveError::Forbidden(crate::policy::Refusal::Loopback)) as BoxError);
                     }
-                    let (s, _) = trs_socks::connect(&d.proxy, &trs_socks::Target::Name(host, port), d.timeout).await?;
+                    let (s, _) = seedwell_socks::connect(&d.proxy, &seedwell_socks::Target::Name(host, port), d.timeout).await?;
                     Ok(hyper_util::rt::TokioIo::new(s))
                 })
             }
@@ -417,7 +417,7 @@ impl HttpTransport {
 
     /// Every request through the SOCKS5 `proxy` (SPEC §7H): the proxy resolves the tracker's name, a proxy that fails
     /// is [`TransportError::Proxy`], and nothing is ever sent directly.
-    pub fn with_proxy(version: &str, cfg: HttpConfig, proxy: trs_socks::Proxy) -> Self {
+    pub fn with_proxy(version: &str, cfg: HttpConfig, proxy: seedwell_socks::Proxy) -> Self {
         let mut t = Self::build(version, cfg, None);
         let socks = finish_client(&cfg, Dialer::Socks(Arc::new(SocksDial { proxy, timeout: cfg.connect_timeout, policy: cfg.policy })));
         t.client = socks.clone();
@@ -1012,7 +1012,7 @@ fn classify(e: &hyper_util::client::legacy::Error) -> TransportError {
     let mut text = String::new();
     let mut kind_timeout = false;
     let mut resolve: Option<&ResolveError> = None;
-    let mut socks: Option<&trs_socks::Error> = None;
+    let mut socks: Option<&seedwell_socks::Error> = None;
     let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(e);
     while let Some(err) = cur {
         text.push_str(&err.to_string().to_ascii_lowercase());
@@ -1024,7 +1024,7 @@ fn classify(e: &hyper_util::client::legacy::Error) -> TransportError {
         if let Some(r) = err.downcast_ref::<ResolveError>() {
             resolve = Some(r);
         }
-        if let Some(r) = err.downcast_ref::<trs_socks::Error>() {
+        if let Some(r) = err.downcast_ref::<seedwell_socks::Error>() {
             socks = Some(r);
         }
         cur = err.source();
@@ -1032,7 +1032,7 @@ fn classify(e: &hyper_util::client::legacy::Error) -> TransportError {
     if let Some(s) = socks {
         return if s.is_proxy_fault() {
             TransportError::Proxy(ProxyBlock::Down)
-        } else if *s == trs_socks::Error::TargetTimeout {
+        } else if *s == seedwell_socks::Error::TargetTimeout {
             TransportError::ConnectTimeout
         } else {
             TransportError::Connect

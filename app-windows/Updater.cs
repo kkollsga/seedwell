@@ -1,5 +1,5 @@
 using System.Runtime.InteropServices;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
@@ -52,7 +52,10 @@ sealed class Updater
     /// <summary>The model changed (a check ended, an install started): the views that show it ask again.</summary>
     public event Action? Changed;
 
-    public Updater(App app, Core core)
+    /// <summary>A copy with an installer next to the exe installs development builds. A look at the disk: off the UI thread.</summary>
+    internal static bool HasInstaller() => File.Exists(Path.Combine(InstallDir, "install.ps1"));
+
+    public Updater(App app, Core core, bool hasInstaller)
     {
         this.app = app;
         ui = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
@@ -62,7 +65,7 @@ sealed class Updater
         // this app to go back to and waits for the new one to start fine); a copy without one installs no builds.
         var installer = Path.Combine(InstallDir, "install.ps1");
         Updates = new Updates(core, ReleaseBuild, repo, $"{v.Major}.{v.Minor}.{v.Build}", DevVersion, InstallDir,
-            File.Exists(installer) ? installer : "", RelaunchArgs, App.Now());
+            hasInstaller ? installer : "", RelaunchArgs, App.Now());
         timer = ui.CreateTimer();
         timer.IsRepeating = false;
         timer.Tick += (_, _) => Check(true);
@@ -157,7 +160,7 @@ sealed class Updater
             return;
         }
         AppLog.Write($"update: installing into {dir} ({cmd.Argv[0]}; log {cmd.Log})");
-        if (!Start(cmd))
+        if (!await StartDetached(cmd))
         {
             Updates.InstallFailed();
         }
@@ -169,10 +172,20 @@ sealed class Updater
 
     static void RowCommandsReveal(string path)
     {
-        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"/select,\"{path}\"") { UseShellExecute = true }); } catch { }
+        try { Shell.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"/select,\"{path}\"") { UseShellExecute = true }); } catch { }
     }
 
     // ------------------------------------------------------------------------------------------- the detached start
+
+    /// <summary>QA only (an isolated run): a detached start takes this long (SEEDWELL_QA_SLOW_SHELL_MS, as <see cref="Shell"/>).</summary>
+    static readonly int SlowStartMs = Program.StateDir is not null && int.TryParse(Environment.GetEnvironmentVariable("SEEDWELL_QA_SLOW_SHELL_MS"), out var ms) ? ms : 0;
+
+    /// <summary>The installer started off the UI thread (creating a process and opening its log can take their time): true when it runs.</summary>
+    internal static Task<bool> StartDetached(InstallCommand cmd) => Task.Run(() =>
+    {
+        if (SlowStartMs > 0) Thread.Sleep(SlowStartMs);
+        return Start(cmd);
+    });
 
     /// <summary>
     /// CreateProcess with the command's environment added to the app's, in the temp folder, and its stdout and stderr
@@ -180,7 +193,7 @@ sealed class Updater
     /// that is never shown; not DETACHED_PROCESS (no console at all): Windows PowerShell 5.1 started that way runs
     /// nothing, writes nothing and exits 0.
     /// </summary>
-    internal static bool Start(InstallCommand cmd)
+    static bool Start(InstallCommand cmd)
     {
         try
         {

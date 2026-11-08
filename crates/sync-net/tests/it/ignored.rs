@@ -8,12 +8,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use trs_sync_net::config::SyncConfig;
-use trs_sync_net::secrets::FileSecrets;
-use trs_sync_net::status::FolderState;
-use trs_sync_net::{Options, SyncHandle};
-use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::members::Role;
+use seedwell_sync_net::config::SyncConfig;
+use seedwell_sync_net::secrets::FileSecrets;
+use seedwell_sync_net::status::FolderState;
+use seedwell_sync_net::{Options, SyncHandle};
+use seedwell_sync_proto::ids::FolderId;
+use seedwell_sync_proto::members::Role;
 
 const RULES: &[u8] = b"// Claude Code's own state\n/synced/\n/_snapshots/\n.venv/\nvenv/\n__pycache__/\n*.pyc\nnode_modules/\n.DS_Store\nThumbs.db\n";
 

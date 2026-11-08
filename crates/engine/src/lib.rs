@@ -1,4 +1,4 @@
-//! trs-engine: the BitTorrent session engine of Seedwell.
+//! seedwell-engine: the BitTorrent session engine of Seedwell.
 //!
 //! One [`Engine`] runs a session actor, a tracker driver, an optional DHT node and one actor per
 //! awake (Warm or Hot) torrent. Cold torrents are plain records. The app talks to it through the
@@ -61,5 +61,5 @@ pub use config::{EngineConfig, TierTimings};
 pub use proxy::{ProxyConfig, ProxyHealth, ProxyProblem, ProxyStatus};
 pub use tier::Tier;
 /// Same-volume check and the Settings warning for incomplete -> finished pairs on different
-/// disks (SPEC 7A.4); see `trs_state::volume`.
-pub use trs_state::volume::{CrossVolume, LocationScope, cross_volume_pairs, same_volume, volume_id};
+/// disks (SPEC 7A.4); see `seedwell_state::volume`.
+pub use seedwell_state::volume::{CrossVolume, LocationScope, cross_volume_pairs, same_volume, volume_id};

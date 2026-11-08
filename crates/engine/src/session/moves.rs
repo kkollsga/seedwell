@@ -23,8 +23,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::oneshot;
-use trs_metainfo::Metainfo;
-use trs_storage::{CancelToken, Location, Mode, PieceSet, RecoverState, RelocateOptions, StorageError, TorrentConfig};
+use seedwell_metainfo::Metainfo;
+use seedwell_storage::{CancelToken, Location, Mode, PieceSet, RecoverState, RelocateOptions, StorageError, TorrentConfig};
 
 use super::cold::*;
 use super::{RemoveWait, Session, SessionMsg};
@@ -119,19 +119,19 @@ fn journal_path(dir: &Path, id: &TorrentId) -> PathBuf {
 }
 
 /// "Not allowed" errors in words, naming the file or folder instead of a file number.
-fn denied_text(file: Option<u32>, layout: Option<&trs_storage::Layout>, dest: &Path) -> String {
+fn denied_text(file: Option<u32>, layout: Option<&seedwell_storage::Layout>, dest: &Path) -> String {
     match (file, layout) {
         (Some(n), Some(l)) if (n as usize) < l.file_count() => {
             let name = match l.file_path(n as usize) {
-                trs_storage::PathRef::Relative(p) | trs_storage::PathRef::Absolute(p) => trs_storage::leaf(Path::new(p)),
+                seedwell_storage::PathRef::Relative(p) | seedwell_storage::PathRef::Absolute(p) => seedwell_storage::leaf(Path::new(p)),
             };
             format!("No permission to change \u{201c}{name}\u{201d}, so the torrent stays where it is")
         }
-        _ => format!("No permission to change \u{201c}{}\u{201d}", trs_storage::leaf(dest)),
+        _ => format!("No permission to change \u{201c}{}\u{201d}", seedwell_storage::leaf(dest)),
     }
 }
 
-fn fail_text(e: &StorageError, dest: &Path, layout: Option<&trs_storage::Layout>) -> String {
+fn fail_text(e: &StorageError, dest: &Path, layout: Option<&seedwell_storage::Layout>) -> String {
     match e {
         StorageError::Locked { .. } => format!("{e}, so the torrent stays where it is"),
         StorageError::NoPermission { .. } => e.to_string(),
@@ -196,7 +196,7 @@ impl Session {
     }
 
     fn moves_dir(&self) -> PathBuf {
-        self.sh.store.moves_dir().unwrap_or_else(|| std::env::temp_dir().join(format!("trs-moves-{}", std::process::id())))
+        self.sh.store.moves_dir().unwrap_or_else(|| std::env::temp_dir().join(format!("seedwell-moves-{}", std::process::id())))
     }
 
     /// Why this torrent cannot be moved now.
@@ -593,7 +593,7 @@ impl Session {
     pub(crate) fn notify_switch_layout(
         &mut self,
         id: TorrentId,
-        layout: Arc<trs_storage::Layout>,
+        layout: Arc<seedwell_storage::Layout>,
         reply: Option<oneshot::Sender<Result<(), String>>>,
     ) {
         let Some(e) = self.table.get(&id) else {
@@ -672,7 +672,7 @@ impl Session {
     }
 
     /// Resolve the journals of moves that were interrupted (a crash, a kill): see the recovery
-    /// matrix in the trs-storage README. The journal's plan is compared with the record: if the
+    /// matrix in the seedwell-storage README. The journal's plan is compared with the record: if the
     /// record points at the destination the move is finished (sources deleted), otherwise it is
     /// rolled back and the torrent seeds from where it was.
     pub(super) fn recover_moves(&mut self) {
@@ -744,14 +744,14 @@ struct Cur {
 }
 
 /// Where file `i` is according to the record: its final path and its staging path.
-fn record_paths(layout: &trs_storage::Layout, i: usize, cur: &Cur) -> (PathBuf, Option<PathBuf>) {
+fn record_paths(layout: &seedwell_storage::Layout, i: usize, cur: &Cur) -> (PathBuf, Option<PathBuf>) {
     let fin = match layout.file_path(i) {
-        trs_storage::PathRef::Relative(r) => cur.save.join(r),
-        trs_storage::PathRef::Absolute(a) => PathBuf::from(a),
+        seedwell_storage::PathRef::Relative(r) => cur.save.join(r),
+        seedwell_storage::PathRef::Absolute(a) => PathBuf::from(a),
     };
     let stage = cur.stage_dir.as_ref().map(|s| match layout.file_path(i) {
-        trs_storage::PathRef::Relative(r) => s.join(r),
-        trs_storage::PathRef::Absolute(a) => {
+        seedwell_storage::PathRef::Relative(r) => s.join(r),
+        seedwell_storage::PathRef::Absolute(a) => {
             s.join(".custom").join(format!("{i}-{}", Path::new(a).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()))
         }
     });
@@ -769,7 +769,7 @@ fn recover_one(sh: &Shared, id: &TorrentId, cur: &Cur, journal: &Path) -> Result
         TorrentConfig { root: cur.save.clone(), staging: cur.stage_dir.clone(), mode: Mode::Seed, location: Location::Final, preallocate: false },
     );
     let rec = handle.relocate_recover(journal).map_err(|e| e.to_string())?;
-    let finish = |h: &trs_storage::TorrentHandle, commit: bool| -> Result<(), String> {
+    let finish = |h: &seedwell_storage::TorrentHandle, commit: bool| -> Result<(), String> {
         let p = if commit { h.relocate_commit(journal.to_path_buf(), None) } else { h.relocate_rollback(journal.to_path_buf()) };
         p.map_err(|e| e.to_string())?.wait().map_err(|e| e.to_string())
     };
@@ -832,7 +832,7 @@ fn have_of(sh: &Shared, id: &TorrentId, pieces: u32) -> Option<PieceSet> {
 }
 
 /// Holds a running torrent's writes (`quiesce_writes`) until dropped.
-struct WriteHold(trs_storage::TorrentHandle);
+struct WriteHold(seedwell_storage::TorrentHandle);
 
 impl Drop for WriteHold {
     fn drop(&mut self) {
@@ -845,7 +845,7 @@ async fn exec(c: ExecCtx) -> ExecEnd {
     let id = plan.id;
     let cfg = sh.cfg();
     let relocating = plan.dst.iter().any(Option::is_some);
-    let mut end_handle: Option<trs_storage::TorrentHandle> = None;
+    let mut end_handle: Option<seedwell_storage::TorrentHandle> = None;
     let mut hold: Option<WriteHold> = None;
     if relocating {
         if let Some(dir) = journal.parent()
@@ -854,7 +854,7 @@ async fn exec(c: ExecCtx) -> ExecEnd {
             }
         // The handle: a same-volume move of a running torrent uses the torrent's own, so that a
         // read that meets a file in transit waits for the switch instead of failing.
-        let own: Option<trs_storage::TorrentHandle> = match (&live, plan.cross_volume) {
+        let own: Option<seedwell_storage::TorrentHandle> = match (&live, plan.cross_volume) {
             (Some(tx), false) => {
                 let (rtx, rrx) = oneshot::channel();
                 if tx.send(TorrentMsg::Cmd(TorrentCmd::Handle(rtx))).await.is_ok() {
@@ -995,7 +995,7 @@ async fn exec(c: ExecCtx) -> ExecEnd {
         // Dead/ any more: the one a torrent just left goes away once it is empty (Finder's
         // `.DS_Store` does not count; a folder that still holds anything else stays).
         if !cfg.by_status && plan.kind != MoveKind::Incomplete && crate::status::split_status(&plan.stop_at).1.is_some() {
-            let _ = trs_storage::remove_dir_if_empty(&plan.stop_at);
+            let _ = seedwell_storage::remove_dir_if_empty(&plan.stop_at);
         }
     }
     ExecEnd::Done
@@ -1057,7 +1057,7 @@ impl Session {
             } else if cur != proper {
                 if exists(&cur) {
                     let target = if exists(&proper) {
-                        PathBuf::from(trs_classify::unique_path(&proper.to_string_lossy(), |c| exists(std::path::Path::new(c))))
+                        PathBuf::from(seedwell_classify::unique_path(&proper.to_string_lossy(), |c| exists(std::path::Path::new(c))))
                     } else {
                         proper
                     };
@@ -1084,7 +1084,7 @@ impl Session {
                 if let Some(dir) = to.parent() {
                     let _ = std::fs::create_dir_all(dir);
                 }
-                if trs_storage::rename_excl(from, to).is_ok() {
+                if seedwell_storage::rename_excl(from, to).is_ok() {
                     done.push((from.clone(), to.clone()));
                 } else {
                     ok = false;
@@ -1093,14 +1093,14 @@ impl Session {
             }
             if !ok {
                 for (from, to) in done.iter().rev() {
-                    let _ = trs_storage::rename_excl(to, from);
+                    let _ = seedwell_storage::rename_excl(to, from);
                 }
                 return;
             }
             if self.commit_now(Batch { placements: vec![(id, Some(pl))], ..Batch::default() }).is_ok() {
                 for (from, _) in &done {
                     if let Some(parent) = from.parent() {
-                        let _ = trs_storage::remove_dir_if_empty(parent);
+                        let _ = seedwell_storage::remove_dir_if_empty(parent);
                     }
                 }
             }
@@ -1163,7 +1163,7 @@ impl Session {
                         if let (Some(o), Some(n)) = (o, placement.files.get(i).and_then(Option::as_ref))
                             && o != n
                                 && let Some(parent) = o.parent() {
-                                    let _ = trs_storage::remove_dir_if_empty(parent);
+                                    let _ = seedwell_storage::remove_dir_if_empty(parent);
                                 }
                     }
                 }

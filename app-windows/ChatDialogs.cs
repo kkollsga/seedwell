@@ -1,13 +1,13 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
 /// <summary>
 /// The small chat dialogs on Windows (the Mac's ChatActions alerts), each drawn from the core's <c>ChatDialog</c>
-/// (trs-ffi chat_dialogs.rs): New Topic…, Rename…, Wake Command…, Leave Channel…, Delete Conversation… and Agents:
-/// Yes/No…. A title, the question, a text field when it asks for one, Cancel and the action (red when it removes
+/// (seedwell-ffi chat_dialogs.rs): New Topic…, Rename…, Wake Command…, Leave Channel…, Delete Conversation…, Agents:
+/// Yes/No…, New Group… and Rename Group…. A title, the question, a text field when it asks for one, Cancel and the action (red when it removes
 /// something). What was typed goes through <c>chat_dialog_check</c>: the action is disabled with the core's sentence
 /// under the field while it can't run, and closes without a change when nothing changes. A failure is an alert with the
 /// dialog's failure title and the error's sentence.
@@ -21,6 +21,7 @@ sealed class ChatDialogs
     // What the open dialog acts on (QA's confirm runs what its button runs).
     SyncChannel? channel;
     string? deviceId;
+    string? groupId;
 
     public ChatDialogs(App app) => this.app = app;
 
@@ -28,10 +29,11 @@ sealed class ChatDialogs
     internal ChatDialog? Shown => shown;
 
     /// <summary>
-    /// Shows <paramref name="d"/> over the library window; <paramref name="channel"/> is the channel it acts on, or
-    /// <paramref name="deviceId"/> the private conversation's device. One at a time.
+    /// Shows <paramref name="d"/> over the library window; <paramref name="channel"/> is the channel it acts on,
+    /// <paramref name="deviceId"/> the private conversation's device, or <paramref name="groupId"/> the sidebar group
+    /// (Rename Group…). One at a time.
     /// </summary>
-    internal void Show(ChatDialog d, SyncChannel? channel, string? deviceId = null)
+    internal void Show(ChatDialog d, SyncChannel? channel, string? deviceId = null, string? groupId = null)
     {
         if (open is not null || app.LibraryWindow.Content.XamlRoot is not XamlRoot root)
         {
@@ -74,18 +76,19 @@ sealed class ChatDialogs
         }
         void Check()
         {
-            var input = TrsFfiMethods.ChatDialogCheck(d, field?.Text ?? "");
+            var input = SeedwellFfiMethods.ChatDialogCheck(d, field?.Text ?? "");
             dialog.IsPrimaryButtonEnabled = input is not ChatDialogInput.Problem;
             problem.Text = input is ChatDialogInput.Problem p ? p.Text : "";
             // Shown only once something was typed: an empty field that opened empty needs no sentence yet.
             problem.Visibility = input is ChatDialogInput.Problem && (field?.Text.Length ?? 0) > 0 ? Visibility.Visible : Visibility.Collapsed;
         }
         Check();
-        dialog.PrimaryButtonClick += (_, _) => Run(d, field?.Text ?? "", channel, deviceId);
+        dialog.PrimaryButtonClick += (_, _) => Run(d, field?.Text ?? "", channel, deviceId, groupId);
         open = dialog;
         shown = d;
         this.channel = channel;
         this.deviceId = deviceId;
+        this.groupId = groupId;
         AppLog.Write($"chat dialog: {d.Kind} \"{d.Title}\"");
         _ = ShowAsync(dialog);
     }
@@ -108,9 +111,9 @@ sealed class ChatDialogs
     }
 
     /// <summary>The dialog's action with what was typed: the core call its kind names; a failure is an alert.</summary>
-    void Run(ChatDialog d, string text, SyncChannel? channel, string? deviceId)
+    void Run(ChatDialog d, string text, SyncChannel? channel, string? deviceId, string? groupId)
     {
-        var input = TrsFfiMethods.ChatDialogCheck(d, text);
+        var input = SeedwellFfiMethods.ChatDialogCheck(d, text);
         if (input is not ChatDialogInput.Ready ready)
         {
             AppLog.Write($"chat dialog {d.Kind}: {(input is ChatDialogInput.Unchanged ? "unchanged" : "refused")}");
@@ -136,6 +139,9 @@ sealed class ChatDialogs
                 after = () => app.Library.SelectPlace(new LibraryPlace.FolderSync());
             },
             ChatDialogKind.ChannelAgents when channel is not null => () => core.ChatSetAgents(channel.Id, !channel.Agents),
+            // New Group… from a channel's menu: the channel goes into it (the core keeps the group if that move fails).
+            ChatDialogKind.NewGroup => () => core.ChatGroupNew(value ?? "", null, channel?.Id),
+            ChatDialogKind.RenameGroup when groupId is not null => () => core.ChatGroupRename(groupId, value ?? ""),
             _ => null,
         };
         if (work is null)
@@ -170,7 +176,7 @@ sealed class ChatDialogs
         {
             return false;
         }
-        Run(dialog, field?.Text ?? "", channel, deviceId);
+        Run(dialog, field?.Text ?? "", channel, deviceId, groupId);
         d.Hide();
         Forget();
         return true;

@@ -8,12 +8,12 @@
 
 use std::path::{Path, PathBuf};
 
-use trs_control::proto::*;
-use trs_control::types::*;
+use seedwell_control::proto::*;
+use seedwell_control::types::*;
 
 use crate::commands::{CliError, R, ask};
 
-/// The pass-through folder at the root of a synced folder (the same name as `trs_sync::PASS_THROUGH`, whose deletes
+/// The pass-through folder at the root of a synced folder (the same name as `seedwell_sync::PASS_THROUGH`, whose deletes
 /// are never archived).
 pub const DIR: &str = "Seedwell Pass-Through";
 
@@ -87,7 +87,7 @@ pub fn size(b: u64) -> String {
 }
 
 /// The synced folders on this Mac, this Mac's device id and its name.
-pub async fn folders(c: &mut trs_control::client::Client) -> R<(Vec<SyncFolderDto>, String, String)> {
+pub async fn folders(c: &mut seedwell_control::client::Client) -> R<(Vec<SyncFolderDto>, String, String)> {
     let (_, l): (_, SyncListDto) = ask(c, Request::SyncList(Empty {})).await?;
     Ok((l.folders, l.device_id, l.device_name))
 }
@@ -152,7 +152,7 @@ pub fn pick<'a>(all: &'a [SyncFolderDto], channel_id: &str, channel_name: &str, 
         Some(v) => {
             let v = v.trim();
             all.iter().find(|f| f.id == v || f.name.eq_ignore_ascii_case(v)).or_else(|| all.iter().find(|f| v.len() >= 4 && f.id.starts_with(v))).ok_or_else(|| {
-                CliError::plain(3, format!(concat!("no synced folder {v} on this ", trs_platform::computer!(), " (seedwell sync list: {})"), all.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", "), v = v))
+                CliError::plain(3, format!(concat!("no synced folder {v} on this ", seedwell_platform::computer!(), " (seedwell sync list: {})"), all.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", "), v = v))
             })?
         }
         None => all.iter().find(|f| f.channel_id.as_deref() == Some(channel_id)).ok_or_else(|| {
@@ -166,7 +166,7 @@ pub fn pick<'a>(all: &'a [SyncFolderDto], channel_id: &str, channel_name: &str, 
         })?,
     };
     if f.access == "read_only" || f.access == "read" {
-        return Err(CliError::plain(2, format!(concat!("this ", trs_platform::computer!(), " may only read {}: pass the files through a folder it may write (--via FOLDER)"), f.name)));
+        return Err(CliError::plain(2, format!(concat!("this ", seedwell_platform::computer!(), " may only read {}: pass the files through a folder it may write (--via FOLDER)"), f.name)));
     }
     Ok(f)
 }
@@ -345,7 +345,7 @@ mod tests {
         let files = [src.path().join("graph.bin").display().to_string(), src.path().join("notes.md").display().to_string()];
         let pass = put(&folder, "AJA5NYA-X2SCCL3", "Studio Mac", "kglite", "mcp-servers", &files).unwrap();
         let dir = synced.path().join(&pass.rel);
-        assert_eq!(statuses(&dir).iter().map(|s| (s.computer.as_str(), s.state.as_str())).collect::<Vec<_>>(), [("Studio Mac", "sent")], concat!("this ", trs_platform::computer!(), " sent it"));
+        assert_eq!(statuses(&dir).iter().map(|s| (s.computer.as_str(), s.state.as_str())).collect::<Vec<_>>(), [("Studio Mac", "sent")], concat!("this ", seedwell_platform::computer!(), " sent it"));
         assert_eq!(words(&statuses(&dir)), "", "nobody else yet");
         std::fs::write(dir.join(".status-K2MSCFE"), "computer: Laptop\nstate: arrived\nat: 1800000000\n").unwrap();
         std::fs::write(dir.join(".status-QKZ4XNA"), "computer: iMac\nstate: receiving\nat: 1800000001\n").unwrap();

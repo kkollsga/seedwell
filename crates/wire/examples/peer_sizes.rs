@@ -1,5 +1,5 @@
 //! Prints the size of every per-peer type (documented in README.md).
-use trs_wire::*;
+use seedwell_wire::*;
 fn main() {
     macro_rules! s {
         ($t:ty) => {

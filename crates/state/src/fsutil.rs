@@ -18,7 +18,7 @@ pub fn unix_now() -> i64 {
 
 /// fsync a directory so a rename inside it survives power loss.
 pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {
-    trs_platform::fs::sync_dir(dir)
+    seedwell_platform::fs::sync_dir(dir)
 }
 
 /// Write `data` to `path` atomically: temp file in the same directory, fsync,

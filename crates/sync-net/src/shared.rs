@@ -15,12 +15,12 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::sync::{Notify, mpsc, oneshot, watch};
-use trs_sync::folder::FolderCore;
-use trs_sync::store_redb::RedbReader;
-use trs_sync_proto::ids::{DeviceId, FolderId};
-use trs_sync_proto::keys::{Access, FolderKey, FolderSecret};
-use trs_sync_proto::members::{InviteLink, Membership, Role};
-use trs_sync_proto::msg::{Message, Request, Response};
+use seedwell_sync::folder::FolderCore;
+use seedwell_sync::store_redb::RedbReader;
+use seedwell_sync_proto::ids::{DeviceId, FolderId};
+use seedwell_sync_proto::keys::{Access, FolderKey, FolderSecret};
+use seedwell_sync_proto::members::{InviteLink, Membership, Role};
+use seedwell_sync_proto::msg::{Message, Request, Response};
 
 /// Locks a std mutex, also after a panic elsewhere (the data is still consistent: every critical
 /// section here is a plain read or replace).
@@ -67,6 +67,23 @@ pub fn take_longest_lock_wait() -> LockWait {
     LONGEST_WAIT.with(|w| w.take())
 }
 
+thread_local! {
+    /// How many folder and channel statuses this thread made ([`statuses_made_here`]).
+    static STATUSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// A folder's or channel's status is being made on this thread (its members, absences, index or messages read).
+pub(crate) fn note_status() {
+    STATUSES.with(|n| n.set(n.get() + 1));
+}
+
+/// **Tests:** how many folder and channel statuses (the parts of a snapshot, a channel list) this thread has made: a
+/// call the hosts make each time they draw a dialog must make none.
+#[doc(hidden)]
+pub fn statuses_made_here() -> u64 {
+    STATUSES.with(std::cell::Cell::get)
+}
+
 /// **Tests only:** milliseconds every save of folder sync's state to disk takes on top of the disk's own time
 /// ([`slow_disk`]); process-wide.
 static SAVE_WAIT_MS: AtomicU64 = AtomicU64::new(0);
@@ -90,7 +107,7 @@ pub const QA_SLOW_SAVES: &str = "SEEDWELL_QA_SLOW_SAVES";
 pub fn qa_slow_saves(value: Option<&std::ffi::OsStr>, state: &std::path::Path) -> Result<Option<std::time::Duration>, &'static str> {
     let Some(v) = value else { return Ok(None) };
     let Some(ms) = v.to_str().and_then(|t| t.trim().parse::<u64>().ok()) else { return Err("not a number of milliseconds") };
-    if !trs_platform::dirs::in_temp_folder(state) {
+    if !seedwell_platform::dirs::in_temp_folder(state) {
         return Err("only an isolated run (a state folder in a temporary folder) slows its saves");
     }
     Ok(Some(std::time::Duration::from_millis(ms.min(60_000))))
@@ -268,7 +285,7 @@ impl Space {
 
     /// May the device (`device_pk`) write to the folder?
     pub fn writes(&self, device_pk: &[u8; 32]) -> bool {
-        self.role_of(device_pk).is_some_and(|r| r.access() == trs_sync_proto::keys::Access::Write)
+        self.role_of(device_pk).is_some_and(|r| r.access() == seedwell_sync_proto::keys::Access::Write)
     }
 
     /// May it be synced with a peer over this connection (`lan`: the peer is on the LAN, not relayed)? Not when it
@@ -329,15 +346,15 @@ pub struct FolderShared {
     /// On demand: the paths kept on this device (a copy of the core's, for listing items without it).
     pub pins: Mutex<std::collections::BTreeSet<String>>,
     /// On demand: the items a host lists, read from `index` (never waiting for the core).
-    pub items: Mutex<trs_sync::ondemand::Items>,
+    pub items: Mutex<seedwell_sync::ondemand::Items>,
     /// On demand: files with a free in progress here, and how many frees hold each ([`Freeing`]): asked whether it
     /// holds them, this device says no (SPEC §7G.11).
     pub freeing: Mutex<BTreeMap<String, u32>>,
     /// The ignore patterns as they are now (the core keeps them up to date), for answers given without the core.
-    pub ignore: trs_sync::ignore::Current,
+    pub ignore: seedwell_sync::ignore::Current,
     /// On demand: the deletes the host made a moment ago (the core notes them): the index sessions and the host's change
     /// feed wait for them before announcing, so a save by replace reaches them as one edit (SPEC §7G.11).
-    pub replacing: trs_sync::ondemand::Replacing,
+    pub replacing: seedwell_sync::ondemand::Replacing,
     /// On demand and kept in place: the files whose content is in the host's placeholders ([`crate::placed`]).
     pub placed: Option<Arc<crate::placed::Placed>>,
     /// The core. Lock only on a blocking thread.
@@ -351,17 +368,21 @@ pub struct FolderShared {
     pub remote_changed: Notify,
     /// What the runtime is doing, for the snapshot.
     pub live: Mutex<Live>,
+    /// Who listed the folder, as its index says, read off the status's thread ([`ListedLook`]).
+    pub listed: ListedLook,
     /// Ask the runtime for a full scan now (the user's "Rescan", or a changed ignore file).
     pub rescan: Notify,
     /// Up when the folder is being stopped (removed, moved, switched): what holds it for a peer (its index sender)
     /// lets go, so the folder's index closes while that peer stays connected.
     pub stopped: watch::Sender<bool>,
     /// How long archived versions are kept, and how much room they may take.
-    pub retention: trs_sync::archive::Retention,
+    pub retention: seedwell_sync::archive::Retention,
     /// Bytes fetched from peers for this folder.
     pub fetched: crate::limit::Meter,
     /// Bytes served to peers from this folder.
     pub served: crate::limit::Meter,
+    /// The time left while it syncs, fed by each status (a leaf lock: nothing is locked while it is held).
+    pub eta: Mutex<crate::eta::Eta>,
     /// On demand: the fetches being waited for (SPEC §7G.11).
     pub fetches: Mutex<Fetches>,
     /// Tests only: each batch an index session announces starts with this pause.
@@ -371,15 +392,15 @@ pub struct FolderShared {
     pub write_wait: Mutex<std::time::Duration>,
     /// The reads of this device's unhashed files for the devices fetching them, by path and device (SPEC §7G.11: each
     /// read once, hashed as it goes).
-    pub streams: Mutex<HashMap<(String, trs_sync_proto::ids::ShortId), StreamSlot>>,
+    pub streams: Mutex<HashMap<(String, seedwell_sync_proto::ids::ShortId), StreamSlot>>,
     /// The streams this device runs of others' unhashed files, one at a time, with the core let go
     /// (`runtime::enqueue_jobs`): one lane.
     pub streamer: Mutex<Streamer>,
     /// The other lane: peers' chunks of hashed files (so a stream minutes long holds up no hashed file's fetch).
     pub fetcher: Mutex<Streamer>,
-    /// The core's state of those jobs ([`trs_sync::folder::FolderCore::streams`]): a job's end is handed back here,
+    /// The core's state of those jobs ([`seedwell_sync::folder::FolderCore::streams`]): a job's end is handed back here,
     /// never waiting for the core.
-    pub jobs: Arc<Mutex<trs_sync::lazy::Streams>>,
+    pub jobs: Arc<Mutex<seedwell_sync::lazy::Streams>>,
     /// Set once everything above is dropped, the index included, and every job that held the index without the folder
     /// ([`Closed::hold`]) ended. Last, because fields drop in order: the last `Arc` of a folder counts as gone before
     /// its fields are, so only this says the index file is closed.
@@ -390,7 +411,7 @@ pub struct FolderShared {
 #[derive(Default)]
 pub struct Streamer {
     /// Waiting their turn.
-    pub queue: std::collections::VecDeque<trs_sync::lazy::Job>,
+    pub queue: std::collections::VecDeque<seedwell_sync::lazy::Job>,
     /// The path whose job runs now.
     pub current: Option<String>,
     /// A task runs the lane.
@@ -399,9 +420,9 @@ pub struct Streamer {
 
 impl Streamer {
     /// Queues `job`. A job of the same path already queued is replaced (returned: the caller tells the core it will
-    /// not run, [`trs_sync::lazy::Streams::cancelled`]); one of the path running now is no reason to drop it (the
+    /// not run, [`seedwell_sync::lazy::Streams::cancelled`]); one of the path running now is no reason to drop it (the
     /// core took it after that one ended: it runs after it).
-    pub fn push(&mut self, job: trs_sync::lazy::Job) -> Option<trs_sync::lazy::Job> {
+    pub fn push(&mut self, job: seedwell_sync::lazy::Job) -> Option<seedwell_sync::lazy::Job> {
         match self.queue.iter_mut().find(|q| q.path() == job.path()) {
             Some(q) => Some(std::mem::replace(q, job)),
             None => {
@@ -415,13 +436,13 @@ impl Streamer {
 /// One device's read of one of this device's unhashed files ([`FolderShared::streams`]).
 pub struct StreamSlot {
     /// The read (one piece at a time).
-    pub stream: Arc<Mutex<trs_sync::lazy::Stream>>,
+    pub stream: Arc<Mutex<seedwell_sync::lazy::Stream>>,
     /// When a piece was last asked for: a read left alone for [`STREAM_IDLE`] is dropped.
     pub used: std::time::Instant,
 }
 
 /// How long a read of an unhashed file nobody asks a piece of is kept.
-pub const STREAM_IDLE: std::time::Duration = trs_sync::lazy::STREAM_IDLE;
+pub const STREAM_IDLE: std::time::Duration = seedwell_sync::lazy::STREAM_IDLE;
 
 /// The fetches of an on-demand folder being waited for ([`FolderShared::fetches`]).
 #[derive(Default)]
@@ -485,23 +506,23 @@ impl Drop for CloseFlag {
 impl FolderShared {
     /// The folder's files as the core reads them: its root, or for a folder kept in place the cache with each held file
     /// read from its placeholder.
-    pub fn fs(&self) -> Box<dyn trs_sync::fs::Fs> {
+    pub fn fs(&self) -> Box<dyn seedwell_sync::fs::Fs> {
         match &self.placed {
             Some(p) => Box::new(crate::placed::PlaceFs::new(p.clone())),
-            None => Box::new(trs_sync::fs::StdFs::new(self.root.clone())),
+            None => Box::new(seedwell_sync::fs::StdFs::new(self.root.clone())),
         }
     }
 
     /// Our index id and the last sequence given out, from the index's read-only view (never waits for the core).
     pub fn index_state(&self) -> std::io::Result<(u64, u64)> {
-        let m = trs_sync::index::IndexStore::meta(&self.index.view())?;
+        let m = seedwell_sync::index::IndexStore::meta(&self.index.view())?;
         Ok((m.index_id, m.sequence))
     }
 
-    /// Our entries above `after` for a peer ([`trs_sync::folder::announce_since`]), from the read-only view: a peer is
+    /// Our entries above `after` for a peer ([`seedwell_sync::folder::announce_since`]), from the read-only view: a peer is
     /// sent what each scan step committed while the scan still runs.
-    pub fn announce_since(&self, after: u64, limit: usize) -> std::io::Result<Vec<trs_sync_proto::model::IndexEntry>> {
-        trs_sync::folder::announce_since(&self.index.view(), self.on_demand, &self.ignore, after, limit)
+    pub fn announce_since(&self, after: u64, limit: usize) -> std::io::Result<Vec<seedwell_sync_proto::model::IndexEntry>> {
+        seedwell_sync::folder::announce_since(&self.index.view(), self.on_demand, &self.ignore, after, limit)
     }
 }
 
@@ -533,6 +554,9 @@ pub struct Live {
     pub conflicts: BTreeMap<String, String>,
     /// Paths and bytes still needed (as of the last scan or pull).
     pub need: (u64, u64),
+    /// The folder's fetched-bytes counter ([`FolderShared::fetched`]) when `need` was worked out: what came since is
+    /// off the bytes still needed for the time left (`need` itself is worked out again only when a pull settles).
+    pub need_mark: u64,
     /// Files no device can give right now (not in `need`).
     pub unavailable: u64,
     /// The first needed paths in path order, at most [`PENDING_SAMPLE`], for Finder's badges; `true` when
@@ -551,7 +575,95 @@ pub struct Live {
     /// When the kept folders were last looked at on disk (at most every [`KEPT_CHECK_EVERY`] from a snapshot).
     pub kept_checked: Option<std::time::Instant>,
     /// While it scans: the phase and how far it is (SPEC §7G.2: the app shows it, never a bare spinner).
-    pub scan: Option<trs_sync::scan::ScanProgress>,
+    pub scan: Option<seedwell_sync::scan::ScanProgress>,
+}
+
+/// What a folder's index says of who listed it: this device files of its own, and which devices sent their first list
+/// of it. A status's "Waiting for Mac mini to list Movies" comes from it ([`crate::SyncHandle`]'s `unlisted`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Listed {
+    /// This device lists files of its own (it waits for nobody's list).
+    pub own: bool,
+    /// The devices whose first list of the folder is in the index.
+    pub peers: std::collections::BTreeSet<seedwell_sync_proto::ids::ShortId>,
+}
+
+impl Listed {
+    /// Reads it from the index (a read of the index file: never on the caller's thread of a status).
+    pub fn read(view: &dyn seedwell_sync::index::IndexStore) -> std::io::Result<Listed> {
+        let own = !view.local_paths("", None, 1)?.is_empty();
+        let mut peers = std::collections::BTreeSet::new();
+        if !own {
+            for id in view.peer_ids()? {
+                if view.peer(id)?.is_some_and(|s| s.index_id != 0) {
+                    peers.insert(id);
+                }
+            }
+        }
+        Ok(Listed { own, peers })
+    }
+}
+
+/// [`Listed`] as last read, read again on a blocking thread whenever a status asks: the status (the app's UI thread, the
+/// CLI's `sync list` and `sync status`) never reads the index file itself. Such a read can wait for the disk: on Windows
+/// a read of a file waits for any flush of it in progress (the index's commits flush it), which held `sync list` about
+/// half a second while a big folder was added or joined.
+#[derive(Default)]
+pub struct ListedLook {
+    state: Mutex<ListedState>,
+    done: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct ListedState {
+    last: Option<Listed>,
+    reading: bool,
+    /// Reads finished so far (a caller waits for the one in flight when it asked).
+    reads: u64,
+}
+
+/// How long a status waits for the read it started before it shows the last one: a fast disk answers well within it,
+/// a slow one never holds the status up longer.
+pub const LISTED_WAIT: std::time::Duration = std::time::Duration::from_millis(20);
+
+impl ListedLook {
+    /// Starts with what the index says now (read where the folder opens, which reads its index anyway).
+    pub fn new(first: Option<Listed>) -> Self {
+        ListedLook { state: Mutex::new(ListedState { last: first, ..Default::default() }), done: std::sync::Condvar::new() }
+    }
+
+    /// What the index says: a read is started on `rt`'s blocking threads (unless one is running), and its answer is
+    /// waited for until `until` at most; after that the last answer (`None`: none yet).
+    pub fn get(f: &Arc<FolderShared>, rt: &tokio::runtime::Handle, until: std::time::Instant) -> Option<Listed> {
+        let look = &f.listed;
+        let mut st = lock(&look.state);
+        if !st.reading {
+            st.reading = true;
+            let f2 = f.clone();
+            drop(rt.spawn_blocking(move || {
+                let read = Listed::read(&f2.index.view());
+                let look = &f2.listed;
+                let mut st = lock(&look.state);
+                st.reading = false;
+                st.reads += 1;
+                if let Ok(r) = read {
+                    st.last = Some(r);
+                }
+                look.done.notify_all();
+            }));
+        }
+        let want = st.reads + 1;
+        while st.reads < want {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            // In short slices: a thread's long timed wait may wake late (macOS coalesces timers below the
+            // user-interactive priority).
+            st = look.done.wait_timeout(st, left.min(std::time::Duration::from_millis(4))).unwrap_or_else(|e| e.into_inner()).0;
+        }
+        st.last.clone()
+    }
 }
 
 /// How often a snapshot has the kept folders looked at on disk (off the caller's thread) while there are any.
@@ -563,14 +675,14 @@ impl Live {
     pub fn set_kept(&mut self, dir: &str, by: &str) {
         self.drop_kept(dir);
         self.kept.insert(dir.to_string(), by.to_string());
-        self.issues.push((dir.to_string(), trs_sync::pull::kept_words(by)));
+        self.issues.push((dir.to_string(), seedwell_sync::pull::kept_words(by)));
     }
 
     /// The kept folder at `dir` is over (in the folder again, gone, or nothing keeps it now): its issue goes, and only
     /// that one.
     pub fn drop_kept(&mut self, dir: &str) {
         if let Some(by) = self.kept.remove(dir) {
-            let words = trs_sync::pull::kept_words(&by);
+            let words = seedwell_sync::pull::kept_words(&by);
             self.issues.retain(|(p, w)| !(p == dir && *w == words));
         }
     }
@@ -586,6 +698,7 @@ impl Default for Live {
             last_synced_s: None,
             conflicts: BTreeMap::new(),
             need: (0, 0),
+            need_mark: 0,
             unavailable: 0,
             pending: (Vec::new(), false),
             local: (0, 0),
@@ -612,7 +725,7 @@ pub struct PeerHandle {
     /// Its client string (`Seedwell 0.1.5`).
     pub client: String,
     /// The protocol version and features the session runs at (from both Hellos).
-    pub agreed: trs_sync_proto::msg::Agreed,
+    pub agreed: seedwell_sync_proto::msg::Agreed,
     /// Where the connection goes.
     pub remote: SocketAddr,
     /// The connection stays on the local network (no Internet limits apply). Never for a relayed one.
@@ -645,7 +758,7 @@ pub struct PeerHandle {
     /// The session ended.
     pub closed: watch::Sender<bool>,
     /// Its key for private messages, from this session (only over a direct one, `crate::direct::direct_ok`).
-    pub direct_key: Mutex<Option<trs_sync_proto::direct::DirectKey>>,
+    pub direct_key: Mutex<Option<seedwell_sync_proto::direct::DirectKey>>,
     /// Its user's name, from its DirectJoin (empty: none given, or an older Seedwell).
     pub user_name: Mutex<String>,
     /// The task sending our index of each folder to the peer: a folder linked again (the peer opened it again)
@@ -654,7 +767,7 @@ pub struct PeerHandle {
     /// Folders this peer sent a chunk of that was not what was asked (bytes that do not hash to the chunk hash its
     /// version's signer signed): it is asked for none of their chunks again in this session.
     pub distrusted: Mutex<BTreeSet<FolderId>>,
-    /// Our [`HoldQuery`](trs_sync_proto::msg::HoldQuery)s waiting for their answer.
+    /// Our [`HoldQuery`](seedwell_sync_proto::msg::HoldQuery)s waiting for their answer.
     holds_pending: Mutex<HashMap<u32, oneshot::Sender<Vec<bool>>>>,
     /// Folders that went out in our Join on this session (at its start, offered since, or answering the peer's
     /// offer). A folder is linked on the session only if it is here and in the peer's ([`Self::got`]).
@@ -671,12 +784,12 @@ pub struct PeerHandle {
     /// that moment nothing of them goes either way on this session, and once open again the session is started anew,
     /// so the peer sends what it sent meanwhile again from what we hold ([`Self::access`] says none).
     pub stale: Mutex<BTreeSet<FolderId>>,
-    /// Our [`RenameRequest`](trs_sync_proto::msg::RenameRequest)s waiting for their answer.
-    renames_pending: Mutex<HashMap<u32, oneshot::Sender<trs_sync_proto::msg::RenameReply>>>,
-    /// Our [`BlobWant`](trs_sync_proto::msg::BlobWant)s waiting for their part.
-    blobs_pending: Mutex<HashMap<u32, oneshot::Sender<trs_sync_proto::msg::BlobData>>>,
-    /// Our [`StreamRequest`](trs_sync_proto::msg::StreamRequest)s waiting for their piece.
-    streams_pending: Mutex<HashMap<u32, oneshot::Sender<trs_sync_proto::msg::StreamData>>>,
+    /// Our [`RenameRequest`](seedwell_sync_proto::msg::RenameRequest)s waiting for their answer.
+    renames_pending: Mutex<HashMap<u32, oneshot::Sender<seedwell_sync_proto::msg::RenameReply>>>,
+    /// Our [`BlobWant`](seedwell_sync_proto::msg::BlobWant)s waiting for their part.
+    blobs_pending: Mutex<HashMap<u32, oneshot::Sender<seedwell_sync_proto::msg::BlobData>>>,
+    /// Our [`StreamRequest`](seedwell_sync_proto::msg::StreamRequest)s waiting for their piece.
+    streams_pending: Mutex<HashMap<u32, oneshot::Sender<seedwell_sync_proto::msg::StreamData>>>,
 }
 
 impl PeerHandle {
@@ -686,7 +799,7 @@ impl PeerHandle {
         device_pk: [u8; 32],
         name: String,
         client: String,
-        agreed: trs_sync_proto::msg::Agreed,
+        agreed: seedwell_sync_proto::msg::Agreed,
         remote: SocketAddr,
         local: SocketAddr,
         exporter: [u8; 32],
@@ -736,14 +849,14 @@ impl PeerHandle {
         (h, crx, drx)
     }
 
-    /// Both sides have the feature bit `bit` ([`trs_sync_proto::msg::FEATURES`]).
+    /// Both sides have the feature bit `bit` ([`seedwell_sync_proto::msg::FEATURES`]).
     pub fn has(&self, bit: u64) -> bool {
         self.agreed.features & bit != 0
     }
 
-    /// The session carries channels (both sides have [`trs_sync_proto::msg::FEATURE_CHAT`]).
+    /// The session carries channels (both sides have [`seedwell_sync_proto::msg::FEATURE_CHAT`]).
     pub fn chat(&self) -> bool {
-        self.agreed.features & trs_sync_proto::msg::FEATURE_CHAT != 0
+        self.agreed.features & seedwell_sync_proto::msg::FEATURE_CHAT != 0
     }
 
     /// The access the peer proved in `folder` (or channel), if it shares it with us over this session (none once the
@@ -799,7 +912,7 @@ impl PeerHandle {
         if held {
             let waiting: Vec<_> = lock(&self.pending).drain().collect();
             for (id, tx) in waiting {
-                let _ = tx.send(Response { id, code: trs_sync_proto::msg::ResponseCode::Busy, data: vec![] });
+                let _ = tx.send(Response { id, code: seedwell_sync_proto::msg::ResponseCode::Busy, data: vec![] });
             }
             // A piece of a stream is given up the same way (its sender dropped): asked again later, the maker serves it
             // once more, and the stream goes on from there.
@@ -816,7 +929,7 @@ impl PeerHandle {
 
     /// Asks for a piece of an unhashed file (SPEC §7G.11; its id set here); the piece arrives on the returned receiver
     /// (dropped if the session ends). `None` while the session does not read (as [`Self::request`]).
-    pub async fn stream(&self, mut req: trs_sync_proto::msg::StreamRequest) -> Option<(u32, oneshot::Receiver<trs_sync_proto::msg::StreamData>)> {
+    pub async fn stream(&self, mut req: seedwell_sync_proto::msg::StreamRequest) -> Option<(u32, oneshot::Receiver<seedwell_sync_proto::msg::StreamData>)> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         req.id = id;
         let (tx, rx) = oneshot::channel();
@@ -834,7 +947,7 @@ impl PeerHandle {
     }
 
     /// A piece of an unhashed file we asked for arrived.
-    pub fn answer_stream(&self, d: trs_sync_proto::msg::StreamData) {
+    pub fn answer_stream(&self, d: seedwell_sync_proto::msg::StreamData) {
         self.rx_bytes.fetch_add(d.data.len() as u64, Ordering::Relaxed);
         if let Some(tx) = lock(&self.streams_pending).remove(&d.id) {
             let _ = tx.send(d);
@@ -843,11 +956,11 @@ impl PeerHandle {
 
     /// Asks whether the peer holds these versions now (SPEC §7G.11); the answer, one flag per file, arrives on the
     /// returned receiver (dropped if the session ends; a peer that does not know the question never answers).
-    pub async fn ask_holds(&self, folder_id: FolderId, files: Vec<trs_sync_proto::msg::HeldFile>) -> Option<(u32, oneshot::Receiver<Vec<bool>>)> {
+    pub async fn ask_holds(&self, folder_id: FolderId, files: Vec<seedwell_sync_proto::msg::HeldFile>) -> Option<(u32, oneshot::Receiver<Vec<bool>>)> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         lock(&self.holds_pending).insert(id, tx);
-        let q = trs_sync_proto::msg::HoldQuery { id, folder_id, files };
+        let q = seedwell_sync_proto::msg::HoldQuery { id, folder_id, files };
         if self.control.send(Message::HoldQuery(q)).await.is_err() {
             lock(&self.holds_pending).remove(&id);
             return None;
@@ -865,9 +978,9 @@ impl PeerHandle {
         lock(&self.holds_pending).len()
     }
 
-    /// Asks the peer for part of an image of a channel ([`trs_sync_proto::msg::BlobWant`], its id set here): the
+    /// Asks the peer for part of an image of a channel ([`seedwell_sync_proto::msg::BlobWant`], its id set here): the
     /// request's id, and the receiver its part arrives on (dropped when the session ends).
-    pub async fn ask_blob(&self, mut want: trs_sync_proto::msg::BlobWant) -> Option<(u32, oneshot::Receiver<trs_sync_proto::msg::BlobData>)> {
+    pub async fn ask_blob(&self, mut want: seedwell_sync_proto::msg::BlobWant) -> Option<(u32, oneshot::Receiver<seedwell_sync_proto::msg::BlobData>)> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         want.id = id;
         let (tx, rx) = oneshot::channel();
@@ -885,7 +998,7 @@ impl PeerHandle {
     }
 
     /// A part of an image we asked for arrived.
-    pub fn answer_blob(&self, d: trs_sync_proto::msg::BlobData) {
+    pub fn answer_blob(&self, d: seedwell_sync_proto::msg::BlobData) {
         self.rx_bytes.fetch_add(d.data.len() as u64, Ordering::Relaxed);
         if let Some(tx) = lock(&self.blobs_pending).remove(&d.id) {
             let _ = tx.send(d);
@@ -893,13 +1006,13 @@ impl PeerHandle {
     }
 
     /// The answer to one of our hold queries arrived.
-    pub fn answer_holds(&self, reply: trs_sync_proto::msg::HoldReply) {
+    pub fn answer_holds(&self, reply: seedwell_sync_proto::msg::HoldReply) {
         if let Some(tx) = lock(&self.holds_pending).remove(&reply.id) {
             let _ = tx.send(reply.held);
         }
     }
 
-    /// Asks the peer to rename `from` to `to` in a folder ([`trs_sync_proto::msg::RenameRequest`]); the answer arrives
+    /// Asks the peer to rename `from` to `to` in a folder ([`seedwell_sync_proto::msg::RenameRequest`]); the answer arrives
     /// on the receiver (dropped when the session ends). With its id, to [`Self::forget_rename`] it.
     pub async fn ask_rename(
         &self,
@@ -908,11 +1021,11 @@ impl PeerHandle {
         to: String,
         seen: [u8; 32],
         ttl_ms: u32,
-    ) -> Option<(u32, oneshot::Receiver<trs_sync_proto::msg::RenameReply>)> {
+    ) -> Option<(u32, oneshot::Receiver<seedwell_sync_proto::msg::RenameReply>)> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         lock(&self.renames_pending).insert(id, tx);
-        let q = trs_sync_proto::msg::RenameRequest { id, folder_id, from, to, seen, ttl_ms };
+        let q = seedwell_sync_proto::msg::RenameRequest { id, folder_id, from, to, seen, ttl_ms };
         if self.control.send(Message::RenameRequest(q)).await.is_err() {
             lock(&self.renames_pending).remove(&id);
             return None;
@@ -926,7 +1039,7 @@ impl PeerHandle {
     }
 
     /// The answer to one of our rename requests arrived.
-    pub fn answer_rename(&self, reply: trs_sync_proto::msg::RenameReply) {
+    pub fn answer_rename(&self, reply: seedwell_sync_proto::msg::RenameReply) {
         if let Some(tx) = lock(&self.renames_pending).remove(&reply.id) {
             let _ = tx.send(reply);
         }
@@ -944,6 +1057,9 @@ impl PeerHandle {
         lock(&self.pending).clear();
         lock(&self.holds_pending).clear();
         lock(&self.renames_pending).clear();
+        // A file's pieces too: a download waiting for one held its channel (and the session) for the piece's 30 s
+        // after the service stopped, and wrote its record over the one of the service started again on the same state.
+        lock(&self.blobs_pending).clear();
         self.closed.send_replace(true);
     }
 
@@ -1138,7 +1254,7 @@ pub enum HubMsg {
         device: DeviceId,
     },
     /// Signed address records a peer passed on (peer exchange).
-    Addresses(Vec<trs_sync_proto::msg::AddressRecord>),
+    Addresses(Vec<seedwell_sync_proto::msg::AddressRecord>),
     /// A rendezvous or relay message from a peer.
     Relay(DeviceId, Box<Message>),
     /// The private conversations changed (one started, its device's name or address changed): `sync.toml` gets them.
@@ -1148,7 +1264,7 @@ pub enum HubMsg {
 /// Everything a session needs from the service.
 pub struct Ctx {
     /// This device's key.
-    pub key: Arc<trs_sync_proto::device::DeviceKey>,
+    pub key: Arc<seedwell_sync_proto::device::DeviceKey>,
     /// This device's id.
     pub me: DeviceId,
     /// `Seedwell <version>`, sent in Hello.
@@ -1271,7 +1387,7 @@ impl Ctx {
     /// keeps no stale folders and no session reconciling, links a folder on any Join for it it has not linked,
     /// answers one only if it did not name it itself before, and offers a folder it opened again on the same session.
     pub fn plays_0_1_11(&self) -> bool {
-        self.features & trs_sync_proto::msg::FEATURE_HOLDS == 0
+        self.features & seedwell_sync_proto::msg::FEATURE_HOLDS == 0
     }
 }
 
@@ -1314,6 +1430,23 @@ impl Drop for Freeing {
 mod tests {
     use super::*;
 
+    /// The failure: a session closed (the service stopped, the device went away) while a download waited for a
+    /// file's piece left that wait standing until the piece's time ran out (30 s): the download held its channel past
+    /// the service's stop (`a folder or channel was still in use 10 s after the service stopped`) and, under load, a
+    /// service started again on the same state never finished the download (2026-11-07, `a_download_resumes_after_a_
+    /// restart_from_the_pieces_it_has`). Closing ends every wait at once.
+    #[tokio::test]
+    async fn closing_a_session_ends_its_waits_for_a_files_pieces() {
+        let addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let agreed = seedwell_sync_proto::msg::Agreed { protocol: seedwell_sync_proto::msg::PROTOCOL, features: 0 };
+        let (peer, _crx, _drx) = PeerHandle::new([7; 32], "X".into(), "Seedwell".into(), agreed, addr, addr, [0; 32], true, crate::session::Via::Tcp);
+        let want = seedwell_sync_proto::msg::BlobWant { id: 0, scope: seedwell_sync_proto::msg::BlobScope::Direct, hash: [1; 32], offset: 0, len: 10 };
+        let (_, rx) = peer.ask_blob(want).await.expect("asked");
+        peer.close();
+        let waited = tokio::time::timeout(std::time::Duration::from_secs(2), rx).await;
+        assert!(matches!(waited, Ok(Err(_))), "the wait ends with the session, not with the piece's time: {waited:?}");
+    }
+
     /// The failure: a session closed after it was registered and before its read loop watched the flag (the
     /// service's stop met it coming up) was never closed: the flag's send found no receiver and dropped the value,
     /// so the read loop waited for ever, held the session's folders, and their indexes stayed open after the stop
@@ -1321,7 +1454,7 @@ mod tests {
     #[tokio::test]
     async fn a_session_closed_before_its_read_loop_watches_is_closed() {
         let addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
-        let agreed = trs_sync_proto::msg::Agreed { protocol: trs_sync_proto::msg::PROTOCOL, features: 0 };
+        let agreed = seedwell_sync_proto::msg::Agreed { protocol: seedwell_sync_proto::msg::PROTOCOL, features: 0 };
         let (peer, _crx, _drx) = PeerHandle::new([7; 32], "X".into(), "Seedwell".into(), agreed, addr, addr, [0; 32], true, crate::session::Via::Tcp);
         let reg = Registry::default();
         assert!(reg.add_peer(&DeviceId([1; 32]), peer.clone()));
@@ -1351,18 +1484,18 @@ mod tests {
         live.issues.push(("docs/old".into(), "could not be read: busy".into()));
         live.set_kept("docs/old", "docs/old/~keep.tmp");
         live.set_kept("docs/old", "docs/old/~keep.tmp");
-        let kept = trs_sync::pull::kept_words("docs/old/~keep.tmp");
+        let kept = seedwell_sync::pull::kept_words("docs/old/~keep.tmp");
         assert_eq!(live.issues.iter().filter(|(_, w)| *w == kept).count(), 1);
         live.drop_kept("docs/old");
         assert_eq!(live.issues, [("docs/old".to_string(), "could not be read: busy".to_string())]);
         assert!(live.kept.is_empty());
     }
 
-    fn chunk_job(path: &str) -> trs_sync::lazy::Job {
-        trs_sync::lazy::Job::Chunks(Box::new(trs_sync::lazy::ChunkJob {
+    fn chunk_job(path: &str) -> seedwell_sync::lazy::Job {
+        seedwell_sync::lazy::Job::Chunks(Box::new(seedwell_sync::lazy::ChunkJob {
             path: path.into(),
-            tmp: trs_sync::pull::temp_path(path),
-            version: trs_sync_proto::model::Version::new(),
+            tmp: seedwell_sync::pull::temp_path(path),
+            version: seedwell_sync_proto::model::Version::new(),
             chunks: Vec::new(),
             old: None,
             known: None,

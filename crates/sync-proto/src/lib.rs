@@ -1,4 +1,4 @@
-//! trs-sync-proto: Seedwell Sync (protocol 2), everything two devices must agree on (SPEC §7G).
+//! seedwell-sync-proto: Seedwell Sync (protocol 2), everything two devices must agree on (SPEC §7G).
 //!
 //! * [`model`]: version vectors and the file model (Syncthing's rules).
 //! * [`ids`]: device and folder identities and their checked text form.

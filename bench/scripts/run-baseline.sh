@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # The full baseline campaign, in the order used for bench/reports/<date>-baseline.md.
 # Usage: bench/scripts/run-baseline.sh [campaign-id]     (about 3-4 hours; strictly sequential)
-# TorrentRS is included when TRS_BENCH_BIN points at an executable (see bench/README.md).
+# Seedwell is included when SEEDWELL_BENCH_BIN points at an executable (see bench/README.md).
 set -u
 cd "$(dirname "$0")/../.."
 C="${1:-$(date +%Y-%m-%d)}"
 CLIENTS="transmission,qbittorrent"
-[ -n "${TRS_BENCH_BIN:-}" ] && [ -x "$TRS_BENCH_BIN" ] && CLIENTS="$CLIENTS,torrentrs"
+[ -n "${SEEDWELL_BENCH_BIN:-}" ] && [ -x "$SEEDWELL_BENCH_BIN" ] && CLIENTS="$CLIENTS,seedwell"
 B="python3 -I bench/scripts/bench.py"
 $B fetch-torrents
 $B netcheck --campaign "$C"

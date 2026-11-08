@@ -2,15 +2,15 @@
 
 use proptest::collection::vec;
 use proptest::prelude::*;
-use trs_sync_proto::chat::{AuthorHave, ChatMessage, MessageKind};
-use trs_sync_proto::direct::{DirectKey, DirectMessage};
-use trs_sync_proto::codec::Frame;
-use trs_sync_proto::ids::{DeviceId, FolderId, ShortId};
-use trs_sync_proto::keys::Proof;
-use trs_sync_proto::model::{ChunkRef, Counter, FileInfo, FileKind, IndexEntry, MAX_CHUNK, SignedFile, Version};
-use trs_sync_proto::msg::*;
-use trs_sync_proto::keys::FolderSecret;
-use trs_sync_proto::members::{Body, Role, Statement};
+use seedwell_sync_proto::chat::{AuthorHave, ChatMessage, MessageKind};
+use seedwell_sync_proto::direct::{DirectKey, DirectMessage};
+use seedwell_sync_proto::codec::Frame;
+use seedwell_sync_proto::ids::{DeviceId, FolderId, ShortId};
+use seedwell_sync_proto::keys::Proof;
+use seedwell_sync_proto::model::{ChunkRef, Counter, FileInfo, FileKind, IndexEntry, MAX_CHUNK, SignedFile, Version};
+use seedwell_sync_proto::msg::*;
+use seedwell_sync_proto::keys::FolderSecret;
+use seedwell_sync_proto::members::{Body, Role, Statement};
 
 fn cases() -> u32 {
     std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(256)

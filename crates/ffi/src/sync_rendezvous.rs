@@ -2,15 +2,15 @@
 //! user's own Cloudflare account, set up from the app with an API token (no Node, no wrangler), or from an address the
 //! user already has. Every text is here; the host draws the view and passes the user's input back.
 //!
-//! The token goes from the text field to [`trs_rendezvous::cloudflare::deploy`] and nowhere else: never stored, never
+//! The token goes from the text field to [`seedwell_rendezvous::cloudflare::deploy`] and nowhere else: never stored, never
 //! logged, dropped (and wiped) when the setup ends; an update of the Worker asks for one again. Agents read the
 //! status (`seedwell sync settings`); setting up is the user's, here only.
 
 use std::sync::{Arc, Mutex};
 
-use trs_rendezvous::client::Rendezvous;
-use trs_rendezvous::cloudflare::{Api, Stage, TOKEN_PAGE, deploy};
-use trs_sync_net::{RendezvousStatus, SyncHandle};
+use seedwell_rendezvous::client::Rendezvous;
+use seedwell_rendezvous::cloudflare::{Api, Stage, TOKEN_PAGE, deploy};
+use seedwell_sync_net::{RendezvousStatus, SyncHandle};
 
 use crate::Core;
 use crate::types::CoreError;
@@ -182,7 +182,7 @@ pub fn start(rt: &tokio::runtime::Handle, h: SyncHandle, jobs: &Jobs, task: Task
                 return Err(CoreError::Failed { message: "Paste the API token first.".into() });
             }
             Task::Use(u) => {
-                trs_rendezvous::client::normalize_url(u).map_err(|e| CoreError::Failed { message: e.to_string() })?;
+                seedwell_rendezvous::client::normalize_url(u).map_err(|e| CoreError::Failed { message: e.to_string() })?;
                 "Testing the address\u{2026}"
             }
             Task::SetUp(_) => stage_text(Stage::Token),
@@ -213,7 +213,7 @@ async fn run(h: &SyncHandle, jobs: &Jobs, task: Task) -> Result<String, String> 
             let account = if d.account.is_empty() { String::new() } else { format!(" on {}", d.account) };
             Ok(format!(
                 "Set up{account}. This {} keeps its address there now. On your other devices, paste the address below (Copy) or set up with a new token.",
-                trs_platform::computer!()
+                seedwell_platform::computer!()
             ))
         }
         Task::Use(url) => {

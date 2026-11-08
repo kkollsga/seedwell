@@ -4,12 +4,12 @@ use crate::common;
 use std::time::Duration;
 
 use common::*;
-use trs_engine::config::DetectionConfig;
-use trs_engine::persist::Store;
-use trs_engine::*;
-use trs_state::duration::Secs;
-use trs_state::rules::{DefaultRule, Rule, SeedingGoal};
-use trs_state::{RuleSet, TrackerProfiles};
+use seedwell_engine::config::DetectionConfig;
+use seedwell_engine::persist::Store;
+use seedwell_engine::*;
+use seedwell_state::duration::Secs;
+use seedwell_state::rules::{DefaultRule, Rule, SeedingGoal};
+use seedwell_state::{RuleSet, TrackerProfiles};
 
 const MOVIE: &str = "Night.of.the.Living.Dead.1968.1080p.BluRay.x264-GRP.mkv";
 
@@ -79,7 +79,7 @@ async fn the_clean_title_is_computed_once_persisted_and_follows_the_category() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn torrents_stored_before_titles_existed_get_theirs_once() {
-    use trs_engine::persist::Batch;
+    use seedwell_engine::persist::Batch;
     let state = tempfile::tempdir().unwrap();
     let dl = tempfile::tempdir().unwrap();
     let t = movie_torrent("Sintel.2010.1080p.BluRay.x264-GRP.mkv", 16);
@@ -292,7 +292,7 @@ async fn goal_words_and_the_rule_summary_come_from_the_engine() {
     let t = movie_torrent(MOVIE, 14);
     let n = snode(state.path(), dl.path(), Some(ratio_policy()), |c| {
         detecting(c);
-        c.smart_add.mode = trs_engine::config::AskMode::Always;
+        c.smart_add.mode = seedwell_engine::config::AskMode::Always;
     })
     .await;
     n.h.add_torrent_file(t.bytes.clone(), AddOptions::default())

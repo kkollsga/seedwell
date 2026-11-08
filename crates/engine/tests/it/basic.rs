@@ -1,6 +1,6 @@
 use crate::common;
 use common::*;
-use trs_engine::*;
+use seedwell_engine::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn seeder_and_one_leecher_over_tcp() {

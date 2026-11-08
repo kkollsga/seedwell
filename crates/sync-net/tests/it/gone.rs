@@ -5,9 +5,9 @@
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use trs_sync_net::status::FolderStatus;
-use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::members::Role;
+use seedwell_sync_net::status::FolderStatus;
+use seedwell_sync_proto::ids::FolderId;
+use seedwell_sync_proto::members::Role;
 
 use crate::utp::{Device, addr, device_with, read, until};
 
@@ -124,7 +124,7 @@ async fn a_member_whose_owner_is_gone_shares_the_folder_again_with_its_files_unt
     assert!(b.h.members(&id).is_err());
     let members = b.h.members(&new).unwrap();
     assert_eq!(members.len(), 1, "only Bo: the old folder's devices stay with it");
-    until(30, "the new folder has read its files in", || folder(&b, &new).is_some_and(|f| f.state == trs_sync_net::status::FolderState::UpToDate && f.files == 3)).await;
+    until(30, "the new folder has read its files in", || folder(&b, &new).is_some_and(|f| f.state == seedwell_sync_net::status::FolderState::UpToDate && f.files == 3)).await;
     let f = folder(&b, &new).unwrap();
     assert_eq!((f.waiting, f.reshare, f.need_files), (None, false, 0), "nobody else in it yet, nothing to fetch");
     assert!(f.on_demand_others && !f.on_demand, "the mark came along, nothing moved");

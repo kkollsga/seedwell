@@ -5,7 +5,7 @@ use crate::common;
 use std::time::Duration;
 
 use common::*;
-use trs_engine::*;
+use seedwell_engine::*;
 
 fn magnet(id: &[u8], trackers: &[String]) -> String {
     let mut m = format!("magnet:?xt=urn:btih:{}", hex_of(id));

@@ -170,7 +170,7 @@ pub fn list(rows: &[TransferDto], p: &ListParams) -> ListDto {
 pub fn sanitize_transfer(t: &mut TransferDto) {
     t.name = clean_name(&t.name);
     if let Some(u) = &t.url {
-        t.url = Some(trs_state::url::redact_url(u));
+        t.url = Some(seedwell_state::url::redact_url(u));
     }
     if let Some(e) = &t.error {
         t.error = Some(clip(&scrub_urls(e), 500));
@@ -256,7 +256,7 @@ pub fn clean_path(raw: &str, what: &str) -> Result<PathBuf, ApiError> {
         return Err(ApiError::params(format!("`{what}` is empty, too long or has control characters")));
     }
     let p = if raw == "~" || raw.starts_with("~/") {
-        let home = trs_platform::dirs::home().ok_or_else(|| ApiError::invalid("cannot expand `~`: HOME is not set"))?;
+        let home = seedwell_platform::dirs::home().ok_or_else(|| ApiError::invalid("cannot expand `~`: HOME is not set"))?;
         home.join(raw.trim_start_matches('~').trim_start_matches('/'))
     } else {
         PathBuf::from(raw)
@@ -271,20 +271,20 @@ pub fn clean_path(raw: &str, what: &str) -> Result<PathBuf, ApiError> {
 }
 
 /// True for folders where a downloaded file could act as code or configuration: a disk's root, the
-/// system's folders and the user's settings folder (`trs_platform::dirs::sensitive_dirs`), the
+/// system's folders and the user's settings folder (`seedwell_platform::dirs::sensitive_dirs`), the
 /// home folder itself, and hidden folders in it (`~/.ssh`, `~/.config`). The temporary folder
 /// stays allowed (on Windows it is inside `AppData`).
 pub fn is_sensitive_dir(p: &Path) -> bool {
     if p.parent().is_none() {
         return true;
     }
-    if trs_platform::dirs::in_temp_folder(p) {
+    if seedwell_platform::dirs::in_temp_folder(p) {
         return false;
     }
-    if trs_platform::dirs::sensitive_dirs().iter().any(|d| p.starts_with(d)) {
+    if seedwell_platform::dirs::sensitive_dirs().iter().any(|d| p.starts_with(d)) {
         return true;
     }
-    let Some(home) = trs_platform::dirs::home() else { return false };
+    let Some(home) = seedwell_platform::dirs::home() else { return false };
     let Ok(rel) = p.strip_prefix(&home) else { return false };
     rel.as_os_str().is_empty() || rel.components().any(|c| matches!(c, std::path::Component::Normal(n) if n.to_string_lossy().starts_with('.')))
 }
@@ -342,11 +342,11 @@ pub fn pick_source(p: &AddParams) -> Result<SourceKind, ApiError> {
 
 /// Validate a category name; returns the canonical one.
 pub fn parse_category(c: &str) -> Result<String, ApiError> {
-    trs_classify::Category::parse(c).map(|c| c.as_str().to_owned()).ok_or_else(|| {
+    seedwell_classify::Category::parse(c).map(|c| c.as_str().to_owned()).ok_or_else(|| {
         ApiError::params(format!(
             "unknown category `{}` (one of: {})",
             clip(c, 32),
-            trs_classify::Category::ALL.map(|c| c.as_str()).join(", ")
+            seedwell_classify::Category::ALL.map(|c| c.as_str()).join(", ")
         ))
     })
 }
@@ -423,10 +423,10 @@ mod tests {
         assert!(!is_sensitive_dir(&tmp.path().join(".hidden")), "the temporary folder is allowed, even inside the home folder");
         let root = tmp.path().ancestors().last().unwrap();
         assert!(is_sensitive_dir(root), "{}", root.display());
-        for d in trs_platform::dirs::sensitive_dirs() {
+        for d in seedwell_platform::dirs::sensitive_dirs() {
             assert!(is_sensitive_dir(&d.join("x")), "{}", d.display());
         }
-        if let Some(home) = trs_platform::dirs::home() {
+        if let Some(home) = seedwell_platform::dirs::home() {
             assert!(is_sensitive_dir(&home));
             assert!(is_sensitive_dir(&home.join(".ssh")));
             assert!(!is_sensitive_dir(&home.join("Downloads")));

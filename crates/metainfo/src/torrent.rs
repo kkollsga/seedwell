@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::Range;
 
-use trs_bencode::{DecodeLimits, Value, decode_with_limits, raw_dict_get};
+use seedwell_bencode::{DecodeLimits, Value, decode_with_limits, raw_dict_get};
 
 use crate::error::Error;
 use crate::hash::InfoHash;

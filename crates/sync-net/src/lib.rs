@@ -1,10 +1,11 @@
-//! trs-sync-net: the folder-sync driver (SPEC §7G).
+//! seedwell-sync-net: the folder-sync driver (SPEC §7G).
 //!
 //! * [`service`]: [`service::SyncHandle`], the service and its API (folders, keys, settings, snapshot).
 //! * [`peer`] and [`session`]: one connection: the magic, TLS ([`tls`]), Hello, the folder proofs, then
 //!   membership, index updates and chunk requests ([`framed`] carries the messages).
 //! * [`roles`]: a folder's or channel's membership on this device: kept, proved, applied when it changes.
 //! * [`chat`]: channels: their messages, kept and passed on, and the wake-up command for agents.
+//! * [`chat_groups`]: this device's sidebar groups of channels (a name and an icon), never sent anywhere.
 //! * [`room`]: where attachments belong (a channel, a private conversation); [`attachments`]: sending them and what
 //!   they are for callers.
 //! * [`blobs`]: the images chat messages name: sealed at rest, fetched from members by hash.
@@ -19,7 +20,7 @@
 //! * [`rendezvous`]: the user's own address book on Cloudflare: this device's sealed record, and lookups.
 //! * [`config`], [`secrets`]: `sync.toml`, and where keys are kept; `at_rest`: messages encrypted on disk.
 //! * [`placed`]: on-demand content kept in the host's placeholders (Windows' Cloud Files), stored once.
-//! * [`status`]: what the UI sees.
+//! * [`status`]: what the UI sees; [`eta`]: a syncing folder's time left.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -30,10 +31,12 @@ pub mod blobs;
 pub mod files;
 pub mod room;
 pub mod chat;
+pub mod chat_groups;
 pub mod config;
 pub mod devices;
 pub mod describe;
 pub mod direct;
+pub mod eta;
 pub mod framed;
 pub mod inbound;
 mod joining;

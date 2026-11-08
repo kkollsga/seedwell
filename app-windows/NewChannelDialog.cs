@@ -1,13 +1,13 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
 /// <summary>
 /// New Channel / Join with a Link on Windows (the Mac's New Channel window), a dialog over the library window drawn from
-/// the core's <c>ChatNewWindowModel</c> (trs-ffi chat_dialogs.rs): its two sides; on New the name with its note, Agents
+/// the core's <c>ChatNewWindowModel</c> (seedwell-ffi chat_dialogs.rs): its two sides; on New the name with its note, Agents
 /// Yes/No with what the choice means and "On all my devices" while it is shown; on Join the link with the line the core
 /// reads from it. The form is the core's value: this keeps it, edits the mode, name, agents and devices choice itself
 /// and the link through <c>chat_new_set_link</c>, and draws the model again after each change. Start runs
@@ -32,7 +32,7 @@ sealed class NewChannelDialog
     {
         this.app = app;
         this.form = form;
-        model = TrsFfiMethods.ChatNewWindow(form);
+        model = SeedwellFfiMethods.ChatNewWindow(form);
         name.Text = form.Name;
         link.Text = form.Link;
         name.TextChanged += (_, _) => { if (this.form.Name != name.Text) Change(this.form with { Name = name.Text }); };
@@ -72,7 +72,7 @@ sealed class NewChannelDialog
             {
                 var clip = Windows.ApplicationModel.DataTransfer.Clipboard.GetContent();
                 if (clip.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.Text) && await clip.GetTextAsync() is string text
-                    && TrsFfiMethods.ChatLooksLikeLink(text))
+                    && SeedwellFfiMethods.ChatLooksLikeLink(text))
                 {
                     prefill = text;
                 }
@@ -100,9 +100,11 @@ sealed class NewChannelDialog
         Draw();
     }
 
-    void Draw()
+    void Draw() => FocusKeeper.Redraw(content, dialog.XamlRoot, DrawAnew);
+
+    void DrawAnew()
     {
-        model = TrsFfiMethods.ChatNewWindow(form);
+        model = SeedwellFfiMethods.ChatNewWindow(form);
         var title = new StackPanel();
         title.Children.Add(new TextBlock { Text = model.Caption, FontSize = 12, Opacity = 0.7 });
         title.Children.Add(new TextBlock { Text = model.Title });
@@ -201,7 +203,7 @@ sealed class NewChannelDialog
     /// <summary>The Start button's help as its tooltip, once the dialog's buttons exist.</summary>
     void TipsOnOpen(ContentDialog sender, ContentDialogOpenedEventArgs args)
     {
-        foreach (var b in RowCommands.Descendants(dialog.XamlRoot).OfType<Button>())
+        foreach (var b in RowCommands.DialogButtons(dialog))
         {
             if (Equals(b.Content, model.ConfirmTitle)) ToolTipService.SetToolTip(b, model.ConfirmHelp);
         }
@@ -227,7 +229,7 @@ sealed class NewChannelDialog
         }
         catch (CoreException e)
         {
-            error = TrsFfiMethods.CoreErrorMessage(e);
+            error = SeedwellFfiMethods.CoreErrorMessage(e);
         }
         starting = false;
         if (channel is null)
@@ -255,6 +257,22 @@ sealed class NewChannelDialog
 
     /// <summary>QA: what the clicks and typing would do (typing's TextChanged comes later: the form changes at once).</summary>
     internal void QaMode(ChatNewMode mode) => Change(form with { Mode = mode });
+    /// <summary>QA: typing a name, the caret at <paramref name="caret"/>: each key's TextChanged redraws the dialog.</summary>
+    internal void QaTypeName(string text, int caret)
+    {
+        name.Focus(FocusState.Keyboard);
+        name.Text = text;
+        name.Select(caret, 0);
+    }
+    internal string QaFocused => FocusKeeper.Describe(content, dialog.XamlRoot);
+    internal Task<string> QaWalk() => FocusKeeper.QaWalk(content, dialog.XamlRoot, Draw);
+    /// <summary>QA: typing a link, the caret at <paramref name="caret"/>.</summary>
+    internal void QaTypeLink(string text, int caret)
+    {
+        link.Focus(FocusState.Keyboard);
+        link.Text = text;
+        link.Select(caret, 0);
+    }
     internal void QaName(string text)
     {
         Change(form with { Name = text });

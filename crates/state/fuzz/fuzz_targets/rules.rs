@@ -1,8 +1,8 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use trs_classify::Category;
-use trs_state::rules::TorrentAttrs;
-use trs_state::{Document, RuleSet};
+use seedwell_classify::Category;
+use seedwell_state::rules::TorrentAttrs;
+use seedwell_state::{Document, RuleSet};
 
 // Input: rules.toml text, then a NUL and a few attribute bytes. Resolution must be total.
 fuzz_target!(|data: &[u8]| {
@@ -26,6 +26,6 @@ fuzz_target!(|data: &[u8]| {
         };
         let r1 = p.value.resolve(&a);
         assert_eq!(r1, p.value.resolve(&a));
-        let _ = r1.goal_reached(f64::from(b(6)) / 10.0, trs_state::duration::Secs(u64::from(b(7)) * 3600));
+        let _ = r1.goal_reached(f64::from(b(6)) / 10.0, seedwell_state::duration::Secs(u64::from(b(7)) * 3600));
     }
 });

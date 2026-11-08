@@ -178,7 +178,9 @@ import os
 
     /// The pasteboard's text when it holds a folder link (the add modal starts with it).
     func pastedKey() -> String? {
-        guard let s = NSPasteboard.general.string(forType: .string), syncLooksLikeLink(text: s) else { return nil }
+        // A QA run reads a pasteboard of its own, never the user's.
+        let board = QuietRun.on ? NSPasteboard(name: NSPasteboard.Name("seedwell-qa-sync")) : .general
+        guard let s = board.string(forType: .string), syncLooksLikeLink(text: s) else { return nil }
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

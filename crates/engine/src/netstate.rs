@@ -1,5 +1,5 @@
 //! What the rest of the engine may ask about connectivity without a message round trip
-//! (SPEC 7C.4c). The tracker driver owns the decision (`trs_tracker::outage`); it publishes it
+//! (SPEC 7C.4c). The tracker driver owns the decision (`seedwell_tracker::outage`); it publishes it
 //! here, and the hot paths (a peer handshake, an accepted connection, a DHT datagram, a dial)
 //! only touch relaxed atomics.
 

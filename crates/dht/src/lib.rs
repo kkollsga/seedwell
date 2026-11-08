@@ -1,4 +1,4 @@
-//! trs-dht: Mainline DHT (BEP 5) with BEP 42 secure ids and BEP 43 read-only mode.
+//! seedwell-dht: Mainline DHT (BEP 5) with BEP 42 secure ids and BEP 43 read-only mode.
 //!
 //! * [`DhtCore`] is a sans-I/O state machine: `handle(input, now) -> Vec<Intent>`.
 //! * [`spawn`] wraps it in a tokio UDP driver with a small async handle ([`DhtHandle`]).

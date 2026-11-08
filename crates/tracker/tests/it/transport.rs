@@ -7,15 +7,15 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
-use trs_tracker::gate::{GateConfig, GatedRequest, HostGate};
-use trs_tracker::http::{HttpConfig, HttpTransport};
-use trs_tracker::machine::SendKind;
-use trs_tracker::policy::DestinationPolicy;
-use trs_tracker::response::{AnnounceError, TransportError};
-use trs_tracker::udp::{UdpConfig, UdpTransport};
-use trs_tracker::*;
+use seedwell_tracker::gate::{GateConfig, GatedRequest, HostGate};
+use seedwell_tracker::http::{HttpConfig, HttpTransport};
+use seedwell_tracker::machine::SendKind;
+use seedwell_tracker::policy::DestinationPolicy;
+use seedwell_tracker::response::{AnnounceError, TransportError};
+use seedwell_tracker::udp::{UdpConfig, UdpTransport};
+use seedwell_tracker::*;
 
-/// A loopback port that refuses connections, and nothing else can listen at (as `trs_platform::net::closed_tcp_port`,
+/// A loopback port that refuses connections, and nothing else can listen at (as `seedwell_platform::net::closed_tcp_port`,
 /// which this crate does not depend on). A port bound to port 0 and let go is in the system's range for ports it hands
 /// out (from 32768 on Linux, 49152 on macOS and Windows), so another test of a whole-suite run can be given it and
 /// listen there; this one is below those ranges, and checked: it binds, and a connection to it is refused (`std` binds
@@ -517,9 +517,18 @@ struct UdpTracker {
 }
 
 /// BEP 15 mock: `drop_first_connects` ignores that many connect requests;
-/// `error_on_announce_with_old_conn` answers announces whose connection id is
-/// not the latest with the "connection id mismatch" error.
+/// `spoof_first` sends a fake connect reply from another port before each real
+/// one. Announces whose connection id is not the latest are answered with the
+/// "connection id mismatch" error. A retransmitted connect (the same client and
+/// transaction id) gets the id its first copy got: BEP 15 keeps an id valid for
+/// two minutes, so the answer to the first copy stays good.
 async fn udp_tracker(drop_first_connects: usize, spoof_first: bool) -> UdpTracker {
+    udp_tracker_slow(drop_first_connects, spoof_first, Duration::ZERO).await
+}
+
+/// [`udp_tracker`], answering each connect only after `connect_delay` (a busy
+/// tracker, or a loaded machine).
+async fn udp_tracker_slow(drop_first_connects: usize, spoof_first: bool, connect_delay: Duration) -> UdpTracker {
     let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = sock.local_addr().unwrap();
     let packets = Arc::new(Mutex::new(Vec::new()));
@@ -529,6 +538,7 @@ async fn udp_tracker(drop_first_connects: usize, spoof_first: bool) -> UdpTracke
         let mut dropped = 0;
         let mut conn_counter = 0x1000_0000_0000u64;
         let mut valid: Vec<u64> = Vec::new();
+        let mut last_connect: Option<(SocketAddr, [u8; 4], u64)> = None;
         loop {
             let Ok((n, from)) = sock.recv_from(&mut buf).await else {
                 return;
@@ -543,12 +553,21 @@ async fn udp_tracker(drop_first_connects: usize, spoof_first: bool) -> UdpTracke
                         dropped += 1;
                         continue;
                     }
-                    conn_counter += 1;
-                    valid.clear();
-                    valid.push(conn_counter);
+                    tokio::time::sleep(connect_delay).await;
+                    let tid4: [u8; 4] = tid.try_into().unwrap();
+                    let conn = match last_connect {
+                        Some((a, t, c)) if a == from && t == tid4 => c,
+                        _ => {
+                            conn_counter += 1;
+                            valid.clear();
+                            valid.push(conn_counter);
+                            last_connect = Some((from, tid4, conn_counter));
+                            conn_counter
+                        }
+                    };
                     let mut r = vec![0, 0, 0, 0];
                     r.extend(tid);
-                    r.extend(conn_counter.to_be_bytes());
+                    r.extend(conn.to_be_bytes());
                     if spoof_first {
                         let evil = UdpSocket::bind("127.0.0.1:0").await.unwrap();
                         let mut fake = r.clone();
@@ -647,18 +666,25 @@ async fn udp_retransmits_and_expires_connection_ids() {
     let t = UdpTransport::bind(fast_udp()).await.unwrap();
     let url = format!("udp://127.0.0.1:{}/announce", tr.addr.port());
     assert!(t.announce(&gated(&url)).await.is_ok());
-    assert_eq!(
-        actions(&tr),
-        vec![0, 0, 0, 1],
-        "connect retransmitted twice, same exchange"
-    );
+    // A loaded machine may answer a copy after the client's 40 ms retransmit: then one copy more goes out, so the
+    // exchanges are checked by their shape (connects, then announces), not by an exact packet count.
+    let first = actions(&tr);
+    let (connects, announces) = connects_then_announces(&first);
+    assert!(connects >= 3 && announces >= 1, "connect retransmitted past the two dropped copies, then announced: {first:?}");
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(t.announce(&gated(&url)).await.is_ok());
-    assert_eq!(
-        actions(&tr)[4..],
-        [0, 1],
-        "the connection id expired, so we connected again"
-    );
+    let again = actions(&tr)[first.len()..].to_vec();
+    let (connects, announces) = connects_then_announces(&again);
+    assert!(connects >= 1 && announces >= 1, "the connection id expired, so we connected again: {again:?}");
+}
+
+/// How many connects (action 0) and then announces (action 1) a run of packets holds; panics when they are mixed (an
+/// announce before its connect was answered, or a connect after the announce went out).
+fn connects_then_announces(actions: &[u32]) -> (usize, usize) {
+    let connects = actions.iter().take_while(|&&a| a == 0).count();
+    let rest = &actions[connects..];
+    assert!(rest.iter().all(|&a| a == 1), "connects, then announces: {actions:?}");
+    (connects, rest.len())
 }
 
 #[tokio::test]
@@ -683,6 +709,24 @@ async fn udp_ignores_spoofed_replies_and_garbage() {
     }
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(t.announce(&gated(&url)).await.is_ok());
+}
+
+/// The failure: a connect answered after the client retransmitted it (a slow tracker, a loaded machine) makes the
+/// announce fail. The tracker answers both copies of the connect; the client announces with the first answer's id
+/// while the second copy is still queued at the tracker. A late answer to the retransmission must not be taken for
+/// the announce's reply either. (Seen on a loaded Windows PC in `udp_ignores_spoofed_replies_and_garbage`, whose
+/// spoofing tracker binds a socket before each answer: "the spoofed connect reply was ignored" failed at 0.4 s.)
+#[tokio::test]
+async fn udp_announce_works_when_the_connect_was_answered_after_a_retransmit() {
+    for spoof in [false, true] {
+        // 100 ms per connect answer against a 40 ms first wait: the connect is always sent twice before its answer.
+        let tr = udp_tracker_slow(0, spoof, Duration::from_millis(100)).await;
+        let t = UdpTransport::bind(fast_udp()).await.unwrap();
+        let url = format!("udp://127.0.0.1:{}/announce", tr.addr.port());
+        let r = t.announce(&gated(&url)).await;
+        assert!(r.is_ok(), "spoof {spoof}: {r:?}, packets {:?}", actions(&tr));
+        assert_eq!(actions(&tr)[..2], [0, 0], "the connect was retransmitted before its answer");
+    }
 }
 
 #[tokio::test]
@@ -768,7 +812,7 @@ fn gated_stopped(url: &str) -> GatedRequest {
     gate.submit((p.info_hash, 0), RequestId(1), u.clone(), p.clone(), SendKind::Event, Millis(0)).unwrap();
     let first = gate.poll(Millis(0)).remove(0);
     let timing = clamp_timing(Some(1800), None);
-    assert!(gate.finish(first.ticket(), trs_tracker::gate::Outcome::Success { timing }, Millis(10)));
+    assert!(gate.finish(first.ticket(), seedwell_tracker::gate::Outcome::Success { timing }, Millis(10)));
     gate.begin_quit();
     let stop = AnnounceParams { event: Some(Event::Stopped), numwant: 0, ..p };
     gate.submit((stop.info_hash, 0), RequestId(2), u, stop, SendKind::Event, Millis(20)).unwrap();
@@ -777,7 +821,7 @@ fn gated_stopped(url: &str) -> GatedRequest {
 
 #[tokio::test]
 async fn quit_stop_gives_the_answer_two_seconds_after_the_connection_is_up_and_no_more() {
-    use trs_tracker::http::QuitLimits;
+    use seedwell_tracker::http::QuitLimits;
     let limits = QuitLimits { connect: Duration::from_millis(1500), answer: Duration::from_millis(400) };
     // Accepts, reads the request, never answers.
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -805,7 +849,7 @@ async fn quit_stop_gives_the_answer_two_seconds_after_the_connection_is_up_and_n
 
 #[tokio::test]
 async fn quit_stop_over_a_fast_tracker_completes_and_reuses_nothing_special() {
-    use trs_tracker::http::QuitLimits;
+    use seedwell_tracker::http::QuitLimits;
     let limits = QuitLimits { connect: Duration::from_secs(3), answer: Duration::from_secs(2) };
     let s = serve(|_, _| Some(http_response("200 OK", &[], &bencode_ok(1800)))).await;
     let out = local_http("1").announce_quit(&gated_stopped(&url_for(&s, "/announce")), limits).await;
@@ -815,7 +859,7 @@ async fn quit_stop_over_a_fast_tracker_completes_and_reuses_nothing_special() {
 
 #[tokio::test]
 async fn quit_stop_to_a_refusing_host_is_never_reached() {
-    use trs_tracker::http::QuitLimits;
+    use seedwell_tracker::http::QuitLimits;
     let port = closed_port();
     let limits = QuitLimits { connect: Duration::from_secs(3), answer: Duration::from_secs(2) };
     let out = local_http("1").announce_quit(&gated_stopped(&format!("http://127.0.0.1:{port}/announce")), limits).await;
@@ -840,7 +884,7 @@ async fn a_bound_transport_listens_on_its_address_only() {
 #[tokio::test]
 async fn http_announce_through_the_proxy_sends_the_name_to_the_proxy() {
     let s = serve(|_, _| Some(http_response("200 OK", &[], &bencode_ok(1800)))).await;
-    let fake = trs_socks::testkit::FakeProxy::start("user", "pass").await;
+    let fake = seedwell_socks::testkit::FakeProxy::start("user", "pass").await;
     fake.map_name("tracker.invalid", s.addr.ip());
     let t = HttpTransport::with_proxy("0.0.1", HttpConfig { policy: DestinationPolicy::LOCAL, ..HttpConfig::default() }, fake.proxy());
     let req = gated(&format!("http://tracker.invalid:{}/announce?passkey=k1", s.addr.port()));
@@ -858,9 +902,9 @@ async fn http_announce_through_the_proxy_sends_the_name_to_the_proxy() {
 #[tokio::test]
 async fn http_announce_never_goes_direct_when_the_proxy_fails() {
     let s = serve(|_, _| Some(http_response("200 OK", &[], &bencode_ok(1800)))).await;
-    let fake = trs_socks::testkit::FakeProxy::start("user", "pass").await;
+    let fake = seedwell_socks::testkit::FakeProxy::start("user", "pass").await;
     let mut wrong = fake.proxy();
-    wrong.auth = Some(trs_socks::Credentials::new("user", "nope").unwrap());
+    wrong.auth = Some(seedwell_socks::Credentials::new("user", "nope").unwrap());
     let cfg = HttpConfig { policy: DestinationPolicy::LOCAL, ..HttpConfig::default() };
     let t = HttpTransport::with_proxy("0.0.1", cfg, wrong);
     let out = t.announce(&gated(&url_for(&s, "/announce"))).await;

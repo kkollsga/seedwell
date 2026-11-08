@@ -11,7 +11,7 @@ use crate::persist::{Placed, StoredState, StoredTorrent};
 use crate::policy;
 use crate::tracker_driver::{TrackerCmd, TrackerTorrent};
 use crate::util::unix_secs;
-use trs_tracker::TrackerUrl;
+use seedwell_tracker::TrackerUrl;
 
 impl Session {
     pub(crate) fn load(&mut self, stored: Vec<StoredTorrent>) {

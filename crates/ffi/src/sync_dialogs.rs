@@ -4,12 +4,18 @@
 //! folder pickers and runs Start or Save off the main thread.
 //!
 //! - Add Folder: [`Core::sync_add_form`], [`Core::sync_add_set_link`], [`sync_add_set_location`],
-//!   `sync_add_choose_parent`, [`Core::sync_add_window`], [`Core::sync_add_start`].
+//!   `sync_add_choose_parent`, [`Core::sync_add_window`], [`Core::sync_add_start`]; and, off the UI thread,
+//!   [`Core::sync_add_places`] with [`sync_add_set_places`].
 //! - Edit: [`Core::sync_edit_form`], [`sync_edit_choose_parent`], [`sync_edit_window`], [`Core::sync_edit_save`].
+//!
+//! Every call a host makes on its UI thread to open, edit or draw them answers from what the core holds and never looks
+//! at the disk: a location on a network drive that does not answer (a NAS asleep, a share gone) must not hold the
+//! dialog up, and the hosts call them on every keystroke and render. What needs the disk is read off the UI thread:
+//! a pasted link's places by `sync_add_places`, the rest by Start and Save.
 
 use std::path::Path;
 
-use trs_platform::{computer, dirs};
+use seedwell_platform::{computer, dirs};
 
 use crate::devices_text::FollowLine;
 use crate::read_only_text::{read_only_change, read_only_drawn, read_only_line, read_only_line_for, ReadOnlyLine};
@@ -95,7 +101,8 @@ pub struct SyncAddWindowModel {
     pub link_ok: bool,
     pub location_label: String,
     /// The popup's places: the link's default place, the folder of that name already there, the one the user chose.
-    /// After them a separator and "Choose…" (the location picker). Empty: only `location_placeholder`.
+    /// After them a separator and "Choose…" (the location picker). Empty: only `location_placeholder` (also while the
+    /// link's places are read: `SyncAddForm::places_pending`).
     pub locations: Vec<SyncLocationChoice>,
     /// The popup's value now (one of `locations`' paths, or empty).
     pub location: String,
@@ -123,7 +130,9 @@ pub struct SyncAddWindowModel {
     pub confirm_title: String,
     pub confirm_help: String,
     pub can_start: bool,
-    /// After Start: the new folder's Share dialog opens (a folder of this computer: sharing it is the next step).
+    /// After Start: the new folder's Share dialog opens (a folder of this computer: sharing it is the next step). Not
+    /// with "On all my devices" on: that folder reaches the user's devices by itself, and the user shares it with
+    /// others from its right-click menu when they want to (the user's choice, 2026-11-06).
     pub share_after_start: bool,
 }
 
@@ -143,10 +152,51 @@ fn locations(form: &SyncAddForm) -> Vec<SyncLocationChoice> {
     out.into_iter().map(|path| SyncLocationChoice { title: shown(&path), path }).collect()
 }
 
-/// Where the location picker opens: the folder the location is in, when it is there.
+/// Where the location picker opens: the folder the location is in, when it is there, as already known (never read
+/// here): a place the core offered (the link's default place, or the folder of that name there already) goes in the
+/// default location's folder, there when the places were read; any other place was put below a folder the user picked
+/// with the location picker.
 fn location_start(form: &SyncAddForm) -> Option<String> {
-    let parent = Path::new(&form.location).parent()?;
-    (!parent.as_os_str().is_empty() && parent.is_dir()).then(|| parent.display().to_string())
+    let parent = Path::new(&form.location).parent().filter(|p| !p.as_os_str().is_empty())?;
+    let offered = [&form.default_location, &form.existing_folder].into_iter().any(|o| o.as_deref() == Some(form.location.as_str()));
+    (!offered || form.default_parent_there).then(|| parent.display().to_string())
+}
+
+/// A pasted link's places as [`Core::sync_add_places`] read them off the host's UI thread.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SyncAddPlaces {
+    /// The text they were read for (the form's `key`): an answer for a link pasted before is dropped.
+    pub key: String,
+    /// Where the folder goes by default (`~/Seedwell/Team`, numbered when that is taken: `~/Seedwell/Team 2`).
+    pub default_location: Option<String>,
+    /// A folder of the link's name already there and not synced: offered next to the new one.
+    pub existing_folder: Option<String>,
+    /// The folder the default place goes in is there.
+    pub default_parent_there: bool,
+}
+
+/// The form with its pasted link's places (`Core::sync_add_places`, read off the UI thread): the location follows the
+/// default place unless the user chose one. An answer for another link than the form's, or for a form whose places are
+/// read already, changes nothing.
+#[uniffi::export]
+pub fn sync_add_set_places(form: SyncAddForm, places: SyncAddPlaces) -> SyncAddForm {
+    if !form.places_pending || places.key != form.key {
+        return form;
+    }
+    let location = if form.location_chosen { form.location } else { places.default_location.clone().unwrap_or_default() };
+    SyncAddForm {
+        location,
+        default_location: places.default_location,
+        existing_folder: places.existing_folder,
+        default_parent_there: places.default_parent_there,
+        places_pending: false,
+        ..form
+    }
+}
+
+/// Start puts the new folder on all the user's devices: "On all my devices" is shown and on.
+fn follows(form: &SyncAddForm) -> bool {
+    form.mode == SyncAddMode::Local && form.follow.shown && form.all_devices
 }
 
 fn add_window(form: &SyncAddForm, local_on_demand_note: String, on_demand: bool) -> SyncAddWindowModel {
@@ -173,7 +223,7 @@ fn add_window(form: &SyncAddForm, local_on_demand_note: String, on_demand: bool)
         location_label: LABEL_LOCATION.into(),
         locations: locations(form),
         location: form.location.clone(),
-        location_placeholder: "Paste a link first".into(),
+        location_placeholder: if usable && form.places_pending { "Finding a place…" } else { "Paste a link first" }.into(),
         location_choose: "Choose…".into(),
         location_enabled: usable,
         location_help: concat!("Where the shared folder goes on this ", computer!()).into(),
@@ -199,7 +249,7 @@ fn add_window(form: &SyncAddForm, local_on_demand_note: String, on_demand: bool)
         confirm_title: "Start".into(),
         confirm_help: if local { "Start syncing this folder" } else { "Join the shared folder" }.into(),
         can_start: sync_add_can_start(form.clone()),
-        share_after_start: local,
+        share_after_start: local && !follows(form),
     }
 }
 
@@ -286,7 +336,7 @@ pub struct SyncEditWindowModel {
     pub changed: bool,
 }
 
-/// The folder's parent on disk (where Move… starts), or the new one Move… chose.
+/// The folder's parent (where Move… starts), or the new one Move… chose.
 fn parent(form: &SyncEditForm) -> String {
     form.new_parent.clone().unwrap_or_else(|| {
         form.folder.as_ref().and_then(|f| Path::new(&f.path).parent()).map(|p| p.display().to_string()).unwrap_or_default()
@@ -355,7 +405,10 @@ pub fn sync_edit_window(form: SyncEditForm, host: Vec<HostWindow>, features: Vec
         move_picker: SyncFolderPicker {
             prompt: "Move Here".into(),
             message: format!("Choose where “{}” goes. It keeps its name.", form.name),
-            start: Path::new(&parent).is_dir().then(|| parent.clone()),
+            // Where it is, as the core knows it (never read here): its parent, or the one just picked. A missing
+            // folder's parent is offered too (Move… is how it is repaired); a picker given a folder that is not there
+            // starts where it would have anyway.
+            start: (!parent.is_empty()).then(|| parent.clone()),
         },
         on_demand_label: on_demand.then(sync_on_demand_label),
         on_demand_help: on_demand.then(sync_on_demand_help),
@@ -384,6 +437,26 @@ pub fn sync_edit_window(form: SyncEditForm, host: Vec<HostWindow>, features: Vec
 }
 
 impl Core {
+    /// The places of the link pasted as `link` (the form's `key`): where it goes by default (numbered when that is
+    /// taken), a folder of its name already there and not synced, and whether the default location's folder is there.
+    /// Looks at the disk, which may be a network drive that does not answer: the FFI's `sync_add_places` runs it on a
+    /// thread of its own, and the host awaits it off its UI thread (`async_calls`). Nothing for text that is not a
+    /// link.
+    pub fn sync_add_places(&self, link: String) -> SyncAddPlaces {
+        let t = link.trim();
+        let info = if t.is_empty() { None } else { self.sync_parse_link(t.to_owned()) };
+        let default_location = info.as_ref().and_then(|_| self.sync_join_path(t.to_owned()));
+        let existing_folder = info.as_ref().and_then(|i| {
+            let synced = self.sync_snapshot().folders.into_iter().map(|f| f.path).collect();
+            default_location.clone().and_then(|next| sync_existing_folder(suggested_name(i), next, synced))
+        });
+        let default_parent_there = default_location
+            .as_deref()
+            .and_then(|p| Path::new(p).parent())
+            .is_some_and(|p| !p.as_os_str().is_empty() && p.is_dir());
+        SyncAddPlaces { key: link, default_location, existing_folder, default_parent_there }
+    }
+
     /// Start: syncs the chosen folder from this computer (on demand when chosen; on all the user's devices when that
     /// is chosen and shown), or joins the linked one into the location. Slow (the disk, the network): call it off the
     /// main thread. Then the host closes the dialog; for an on-demand folder it adds the folder to the file manager,
@@ -411,7 +484,7 @@ impl Core {
         // On all my devices: the others join it by themselves (this computer is its owner); Read only, the owner's
         // setting, when chosen (paired or not). Added either way: the Edit dialog shows the toggles as they are.
         if form.mode == SyncAddMode::Local {
-            if form.follow.shown && form.all_devices {
+            if follows(&form) {
                 let _ = self.sync_set_follow(f.id.clone(), true);
             }
             if form.read_only {
@@ -470,7 +543,9 @@ impl Core {
 #[uniffi::export]
 impl Core {
     /// The Add Folder dialog's form as it opens: From this computer, or Shared with me with `prefill` (a link that
-    /// opened the app, or the pasteboard's when `sync_looks_like_link`) read already.
+    /// opened the app, or the pasteboard's when `sync_looks_like_link`) read already, its places still to be read
+    /// (`places_pending`, as [`Core::sync_add_set_link`] says). Never looks at the disk: hosts call it on their UI
+    /// thread.
     pub fn sync_add_form(&self, prefill: Option<String>) -> SyncAddForm {
         let form = SyncAddForm { follow: self.sync_follow_line_new(false), ..crate::sync_text::sync_add_form_new() };
         let form = SyncAddForm { all_devices: form.follow.on, ..form };
@@ -480,23 +555,25 @@ impl Core {
         }
     }
 
-    /// The form with `text` typed or pasted as its link: what it is (or why it cannot be joined), its default place
-    /// (the location follows it unless the user chose one) and a folder of that name already there.
+    /// The form with `text` typed or pasted as its link: what it is (or why it cannot be joined). Never looks at the
+    /// disk (hosts call it on every keystroke, on their UI thread): a link's places (its default place, a folder of
+    /// that name already there) are left to be read (`places_pending`). The host then runs [`Core::sync_add_places`]
+    /// off its UI thread (`sync_add_places` async: Swift `await core.syncAddPlaces(link:)`, C#
+    /// `await core.SyncAddPlaces(link)`) with the form's `key`, and gives the answer to [`sync_add_set_places`] with
+    /// the form as it is then. Until then the location is the one the user chose, or empty (Start waits).
     pub fn sync_add_set_link(&self, form: SyncAddForm, text: String) -> SyncAddForm {
         let t = text.trim();
         let info = if t.is_empty() { None } else { self.sync_parse_link(t.to_owned()) };
-        let default_location = info.as_ref().and_then(|_| self.sync_join_path(t.to_owned()));
-        let existing_folder = info.as_ref().and_then(|i| {
-            let synced = self.sync_snapshot().folders.into_iter().map(|f| f.path).collect();
-            default_location.clone().and_then(|next| sync_existing_folder(suggested_name(i), next, synced))
-        });
         let problem = if info.is_none() && !t.is_empty() { self.sync_link_problem(t.to_owned()) } else { None };
-        SyncAddForm { existing_folder, ..sync_add_set_key(form, text, info, default_location, problem) }
+        let form = sync_add_set_key(form, text, info, None, problem);
+        // Only a link that can be joined has places to read (an expired or already synced one has none to show).
+        let pending = crate::sync_text::key_usable(&form);
+        SyncAddForm { existing_folder: None, places_pending: pending, default_parent_there: false, ..form }
     }
 
-    /// The Add Folder dialog drawn from `form` (it reads whether a folder made on demand is on another disk).
-    /// `features`: what the host has (`host_features_all()` on the Mac): the Files on demand switch needs
-    /// `OnDemandFolders`.
+    /// The Add Folder dialog drawn from `form`, from the form alone (never the disk: hosts call it on every render, on
+    /// their UI thread). `features`: what the host has (`host_features_all()` on the Mac): the Files on demand switch
+    /// needs `OnDemandFolders`.
     pub fn sync_add_window(&self, form: SyncAddForm, features: Vec<HostFeature>) -> SyncAddWindowModel {
         let on_demand = features.contains(&HostFeature::OnDemandFolders);
         let note = if on_demand && form.mode == SyncAddMode::Local && form.on_demand {
@@ -507,7 +584,7 @@ impl Core {
         add_window(&form, note, on_demand)
     }
 
-    /// The Edit dialog's form for folder `id` as it is now (read again after a failed Save).
+    /// The Edit dialog's form for folder `id` as it is now (read again after a failed Save). Never looks at the disk.
     pub fn sync_edit_form(&self, id: String) -> SyncEditForm {
         let folder = self.sync_snapshot().folders.into_iter().find(|f| f.id == id);
         let follow = self.sync_follow_line(id.clone());

@@ -1,7 +1,7 @@
 # Helpers for the in-container lab scripts (sourced). Everything runs with HOME in a temp dir and
-# TRS_FORBID_REAL_HOME=1, so nothing outside the lab directory can be touched.
+# SEEDWELL_FORBID_REAL_HOME=1, so nothing outside the lab directory can be touched.
 set -u
-export HOME=${HOME_LAB:-/tmp/home-lab} TRS_FORBID_REAL_HOME=1
+export HOME=${HOME_LAB:-/tmp/home-lab} SEEDWELL_FORBID_REAL_HOME=1
 mkdir -p "$HOME"
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
 

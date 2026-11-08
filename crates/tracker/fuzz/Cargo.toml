@@ -1,5 +1,5 @@
 [package]
-name = "trs-tracker-fuzz"
+name = "seedwell-tracker-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-trs-tracker = { path = "..", default-features = false }
+seedwell-tracker = { path = "..", default-features = false }
 
 # Keeps this crate out of the main workspace (it needs nightly + libFuzzer).
 [workspace]

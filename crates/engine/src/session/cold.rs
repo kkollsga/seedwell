@@ -1,10 +1,10 @@
 //! The Cold tier: everything the session keeps for a torrent that has no actor.
 //!
-//! Target (ENGINE.md 3): <= 256 bytes plus the name. Tracker state lives in `trs-tracker`.
+//! Target (ENGINE.md 3): <= 256 bytes plus the name. Tracker state lives in `seedwell-tracker`.
 
 use std::sync::Arc;
 
-use trs_classify::Category;
+use seedwell_classify::Category;
 
 use crate::api::{Priority, SeedGoal, TorrentId, TorrentState};
 use crate::counters::Counters;

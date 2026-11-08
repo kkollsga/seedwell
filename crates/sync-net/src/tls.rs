@@ -15,7 +15,7 @@ use rustls::sign::CertifiedKey;
 use rustls::{
     ClientConfig, DigitallySignedStruct, DistinguishedName, Error, ServerConfig, SignatureScheme, version,
 };
-use trs_sync_proto::device::{self, DeviceKey};
+use seedwell_sync_proto::device::{self, DeviceKey};
 
 /// The ALPN protocol name: a TLS endpoint that speaks something else fails the handshake cleanly.
 pub const ALPN: &[u8] = b"seedwell-sync/1";
@@ -203,7 +203,7 @@ impl Tls {
 pub struct Established {
     /// The peer's Ed25519 public key.
     pub peer_pk: [u8; 32],
-    /// The TLS exporter value for this session ([`trs_sync_proto::keys::EXPORTER_LABEL`]).
+    /// The TLS exporter value for this session ([`seedwell_sync_proto::keys::EXPORTER_LABEL`]).
     pub exporter: [u8; 32],
 }
 
@@ -218,6 +218,6 @@ pub fn established<D>(conn: &rustls::ConnectionCommon<D>) -> Result<Established,
         return Err(Error::NoApplicationProtocol);
     }
     let mut exporter = [0u8; 32];
-    conn.export_keying_material(&mut exporter, trs_sync_proto::keys::EXPORTER_LABEL.as_bytes(), None)?;
+    conn.export_keying_material(&mut exporter, seedwell_sync_proto::keys::EXPORTER_LABEL.as_bytes(), None)?;
     Ok(Established { peer_pk, exporter })
 }

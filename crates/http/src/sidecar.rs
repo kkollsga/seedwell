@@ -1,8 +1,10 @@
 //! The `.part.json`-style sidecar: a tiny line-oriented text file next to the
 //! `.part` that makes a download resumable across restarts and crashes.
 //!
-//! Format: first line `trs-http-part 1`, then `key value` lines (values
+//! Format: first line `seedwell-http-part 1`, then `key value` lines (values
 //! escape `\\`, `\n`, `\r`). Unknown keys are ignored (forward compatible).
+//! A sidecar written before the 2026-11-07 rename starts with [`PRE_RENAME_MAGIC`]
+//! instead and is read the same; the next save writes the new first line.
 //! It is parsed from disk, i.e. untrusted: size-capped, never panics.
 
 use std::fs::{self, File};
@@ -11,7 +13,10 @@ use std::path::Path;
 
 use crate::ranges::RangeSet;
 
-const MAGIC: &str = "trs-http-part 1";
+const MAGIC: &str = "seedwell-http-part 1";
+/// The first line before the rename of the internal names (2026-11-07): a download paused or cut off
+/// by a crash before the update still resumes.
+const PRE_RENAME_MAGIC: &str = "trs-http-part 1";
 /// Sidecars are a few hundred bytes; refuse anything absurd.
 const MAX_SIDECAR_BYTES: u64 = 256 * 1024;
 
@@ -112,7 +117,7 @@ impl Sidecar {
     /// Parse; `None` if it is not a sidecar we wrote.
     pub fn parse(text: &str) -> Option<Self> {
         let mut lines = text.lines();
-        if lines.next()? != MAGIC {
+        if !matches!(lines.next()?, MAGIC | PRE_RENAME_MAGIC) {
             return None;
         }
         let mut sc = Sidecar::default();
@@ -201,12 +206,23 @@ mod tests {
         assert_eq!(Sidecar::parse(&s.encode()), Some(s));
     }
 
+    /// Fails if a download paused before the 2026-11-07 rename would start over (or be lost) after the
+    /// update: its sidecar on disk still has the old first line.
+    #[test]
+    fn sidecar_written_before_the_rename_still_resumes() {
+        let s = sample();
+        let old = s.encode().replacen(MAGIC, PRE_RENAME_MAGIC, 1);
+        assert!(old.starts_with(PRE_RENAME_MAGIC));
+        assert_eq!(Sidecar::parse(&old), Some(s.clone()));
+        assert!(s.encode().starts_with(MAGIC), "saves write the new name");
+    }
+
     #[test]
     fn garbage_is_rejected_not_panicking() {
         assert!(Sidecar::parse("").is_none());
-        assert!(Sidecar::parse("trs-http-part 1\nurl x\n").is_none());
+        assert!(Sidecar::parse("seedwell-http-part 1\nurl x\n").is_none());
         assert!(Sidecar::parse("nope\n").is_none());
-        assert!(Sidecar::parse("trs-http-part 1\nurl x\nname y\nranges 5-1\n").is_none());
-        assert!(Sidecar::parse("trs-http-part 1\nurl x\nname y\nranges 0-1\ntotal zz\n").is_none());
+        assert!(Sidecar::parse("seedwell-http-part 1\nurl x\nname y\nranges 5-1\n").is_none());
+        assert!(Sidecar::parse("seedwell-http-part 1\nurl x\nname y\nranges 0-1\ntotal zz\n").is_none());
     }
 }

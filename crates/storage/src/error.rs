@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use crate::layout::LayoutError;
 
-/// Everything that can go wrong in `trs-storage`.
+/// Everything that can go wrong in `seedwell-storage`.
 ///
 /// File indices refer to the torrent's [`Layout`](crate::Layout); the engine resolves them to
 /// paths for display. Variants that mean "the data is not there" are kept distinct from generic
@@ -141,7 +141,7 @@ pub fn leaf(p: &std::path::Path) -> String {
 
 /// ENOENT and ENOTDIR both mean the path (or a parent) is not there.
 pub(crate) fn is_not_found(e: &io::Error) -> bool {
-    trs_platform::fs::is_not_found(e)
+    seedwell_platform::fs::is_not_found(e)
 }
 
 impl fmt::Display for StorageError {
@@ -176,7 +176,7 @@ impl fmt::Display for StorageError {
             }
             Self::InvalidState => write!(f, "relocation journal is not in a state that allows this"),
             Self::Locked { path, .. } => {
-                write!(f, "\u{201c}{}\u{201d} {}", leaf(path), trs_platform::fs::LOCKED_WORDS)
+                write!(f, "\u{201c}{}\u{201d} {}", leaf(path), seedwell_platform::fs::LOCKED_WORDS)
             }
             Self::NoPermission { path } => write!(f, "No permission to change \u{201c}{}\u{201d}", leaf(path)),
             Self::Layout(e) => write!(f, "invalid layout: {e}"),

@@ -3,7 +3,7 @@ using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
@@ -38,13 +38,17 @@ sealed class InfoCard
         card = new GetInfoCard(app.Core, first, new Clock(), true, play, App.HostWindows);
         Root = new ScrollViewer { Content = panel, MaxHeight = 720, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         var q = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
-        refresh = q.CreateTimer();
+        // One card for each opening: these must let it go (see Timers).
+        refresh = q.Owned(this, static c => c.Refresh());
         refresh.IsRepeating = false;
-        refresh.Tick += (_, _) => Refresh();
-        reload = q.CreateTimer();
+        reload = q.Owned(this, static c => c.Reload());
         reload.IsRepeating = false;
-        reload.Tick += async (_, _) => { try { await card.Reload(); } catch { } };
         Refresh();
+    }
+
+    async void Reload()
+    {
+        try { await card.Reload(); } catch { }
     }
 
     public void Stop()

@@ -14,7 +14,7 @@
 
 use std::io;
 
-use trs_sync_proto::model::{BadPath, STATE_DIR, validate_path};
+use seedwell_sync_proto::model::{BadPath, STATE_DIR, validate_path};
 use unicode_normalization::{UnicodeNormalization, is_nfc_quick};
 
 use crate::fs::Fs;

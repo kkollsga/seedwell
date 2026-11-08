@@ -36,13 +36,13 @@ rm -rf "$W"
 mkdir -p "$W/a-conf" "$W/b-conf" "$W/data" "$W/dl"
 
 echo "== build example"
-(cd "$ROOT" && CARGO_BUILD_JOBS=4 cargo build --release -p trs-utp --example interop 2>&1 | tail -1)
+(cd "$ROOT" && CARGO_BUILD_JOBS=4 cargo build --release -p seedwell-utp --example interop 2>&1 | tail -1)
 BIN="$ROOT/target/release/examples/interop"
 
 echo "== make ${SIZE_MIB} MiB random payload and torrent (${PIECE_KIB} KiB pieces)"
 head -c $((SIZE_MIB * 1024 * 1024)) /dev/urandom > "$W/data/payload.bin"
 transmission-create -o "$W/test.torrent" -s "$PIECE_KIB" -t "http://127.0.0.1:$TRACKER/announce" \
-  -c "trs-utp interop" --anonymize "$W/data/payload.bin" >/dev/null
+  -c "seedwell-utp interop" --anonymize "$W/data/payload.bin" >/dev/null
 IH="$(transmission-show "$W/test.torrent" | awk '/Hash( v1)?:/ {print $NF; exit}')"
 echo "info hash: $IH"
 

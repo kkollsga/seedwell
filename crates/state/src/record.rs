@@ -11,7 +11,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use trs_classify::Category;
+use seedwell_classify::Category;
 
 use crate::codec::{Reader, Writer};
 use crate::duration::Secs;

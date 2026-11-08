@@ -12,7 +12,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use trs_platform::computer;
+use seedwell_platform::computer;
 
 use crate::backend::Backend;
 use crate::chat_text::{header, named, subtitle, UNNAMED_DEVICE};
@@ -24,7 +24,8 @@ use crate::library_rows::{
 use crate::library_window::{add_sheet_of, AddLinkSheet, PendingRemoval, ScrollTarget};
 use crate::removal::RemovalQuestion;
 use crate::menu::sync_summary_of;
-use crate::sidebar::{channel_menu, sidebar, tracker_menu, SidebarInputs, SidebarMenuEntry, SidebarModel};
+use crate::chat_groups::SyncChatGroup;
+use crate::sidebar::{channel_menu, group_menu, sidebar, tracker_menu, SidebarInputs, SidebarMenuEntry, SidebarModel};
 use crate::sync::{SyncChannel, SyncDirect, SyncSnapshot, SyncTopic};
 use crate::types::{Category, RowQuery, SeedGroup, Snapshot, TransferKind, TransferRow};
 use crate::Core;
@@ -178,6 +179,8 @@ pub(crate) struct LibraryState {
     pub visible: bool,
     /// The channels whose topics the sidebar shows.
     pub open_channels: HashSet<String>,
+    /// The groups of channels the sidebar shows closed (a group starts open).
+    pub closed_groups: HashSet<String>,
     /// A new download arrived while the user was busy: Downloads carries a dot until they go there.
     pub downloads_flag: bool,
     /// The tracker's Info page instead of its torrents.
@@ -217,6 +220,7 @@ impl LibraryState {
             shown: HashMap::new(),
             visible: false,
             open_channels: HashSet::new(),
+            closed_groups: HashSet::new(),
             downloads_flag: false,
             tracker_info: false,
             direct_names: HashMap::new(),
@@ -292,6 +296,8 @@ pub(crate) struct Inputs {
     pub snapshot: Snapshot,
     pub sync: SyncSnapshot,
     pub channels: Vec<SyncChannel>,
+    /// The sidebar's groups of channels, in the user's order.
+    pub groups: Vec<SyncChatGroup>,
     /// Each channel's topics, newest activity first, in the order of `channels`.
     pub topics: Vec<Vec<SyncTopic>>,
     pub directs: Vec<SyncDirect>,
@@ -320,7 +326,7 @@ impl Inputs {
 
 /// "↓ 2.1 MB/s · ↑ 340 KB/s": both rates in the summary of Downloads and Sharing.
 fn rates(s: &Snapshot) -> String {
-    format!("↓ {} · ↑ {}", trs_control::display::rate(s.down_rate), trs_control::display::rate(s.up_rate))
+    format!("↓ {} · ↑ {}", seedwell_control::display::rate(s.down_rate), seedwell_control::display::rate(s.up_rate))
 }
 
 /// "2 active · 1 up next · 1 to choose · 1 starting · 3 finished today · ↓ … · ↑ …". "Finished today" counts the
@@ -395,7 +401,7 @@ pub(crate) fn build(i: &Inputs, st: &LibraryState, now_ms: u64, clock: &dyn Loca
     };
     let (title, summary) = match &st.place {
         LibraryPlace::Downloads => ("Downloads".to_owned(), downloads_summary(s, now_ms / 1000, clock)),
-        LibraryPlace::Sharing => ("Sharing".to_owned(), format!("{} · {}", trs_control::display::count(u64::from(s.sharing_total), "torrent"), rates(s))),
+        LibraryPlace::Sharing => ("Sharing".to_owned(), format!("{} · {}", seedwell_control::display::count(u64::from(s.sharing_total), "torrent"), rates(s))),
         LibraryPlace::FolderSync => {
             let me = if i.sync.device_name.is_empty() { String::new() } else { format!(concat!(" · This ", computer!(), ": {}"), i.sync.device_name) };
             ("Folder Sync".to_owned(), sync_summary_of(&i.sync) + &me)
@@ -453,6 +459,7 @@ pub(crate) fn build(i: &Inputs, st: &LibraryState, now_ms: u64, clock: &dyn Loca
     };
     let topics = |id: &str| i.channel(id).map(|(_, t)| t).unwrap_or(&[]);
     let open = |id: &str| st.open_channels.contains(id);
+    let group_open = |id: &str| !st.closed_groups.contains(id);
     let directs = direct_rows(i, st);
     let sidebar = sidebar(&SidebarInputs {
         snapshot: s,
@@ -460,6 +467,9 @@ pub(crate) fn build(i: &Inputs, st: &LibraryState, now_ms: u64, clock: &dyn Loca
         channels: &i.channels,
         topics: &topics,
         open: &open,
+        // A host that cannot draw groups lists every channel plainly.
+        groups: if has(&st.host, Some(HostWindow::ChatGroups)) { &i.groups } else { &[] },
+        group_open: &group_open,
         directs: &directs,
         place: &st.place,
         downloads_flag: st.downloads_flag,
@@ -568,7 +578,7 @@ impl Library {
             }
             None => Vec::new(),
         };
-        Inputs { snapshot, sync: sync.snapshot(), channels, topics, directs: sync.chat_directs(), sharing, tracker_seeds }
+        Inputs { snapshot, sync: sync.snapshot(), channels, groups: sync.chat_groups(), topics, directs: sync.chat_directs(), sharing, tracker_seeds }
     }
 
     /// The Sharing groups of a list of seeds: counts, and a page of rows of each group on screen.
@@ -654,7 +664,17 @@ impl Library {
     /// Shows a place: on its torrents (not a tracker's Info), unfiltered, its Sharing groups on their first page; the
     /// Downloads flag goes when Downloads is shown.
     pub fn select_place(&self, place: LibraryPlace) {
-        self.with_state(|st| st.select(place));
+        // A channel shown from elsewhere (a notification, a link) in a closed group: the group opens to show it.
+        let group = match (&place, lock(&self.last).as_ref()) {
+            (LibraryPlace::Chat { channel_id, .. }, Some(i)) => i.channels.iter().find(|c| &c.id == channel_id).and_then(|c| c.group.clone()),
+            _ => None,
+        };
+        self.with_state(|st| {
+            if let Some(g) = group {
+                st.closed_groups.remove(&g);
+            }
+            st.select(place)
+        });
     }
 
     /// The search text of the lists (it stays when the place changes).
@@ -701,6 +721,21 @@ impl Library {
         });
     }
 
+    /// Opens or closes a group of channels in the sidebar (its channels under it). A group starts open.
+    pub fn set_group_open(&self, group_id: String, open: bool) {
+        self.with_state(|st| {
+            if open { st.closed_groups.remove(&group_id) } else { st.closed_groups.insert(group_id) };
+        });
+    }
+
+    /// The context menu of a sidebar group (`SidebarChatGroup::id`; empty: none), from what the last model showed,
+    /// without the commands whose window the host lacks. Its commands run on that group.
+    pub fn sidebar_group_menu(&self, group_id: String) -> Vec<SidebarMenuEntry> {
+        let Some(i) = lock(&self.last).clone() else { return Vec::new() };
+        let Some(at) = i.groups.iter().position(|g| g.id == group_id) else { return Vec::new() };
+        offered_sidebar(group_menu(&i.groups[at], at, i.groups.len()), &lock(&self.state).host)
+    }
+
     /// A tracker's tab shows its Info page instead of its torrents (until another place is selected).
     pub fn set_tracker_info(&self, on: bool) {
         self.with_state(|st| st.tracker_info = on);
@@ -718,7 +753,7 @@ impl Library {
         let menu = match &place {
             LibraryPlace::Tracker { tracker_id } => i.snapshot.trackers.iter().find(|t| &t.id == tracker_id).map(tracker_menu).unwrap_or_default(),
             LibraryPlace::Chat { channel_id, topic_id: None } => {
-                i.channel(channel_id).map(|(c, _)| channel_menu(c, &follow_line_for(self.backend.as_ref(), &c.id))).unwrap_or_default()
+                i.channel(channel_id).map(|(c, _)| channel_menu(c, &follow_line_for(self.backend.as_ref(), &c.id), &i.groups)).unwrap_or_default()
             }
             _ => Vec::new(),
         };

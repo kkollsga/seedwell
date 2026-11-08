@@ -6,8 +6,8 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::time::{Duration, Instant};
-use trs_dht::rng::Rng;
-use trs_dht::{Config, DhtCore, Event, Id, Input, Intent, PublicInfoHash};
+use seedwell_dht::rng::Rng;
+use seedwell_dht::{Config, DhtCore, Event, Id, Input, Intent, PublicInfoHash};
 
 #[derive(Debug)]
 enum Ev {
@@ -66,7 +66,7 @@ impl Sim {
             let a = node_addr(k);
             let mut c = cfg(k);
             c.seed = Some(seed.wrapping_mul(1_000_003).wrapping_add(k as u64));
-            c.initial_node_id = Some(trs_dht::id::secure_id(*a.ip(), &mut rng));
+            c.initial_node_id = Some(seedwell_dht::id::secure_id(*a.ip(), &mut rng));
             nodes.push(DhtCore::new(c, epoch));
             index.insert(a, k);
             addrs.push(a);
@@ -260,7 +260,7 @@ impl Sim {
         i: usize,
         ih: &Id,
         since_ms: u64,
-    ) -> Option<(u64, trs_dht::LookupStats)> {
+    ) -> Option<(u64, seedwell_dht::LookupStats)> {
         self.events.iter().find_map(|(t, n, e)| match e {
             Event::LookupFinished { info_hash, stats }
                 if *n == i && info_hash == ih && *t >= since_ms =>

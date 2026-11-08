@@ -3,8 +3,8 @@ use crate::common;
 use std::time::Duration;
 
 use common::*;
-use trs_engine::config::EncryptionPolicy as Enc;
-use trs_engine::*;
+use seedwell_engine::config::EncryptionPolicy as Enc;
+use seedwell_engine::*;
 
 async fn pair(seed_policy: Enc, leech_policy: Enc, seed: u64) -> (Node, Node, TestTorrent) {
     let t = standard_torrent(1_500_000, None, false, seed);

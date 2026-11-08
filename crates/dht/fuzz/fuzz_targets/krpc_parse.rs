@@ -2,7 +2,7 @@
 //! Feeds arbitrary bytes to the KRPC parser and walks every accessor. Must never panic.
 
 use libfuzzer_sys::fuzz_target;
-use trs_dht::codec::{self, Body};
+use seedwell_dht::codec::{self, Body};
 
 fuzz_target!(|data: &[u8]| {
     match codec::parse(data) {

@@ -84,6 +84,8 @@ import Testing
         #expect(FPProviderItem(FPItem(id: "q", parent: "root", name: "v1.2", kind: "dir")).contentType.conforms(to: .folder))
         let root = FPProviderItem(FPItem(id: "root", parent: "root", name: "", kind: "dir"), rootName: "Team")
         #expect(root.itemIdentifier == .rootContainer && root.filename == "Team" && root.contentPolicy == .downloadLazily)
+        // The hub's domain has no name (the Finder shows the app's alone): its root takes the core's, never an empty one.
+        #expect(FPProviderItem(FPItem(id: "root", parent: "root", name: "Seedwell", kind: "dir"), rootName: "").filename == "Seedwell")
     }
 
     @Test func pagesAndAnchors() {
@@ -172,9 +174,9 @@ import Testing
         var asked = 0
         host.showSetup = { asked += 1 }
         let hub = core.syncHostHubDomain()
-        #expect(hub.name == "Seedwell")
+        #expect(hub.name.isEmpty, "no name of its own: the Finder shows the app's name alone")
         await host.reconcile([hub])
-        #expect(await fake.domains == [FileProviderDomainState(id: hub.id, name: "Seedwell", enabled: false)])
+        #expect(await fake.domains == [FileProviderDomainState(id: hub.id, name: "", enabled: false)])
         #expect(host.disabled == [hub.id] && asked == 1, "a new domain starts switched off: the user is asked once")
         #expect(host.isOff("F"), "every on-demand folder's page says so")
         // A folder made on demand: no domain of its own, and nobody is asked again.
@@ -189,6 +191,39 @@ import Testing
         await host.refreshEnabled()
         #expect(host.disabled.isEmpty && !host.isOff("F"))
         host.stop()
+    }
+
+    /// A Mac on 0.1.20 has the hub named *Seedwell* ("Seedwell - Seedwell" in the Finder). Fails if the host removes
+    /// and adds it to rename it (the system would drop what it has on disk and keep the new one off until the user
+    /// allows it again), renames it before the system handed over its pending changes (macOS may move its folder in
+    /// ~/Library/CloudStorage), asks the user when the hub stayed on, renames it again on the next report, or fails to
+    /// ask when the rename left it switched off.
+    @MainActor @Test func aHubNamedBeforeIsRenamedInPlace() async throws {
+        let (core, fake) = try Self.host()
+        let host = FileProviderHost(core: core, domains: fake)
+        var asked = 0
+        host.showSetup = { asked += 1 }
+        let hub = core.syncHostHubDomain()
+        await fake.set([FileProviderDomainState(id: hub.id, name: "Seedwell", enabled: true)])
+        await host.reconcile([hub])
+        #expect(await fake.steps == ["wait \(hub.id)", "add \(hub.id)"], "handed over, then renamed in place")
+        #expect(await fake.waited == ["\(hub.id)/root"])
+        #expect(await fake.removals == 0)
+        #expect(await fake.domains == [FileProviderDomainState(id: hub.id, name: "", enabled: true)])
+        #expect(asked == 0 && host.disabled.isEmpty, "still allowed: nobody is asked")
+        // Told again (a folder joined): the name is right now, nothing more is done to the domain.
+        await host.reconcile([hub])
+        #expect(await fake.adds == 1)
+        // A rename macOS answers by switching the hub off: the user is asked to allow it again.
+        let (core2, fake2) = try Self.host()
+        let second = FileProviderHost(core: core2, domains: fake2)
+        second.showSetup = { asked += 1 }
+        await fake2.set([FileProviderDomainState(id: hub.id, name: "Seedwell", enabled: true)])
+        await fake2.disableOnRename()
+        await second.reconcile([hub])
+        #expect(second.disabled == [hub.id] && asked == 1)
+        host.stop()
+        second.stop()
     }
 
     /// Fails if the migration from the per-folder domains removes one before the system handed over its pending
@@ -384,6 +419,102 @@ import Testing
         host.stop()
     }
 
+    /// A new install on a macOS that refuses the hub's empty name. Fails if the hub is left unregistered (no entry in
+    /// the Finder), if it is not registered under the core's fallback name, if the empty name is tried again in the same
+    /// run (one refusal per report), or if the user is not asked to allow the hub.
+    @MainActor @Test func aRefusedEmptyNameFallsBackOnce() async throws {
+        let (core, fake) = try Self.host()
+        let host = FileProviderHost(core: core, domains: fake)
+        var asked = 0
+        host.showSetup = { asked += 1 }
+        let hub = core.syncHostHubDomain()
+        let fallback = core.syncHostDomainFallbackName()
+        #expect(!fallback.isEmpty)
+        // Refused for the name itself: the fallback at once.
+        await fake.refuseEmptyNames(CocoaError(.fileWriteInvalidFileName))
+        await host.reconcile([hub])
+        #expect(await fake.steps == ["refused \(hub.id)", "add \(hub.id)"])
+        #expect(await fake.domains == [FileProviderDomainState(id: hub.id, name: fallback, enabled: false)])
+        #expect(asked == 1 && host.refusedEmpty == [hub.id])
+        // Reported again (a folder joined) and allowed: the fallback name is what was asked for, so nothing is added.
+        await fake.enable(hub.id)
+        await host.reconcile([hub])
+        await host.reconcile([hub])
+        #expect(await fake.steps == ["refused \(hub.id)", "add \(hub.id)"])
+
+        // Refused by every try, for no reason it names: the fallback after the last one, and the user asked.
+        let (core2, fake2) = try Self.host()
+        let second = FileProviderHost(core: core2, domains: fake2)
+        second.showSetup = { asked += 1 }
+        second.addRetries = [1_000_000, 1_000_000]
+        await fake2.refuseEmptyNames(CocoaError(.fileWriteUnknown))
+        await second.reconcile([hub])
+        _ = await Self.within("the fallback registered") { await fake2.domains.contains { $0.id == hub.id } }
+        #expect(await fake2.domains == [FileProviderDomainState(id: hub.id, name: fallback, enabled: false)])
+        #expect(await fake2.steps == Array(repeating: "refused \(hub.id)", count: 3) + ["add \(hub.id)"])
+        _ = await Self.within("asked to allow it") { asked == 2 }
+        #expect(second.disabled == [hub.id])
+        host.stop()
+        second.stop()
+    }
+
+    /// The next launch after the fallback was used (macOS still refusing the empty name, the hub allowed). Fails if a
+    /// later launch tries the empty name again, hands over (up to a minute) and adds, or asks the user again: the
+    /// fallback chosen once is kept.
+    @MainActor @Test func aLaterLaunchKeepsTheFallback() async throws {
+        let (core, fake) = try Self.host()
+        let hub = core.syncHostHubDomain()
+        let first = FileProviderHost(core: core, domains: fake)
+        await fake.refuseEmptyNames(CocoaError(.fileWriteInvalidFileName))
+        await first.reconcile([hub])
+        await fake.enable(hub.id)
+        await first.refreshEnabled()
+        first.stop()
+        let before = await fake.steps
+        let next = FileProviderHost(core: core, domains: fake)
+        var asked = 0
+        next.showSetup = { asked += 1 }
+        for _ in 0..<2 { await next.reconcile([hub]) }
+        let (steps, waited) = (await fake.steps, await fake.waited)
+        #expect(steps == before && waited.isEmpty && asked == 0, "steps \(steps), hand-overs \(waited)")
+        next.stop()
+    }
+
+    /// What counts as the system refusing a name: fails if an invalid name or argument is taken for a passing failure
+    /// (the empty name would be tried a minute longer before the fallback), or a passing failure for a refusal.
+    @Test func refusalsOfTheNameAreToldFromPassingFailures() {
+        #expect(FileProviderHost.refusesName(CocoaError(.fileWriteInvalidFileName)))
+        #expect(FileProviderHost.refusesName(POSIXError(.EINVAL)))
+        #expect(FileProviderHost.refusesName(NSError(domain: "NSFileProviderErrorDomain", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid displayName"])))
+        #expect(FileProviderHost.refusesName(NSError(domain: "NSFileProviderErrorDomain", code: -1, userInfo: [NSDebugDescriptionErrorKey: "invalid argument"])))
+        #expect(!FileProviderHost.refusesName(CocoaError(.fileWriteUnknown)))
+        #expect(!FileProviderHost.refusesName(NSError(domain: "NSFileProviderErrorDomain", code: -2001)))
+    }
+
+    /// macOS reports the hub added with an empty name under another name. Fails if the host adds it again on each report
+    /// (a hand-over and an add every time a folder joins, for nothing).
+    @MainActor @Test func aNameReportedBackOtherwiseIsNotAddedAgain() async throws {
+        let (core, fake) = try Self.host()
+        let host = FileProviderHost(core: core, domains: fake)
+        let hub = core.syncHostHubDomain()
+        await fake.readBackEmptyAs("Seedwell")
+        await host.reconcile([hub])
+        await fake.enable(hub.id)
+        for _ in 0..<3 { await host.reconcile([hub]) }
+        let (adds, waited) = (await fake.adds, await fake.waited)
+        #expect(adds == 1 && waited.isEmpty, "\(adds) adds, hand-overs \(waited)")
+        host.stop()
+        // The next launch: a fresh host, the domain as macOS reports it. Fails if it hands over and adds again (a minute's
+        // wait and maybe the user asked again, on every launch).
+        let next = FileProviderHost(core: core, domains: fake)
+        var asked = 0
+        next.showSetup = { asked += 1 }
+        for _ in 0..<2 { await next.reconcile([hub]) }
+        let (adds2, waited2) = (await fake.adds, await fake.waited)
+        #expect(adds2 == 1 && waited2.isEmpty && asked == 0, "\(adds2) adds, hand-overs \(waited2)")
+        next.stop()
+    }
+
     /// Reconciles run one at a time: a burst adds the hub once.
     @MainActor @Test func reconcilesRunInOrder() async throws {
         let (core, fake) = try Self.host()
@@ -495,14 +626,17 @@ import Testing
         let hub = core.syncHostHubDomain()
         var req = FPRequest("children", folder: hub.id, item: "root")
         req.limit = 500
-        let top = try FPClient(dir: dir, gate: nil).ask(req, as: FPPage.self).get().items
+        // The client blocks its thread until the core answers: never a thread of Swift's cooperative pool (check.sh
+        // runs the tests with one; blocked here, the other tests' tasks stalled and a 10 s wait timed out).
+        let top = try await Self.offPool { [req] in try FPClient(dir: dir, gate: nil).ask(req, as: FPPage.self).get().items }
         #expect(top.count == core.syncSnapshot().folders.count)
         let od = try #require(top.first { $0.id == core.syncHostHubItem(id: f.id) })
         #expect(od.kind == "dir" && od.parent == "root")
         for link in top where link.kind == "symlink" {
             #expect(link.symlinkTarget?.hasPrefix("/") == true && link.caps == ["read"])
         }
-        let kids = try FPClient(dir: dir, gate: nil).ask(FPRequest("children", folder: hub.id, item: od.id), as: FPPage.self).get().items
+        let (hubId, odId) = (hub.id, od.id)
+        let kids = try await Self.offPool { try FPClient(dir: dir, gate: nil).ask(FPRequest("children", folder: hubId, item: odId), as: FPPage.self).get().items }
         #expect(!kids.isEmpty && kids.allSatisfy { $0.id.hasPrefix("\(f.id):") && $0.parent == od.id })
     }
 
@@ -523,6 +657,12 @@ import Testing
     /// fake's actor) runs on that pool. CI's Mac has three such threads; three tests blocking one each hung the run.
     static func fromCoreThread(_ call: @escaping @Sendable () -> SyncHostRemoval) async -> SyncHostRemoval {
         await withCheckedContinuation { c in Thread { c.resume(returning: call()) }.start() }
+    }
+
+    /// Runs a blocking call (the socket client waiting for the core) on a thread of its own, off Swift's cooperative
+    /// pool: blocking a pool thread stalls every other test's tasks.
+    static func offPool<T: Sendable>(_ call: @escaping @Sendable () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { c in Thread { c.resume(with: Result { try call() }) }.start() }
     }
 
     static func host() throws -> (Core, FakeDomains) {
@@ -595,11 +735,32 @@ actor FakeDomains: FileProviderDomains {
             failing -= 1
             throw CocoaError(.fileWriteUnknown)
         }
+        if name.isEmpty, let refusal = emptyRefusal {
+            steps.append("refused \(id)")
+            throw refusal
+        }
         adds += 1
         steps.append("add \(id)")
         await Task.yield()
-        if let i = domains.firstIndex(where: { $0.id == id }) { domains[i].name = name } else { domains.append(FileProviderDomainState(id: id, name: name, enabled: false)) }
+        let name = name.isEmpty ? (emptyReadBack ?? name) : name
+        if let i = domains.firstIndex(where: { $0.id == id }) {
+            domains[i].name = name
+            if offOnRename { domains[i].enabled = false }
+        } else {
+            domains.append(FileProviderDomainState(id: id, name: name, enabled: false))
+        }
     }
+
+    /// A rename switches the domain off (macOS never did so in a test of ours; the host must still cope).
+    private var offOnRename = false
+    func disableOnRename() { offOnRename = true }
+
+    /// Every add with an empty name throws this (a system that refuses the hub's empty name; `refused <id>` in steps).
+    private var emptyRefusal: Error?
+    func refuseEmptyNames(_ e: Error?) { emptyRefusal = e }
+    /// A domain added with an empty name is reported back under this name (a system that names it itself).
+    private var emptyReadBack: String?
+    func readBackEmptyAs(_ name: String) { emptyReadBack = name }
 
     func remove(id: String) async throws -> URL? {
         removals += 1
@@ -627,6 +788,11 @@ actor FakeDomains: FileProviderDomains {
         return onDisk
     }
     func requestDownload(id: String, item: String) async throws { requested.append(item) }
+
+    /// What the host keeps across launches (a fresh host on the same fake is the next launch).
+    private(set) var seen: [String: SeenDomainName] = [:]
+    func seenNames() async -> [String: SeenDomainName] { seen }
+    func setSeenNames(_ seen: [String: SeenDomainName]) async { self.seen = seen }
 }
 
 /// Steps recorded from any thread (the host's let-go runs off the main actor).

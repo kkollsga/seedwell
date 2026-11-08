@@ -4,10 +4,10 @@
 //! The `#[ignore]`d tests go further: they fetch the first piece of the payload
 //! from an official mirror and check it against the torrent's piece table, which
 //! proves the piece hashes *and* the multi-file offset model on real data.
-//! Run them with `cargo test -p trs-metainfo -- --ignored`.
+//! Run them with `cargo test -p seedwell-metainfo -- --ignored`.
 
 use sha1::{Digest as _, Sha1};
-use trs_metainfo::{Magnet, MetaVersion, Metainfo, hex_encode};
+use seedwell_metainfo::{Magnet, MetaVersion, Metainfo, hex_encode};
 
 fn load(name: &str) -> (Vec<u8>, Metainfo) {
     let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -119,8 +119,8 @@ fn all_fixtures_have_consistent_tables_and_canonical_info() {
         let (bytes, m) = load(name);
         let raw = m.info_bytes(&bytes).unwrap();
         // These are canonical, so the original span survives a decode/encode cycle.
-        let v = trs_bencode::decode(raw).unwrap();
-        assert_eq!(trs_bencode::encode(&v), raw, "{name}");
+        let v = seedwell_bencode::decode(raw).unwrap();
+        assert_eq!(seedwell_bencode::encode(&v), raw, "{name}");
         assert!(m.info_hash.verifies(raw));
         assert_eq!(m.piece_hashes().len(), 20 * m.piece_count());
         let sum: u64 = m.files().map(|f| f.length).sum();

@@ -3,7 +3,7 @@
 //! tray menu. Rust decides (docs/CROSS-PLATFORM.md §1) the titles, their order and grouping, the shortcuts, what is
 //! enabled and the check mark; the host draws them and runs each [`AppCommand`] (a core call, or its own window).
 
-use trs_platform::shortcut;
+use seedwell_platform::shortcut;
 
 use crate::types::{Snapshot, TransferState};
 use crate::Core;

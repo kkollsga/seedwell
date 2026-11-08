@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use trs_dht::{Config, DriverConfig, LookupUpdate, PublicInfoHash, SharedIo, spawn_shared};
+use seedwell_dht::{Config, DriverConfig, LookupUpdate, PublicInfoHash, SharedIo, spawn_shared};
 
 type Inbox = mpsc::Sender<(SocketAddrV4, Box<[u8]>)>;
 
@@ -33,7 +33,7 @@ fn cfg(boot: Option<SocketAddrV4>) -> DriverConfig {
     }
 }
 
-fn node(net: &Arc<Mutex<HashMap<SocketAddrV4, Inbox>>>, me: SocketAddrV4, boot: Option<SocketAddrV4>) -> trs_dht::DhtHandle {
+fn node(net: &Arc<Mutex<HashMap<SocketAddrV4, Inbox>>>, me: SocketAddrV4, boot: Option<SocketAddrV4>) -> seedwell_dht::DhtHandle {
     let (tx, rx) = mpsc::channel(256);
     net.lock().unwrap().insert(me, tx);
     let n = net.clone();

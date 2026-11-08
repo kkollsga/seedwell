@@ -1,5 +1,5 @@
 [package]
-name = "trs-platform"
+name = "seedwell-platform"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

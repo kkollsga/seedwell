@@ -8,7 +8,7 @@ use common::fake::FakeSource;
 use common::*;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
-use trs_stream::{Config, EndReason, Event, FileRange, Priority, StreamServer};
+use seedwell_stream::{Config, EndReason, Event, FileRange, Priority, StreamServer};
 
 fn file(name: &str, offset: u64, len: u64) -> FileRange {
     FileRange { index: 0, name: name.into(), offset, len }
@@ -159,11 +159,11 @@ async fn non_loopback_refused() {
     // bind() on a non-loopback address is rejected outright.
     let bad = StreamServer::start(Config { bind: "0.0.0.0:0".parse().unwrap(), ..Config::default() }).await;
     assert!(bad.is_err());
-    assert!(trs_stream::peer_allowed(&"127.0.0.1:1".parse().unwrap()));
-    assert!(trs_stream::peer_allowed(&"[::1]:1".parse().unwrap()));
-    assert!(trs_stream::peer_allowed(&"[::ffff:127.0.0.1]:1".parse().unwrap()));
-    assert!(!trs_stream::peer_allowed(&"192.168.1.10:1".parse().unwrap()));
-    assert!(!trs_stream::peer_allowed(&"[2001:db8::1]:1".parse().unwrap()));
+    assert!(seedwell_stream::peer_allowed(&"127.0.0.1:1".parse().unwrap()));
+    assert!(seedwell_stream::peer_allowed(&"[::1]:1".parse().unwrap()));
+    assert!(seedwell_stream::peer_allowed(&"[::ffff:127.0.0.1]:1".parse().unwrap()));
+    assert!(!seedwell_stream::peer_allowed(&"192.168.1.10:1".parse().unwrap()));
+    assert!(!seedwell_stream::peer_allowed(&"[2001:db8::1]:1".parse().unwrap()));
 
     // End to end: serve on the machine's LAN address and connect to it from there.
     let lan = std::net::UdpSocket::bind("0.0.0.0:0").and_then(|s| {

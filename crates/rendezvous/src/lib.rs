@@ -1,10 +1,10 @@
-//! trs-rendezvous: the client of a Seedwell rendezvous, and setting one up on the user's Cloudflare account
+//! seedwell-rendezvous: the client of a Seedwell rendezvous, and setting one up on the user's Cloudflare account
 //! (SPEC §7G.3).
 //!
 //! A rendezvous is an address book the user runs on their own Cloudflare account: a Worker with one SQLite-backed
 //! Durable Object per record (`tools/rendezvous-worker/worker.js`, embedded here as [`WORKER_JS`]). Devices keep a
 //! sealed record of where they can be reached there and look up the records of devices they share something with
-//! when those are not connected. The record format is `trs_sync_proto::rendezvous`; this crate moves opaque bytes.
+//! when those are not connected. The record format is `seedwell_sync_proto::rendezvous`; this crate moves opaque bytes.
 //!
 //! * [`client`]: `GET`/`PUT`/`DELETE /v1/r/<id>`, writes signed with a per-device write key ([`client::WriteKey`]),
 //!   and the self-test.

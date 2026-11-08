@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::*;
-use trs_engine::config::{CategoryLocation, DetectionConfig};
-use trs_engine::*;
-use trs_state::rules::{DefaultRule, Rule, SeedingGoal};
-use trs_state::{RuleSet, TrackerProfiles};
+use seedwell_engine::config::{CategoryLocation, DetectionConfig};
+use seedwell_engine::*;
+use seedwell_state::rules::{DefaultRule, Rule, SeedingGoal};
+use seedwell_state::{RuleSet, TrackerProfiles};
 
 fn dirs(n: usize) -> Vec<tempfile::TempDir> {
     (0..n).map(|_| tempfile::tempdir().unwrap()).collect()
@@ -173,7 +173,7 @@ async fn category_locations_obey_the_real_home_guard() {
 /// they have: a changed location setting proposes nothing for them, and they still seed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_torrent_placed_by_an_earlier_version_keeps_its_recorded_paths() {
-    use trs_engine::persist::{Batch, Placed, Placement, Store};
+    use seedwell_engine::persist::{Batch, Placed, Placement, Store};
     let d = dirs(4);
     let (lib, dl, other, state) = (p(&d[0]), p(&d[1]), p(&d[2]), p(&d[3]));
     let t = bundle("legacy-bundle", 1121);

@@ -6,12 +6,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use trs_sync_net::chat::{MessageInfo, MessageKind};
-use trs_sync_net::secrets::FileSecrets;
-use trs_sync_net::{Options, SyncHandle};
-use trs_sync_proto::chat::Draft;
-use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::members::Role;
+use seedwell_sync_net::chat::{MessageInfo, MessageKind};
+use seedwell_sync_net::secrets::FileSecrets;
+use seedwell_sync_net::{Options, SyncHandle};
+use seedwell_sync_proto::chat::Draft;
+use seedwell_sync_proto::ids::FolderId;
+use seedwell_sync_proto::members::Role;
 
 use crate::utp::{Device, addr, device_with, read, until};
 
@@ -210,6 +210,56 @@ async fn the_wake_up_command_gets_each_message_from_others_on_stdin() {
     assert!(b.h.channel_status(&id).is_none() && b.h.chat_channels().is_empty());
     a.h.shutdown().await;
     b.h.shutdown().await;
+}
+
+/// The failure: a channel's Agents setting read the membership ("is it Yes already?", the next serial) on one look and
+/// added its statement on another, with no lock across. The user's Yes, decided and not added yet when their No came,
+/// let the No see "No already" and say nothing: the channel stayed open to agents after the later No. Forced here: the
+/// Yes is held between its decision and its add while the No is made. Fails when the later choice does not count, or
+/// two Agents statements share a serial.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn of_two_agents_changes_at_once_the_later_one_counts() {
+    use seedwell_sync_proto::members::Body;
+    let dir = tempfile::tempdir().unwrap();
+    let a = start_at(dir.path(), "Anna", |_| {}).await;
+    let id: FolderId = a.chat_new("Family", false).await.unwrap().id.parse().unwrap();
+    let (decided_tx, decided_rx) = std::sync::mpsc::channel();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    seedwell_sync_net::roles::test_while_deciding(
+        &id,
+        Some(Box::new(move || {
+            decided_tx.send(()).unwrap();
+            let _ = go_rx.recv_timeout(Duration::from_secs(10));
+        })),
+    );
+    let yes = {
+        let a = a.clone();
+        std::thread::spawn(move || a.chat_set_agents(&id, true))
+    };
+    let decided = tokio::task::spawn_blocking(move || decided_rx.recv_timeout(Duration::from_secs(10))).await.unwrap();
+    decided.expect("the Yes decided");
+    let no = {
+        let a = a.clone();
+        std::thread::spawn(move || a.chat_set_agents(&id, false))
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    go_tx.send(()).unwrap();
+    yes.join().unwrap().unwrap();
+    no.join().unwrap().unwrap();
+    seedwell_sync_net::roles::test_while_deciding(&id, None);
+
+    assert!(!a.channel_status(&id).unwrap().agents, "the user's later No did not count");
+    let serials: Vec<u64> = a
+        .test_statements(&id)
+        .iter()
+        .filter_map(|st| match st.body {
+            Body::Agents { serial, .. } => Some(serial),
+            _ => None,
+        })
+        .collect();
+    let unique: std::collections::BTreeSet<u64> = serials.iter().copied().collect();
+    assert_eq!(unique.len(), serials.len(), "two Agents statements share a serial: {serials:?}");
+    a.shutdown().await;
 }
 
 /// Agents: Yes/No (SPEC §7G.7): one setting for the whole channel, in its membership. A Yes channel joined by link is
@@ -487,6 +537,55 @@ async fn leaving_the_last_shared_channel_forgets_the_other_device() {
     b.shutdown().await;
 }
 
+/// The sidebar's groups (SPEC §7G.7 *Groups*) are this device's: the failures caught are a channel's group lost on a
+/// restart, a deleted group leaving its id on its channels (they would vanish from the sidebar), a left channel's id
+/// staying in `sync.toml`, a name used twice, an unknown icon or group taken, and the order not kept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chat_groups_hold_channels_until_deleted_and_survive_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start_at(dir.path(), "Anna", |_| {}).await;
+    let team: FolderId = h.chat_new("Team", true).await.unwrap().id.parse().unwrap();
+    let bots: FolderId = h.chat_new("Bots", true).await.unwrap().id.parse().unwrap();
+    assert!(h.chat_groups().is_empty() && h.channel_status(&team).unwrap().group.is_none());
+
+    let agents = h.chat_group_new(" Agents ", "sparkles").unwrap();
+    assert_eq!((agents.name.as_str(), agents.icon.as_str()), ("Agents", "sparkles"));
+    let home = h.chat_group_new("Home", "").unwrap();
+    assert_eq!(home.icon, "house", "no icon: the one its name suggests");
+    assert_eq!(h.chat_group_new("Plans", "").unwrap().icon, "folder", "else a folder");
+    assert!(h.chat_group_new("agents", "star").is_err(), "a name in use (any case)");
+    assert!(h.chat_group_new("Work", "rocket").is_err(), "an unknown icon");
+    assert!(h.chat_set_group(&team, Some("nope")).is_err(), "an unknown group");
+
+    h.chat_set_group(&team, Some(&agents.id)).unwrap();
+    h.chat_set_group(&bots, Some(&agents.id)).unwrap();
+    h.chat_group_move(&home.id, 0).unwrap();
+    h.chat_group_edit(&agents.id, Some("Agent chats"), Some("hammer")).unwrap();
+    assert!(h.chat_group_edit(&agents.id, Some("Home"), None).is_err(), "renamed to a name in use");
+
+    // A restart keeps the groups, their order and each channel's group.
+    h.shutdown().await;
+    let h = start_at(dir.path(), "Anna", |_| {}).await;
+    let names: Vec<(String, String)> = h.chat_groups().into_iter().map(|g| (g.name, g.icon)).collect();
+    assert_eq!(names, [("Home".to_string(), "house".to_string()), ("Agent chats".into(), "hammer".into()), ("Plans".into(), "folder".into())]);
+    assert_eq!(h.channel_status(&team).unwrap().group.as_deref(), Some(agents.id.as_str()));
+
+    // Leaving a channel takes its entry, and its place in the group, with it.
+    h.chat_leave(&bots).unwrap();
+    let toml = || std::fs::read_to_string(dir.path().join("sync.toml")).unwrap();
+    assert_eq!(toml().matches(&format!("group = \"{}\"", agents.id)).count(), 1, "only Team's:\n{}", toml());
+
+    // Deleting the group returns Team to the plain list; nothing else changes.
+    h.chat_set_muted(&team, true).unwrap();
+    h.chat_group_delete(&agents.id).unwrap();
+    let t = h.channel_status(&team).unwrap();
+    assert!(t.group.is_none() && t.muted && t.name == "Team");
+    assert!(!toml().contains(&agents.id), "no dangling id:\n{}", toml());
+    assert!(h.chat_group_delete(&agents.id).is_err(), "gone");
+    assert_eq!(h.chat_groups().len(), 2, "Home and Plans stay, empty, until they are deleted");
+    h.shutdown().await;
+}
+
 /// The failure: the page marks a channel read (its save queued on the service's threads), and the service stops while
 /// that save has been taken but not written. The mark must be in `sync.toml` when `shutdown` returns, and nothing may
 /// write after it (a late save would lose the mark on quit, or overwrite a new service's configuration on the same
@@ -529,7 +628,7 @@ async fn a_stopped_service_saves_nothing_over_the_one_started_again() {
     let mut s = old.settings();
     s.down_kib = 456;
     // Said so in words the app can show (it may hold the old service for a moment while sync moves to another port).
-    assert_eq!(old.set_settings(s).unwrap_err().to_string(), trs_sync_net::service::STOPPED);
+    assert_eq!(old.set_settings(s).unwrap_err().to_string(), seedwell_sync_net::service::STOPPED);
     new.shutdown().await;
     // What the state says, as the next start reads it.
     let next = start_at(&state, "Anna", |_| {}).await;

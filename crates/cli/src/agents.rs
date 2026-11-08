@@ -3,8 +3,8 @@
 //! Agents, the menu) or with a reply of yes or no to the request's announcement in chat. No command answers.
 #![allow(missing_docs)] // variant fields are named after the options they hold
 
-use trs_control::proto::{AgentsRequestParams, AgentsRequestsParams, Request};
-use trs_control::types::{AccessAskedDto, AccessRequestDto, AccessRequestsDto};
+use seedwell_control::proto::{AgentsRequestParams, AgentsRequestsParams, Request};
+use seedwell_control::types::{AccessAskedDto, AccessRequestDto, AccessRequestsDto};
 
 use crate::args::{Opts, Usage};
 use crate::commands::{Global, R, ask, connect, show};

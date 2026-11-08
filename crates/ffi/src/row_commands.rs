@@ -9,7 +9,7 @@
 //! - [`seeding_goal_commands`]: its Seeding Goal part on its own (Get Info's "Then" menu).
 //! - [`capable_players`], [`playable_videos`], [`play_episode_label`]: what those Play entries are made of.
 
-use trs_platform::file_manager;
+use seedwell_platform::file_manager;
 
 use crate::host::{has, offered_commands, HostWindow};
 use crate::play::is_mp4_family;

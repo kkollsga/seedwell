@@ -2,9 +2,9 @@
 
 use std::net::SocketAddr;
 
-use trs_utp::packet::{self, Header, Packet, PacketType};
-use trs_utp::rng::Rng;
-use trs_utp::{Config, ConnStatus, Disposition, Endpoint};
+use seedwell_utp::packet::{self, Header, Packet, PacketType};
+use seedwell_utp::rng::Rng;
+use seedwell_utp::{Config, ConnStatus, Disposition, Endpoint};
 
 const T0: u64 = 1_000_000;
 
@@ -216,7 +216,7 @@ fn reset_requires_the_right_peer_and_id() {
     assert_eq!(ep.status(h), ConnStatus::Open);
     // libutp resets with the id it saw on the wire, which is our send id (recv + 1)
     ep.handle_datagram(T0 + 3000, peer, &pkt(PacketType::Reset, x.wrapping_add(1), 1, 1, 0, &[], &[]));
-    assert_eq!(ep.status(h), ConnStatus::Closed(trs_utp::End::Reset));
+    assert_eq!(ep.status(h), ConnStatus::Closed(seedwell_utp::End::Reset));
     let mut b = [0u8; 4];
     assert_eq!(ep.read(h, T0 + 3000, &mut b).unwrap_err().kind(), std::io::ErrorKind::ConnectionReset);
     assert_eq!(ep.write(h, T0 + 3000, b"x").unwrap_err().kind(), std::io::ErrorKind::ConnectionReset);

@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use adversarial_support::*;
-use trs_tracker::{Event, TorrentEvent, TorrentRole};
+use seedwell_tracker::{Event, TorrentEvent, TorrentRole};
 
 const T1: &str = "http://t1.test/announce?pk=1";
 const T2: &str = "http://t2.test/announce?pk=1";
@@ -256,7 +256,7 @@ fn quit_sends_one_stopped_per_tracker() {
 
 #[test]
 fn set_port_and_set_crypto_send_nothing_in_any_tier() {
-    use trs_tracker::Crypto;
+    use seedwell_tracker::Crypto;
     let (mut lab, log) = lab_with(|host, _, _| (host != "t1.test").then_some(1800));
     start(&mut lab, &[&[T1], &[T2]], TorrentRole::Seeding);
     lab.run_for(d(1000));
@@ -318,8 +318,8 @@ fn promotion_after_success_only_reorders_inside_the_tier() {
 
 #[test]
 fn tiers_of_one_tracker_profile_fold_into_one_stream_with_failover() {
-    use trs_tracker::TrackerUrl;
-    use trs_tracker::set::fold_tiers;
+    use seedwell_tracker::TrackerUrl;
+    use seedwell_tracker::set::fold_tiers;
     // main.tl.test and alt.tl.test are two names of one tracker (one profile); other.test is not.
     let tiers = |fold: bool| {
         let raw: Vec<Vec<TrackerUrl>> = ["http://main.tl.test/announce?pk=1", "http://alt.tl.test/announce?pk=1", "http://other.test/announce?pk=1"]

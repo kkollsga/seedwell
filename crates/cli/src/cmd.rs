@@ -3,11 +3,11 @@
 #![allow(missing_docs)] // variant fields are named after the options they hold
 
 
-use trs_control::proto::{AtGoalParam, FilePriorityParam, KindFilter, ListFilter, PriorityParam, SetLimitsParams};
+use seedwell_control::proto::{AtGoalParam, FilePriorityParam, KindFilter, ListFilter, PriorityParam, SetLimitsParams};
 
 use crate::args::{Opts, Usage, parse_duration, parse_index_list, parse_rate};
 use crate::select::{Selection, parse_state};
-use crate::{agents, awake, chat, debug, mail, sim, skill, sync, update};
+use crate::{agents, awake, chat, debug, mail, proxy, restart, sim, skill, sync, update};
 
 /// What `start` does with the files.
 #[derive(Clone, Debug, PartialEq)]
@@ -104,6 +104,8 @@ pub struct LogArgs {
     pub limit: Option<u32>,
     /// `--since` in seconds.
     pub since_secs: Option<u64>,
+    /// `--clear`: delete the log (Settings › Advanced › Developer › Clear).
+    pub clear: bool,
 }
 
 /// What `seedwell dev` does.
@@ -178,10 +180,12 @@ pub enum Cmd {
     Stats { tracker: Option<String>, days: Option<u32> },
     /// `rules`
     Rules,
-    /// `settings get`
-    SettingsGet { keys: Vec<String> },
-    /// `settings set`
+    /// `settings get [key...]`, or `settings get --file rules|trackers`
+    SettingsGet { keys: Vec<String>, file: Option<String> },
+    /// `settings set key=value...`
     SettingsSet { pairs: Vec<(String, String)> },
+    /// `settings set --file rules|trackers <json>|-`: replace that document.
+    SettingsSetFile { file: String, doc: String },
     /// `wait`
     Wait { sel: Selection, any: bool, timeout: u32 },
     /// `watch`
@@ -210,6 +214,10 @@ pub enum Cmd {
     Agents(agents::Agents),
     /// `update …` (the running version, development builds)
     Update(update::Cmd),
+    /// `restart [--no-wait] [--timeout T]` (quit the app and open it again)
+    Restart(restart::Restart),
+    /// `proxy …` (the torrent proxy)
+    Proxy(proxy::Cmd),
     /// `relay [--port N] [--bind ADDR] [--key-file PATH]`
     Relay(sync::RelayArgs),
     /// `help [x]`
@@ -479,10 +487,24 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
             Cmd::Rules
         }
         "settings" => {
+            let file = o.value(&["--file"])?;
             let pos = o.finish()?;
             let mut it = pos.into_iter();
             match it.next().as_deref() {
-                None | Some("get") => Cmd::SettingsGet { keys: it.collect() },
+                None | Some("get") => {
+                    let keys: Vec<String> = it.collect();
+                    if file.is_some() && !keys.is_empty() {
+                        return Err(Usage("usage: seedwell settings get [key...] | settings get --file rules|trackers".into()));
+                    }
+                    Cmd::SettingsGet { keys, file }
+                }
+                Some("set") if file.is_some() => {
+                    let rest: Vec<String> = it.collect();
+                    let [doc] = rest.as_slice() else {
+                        return Err(Usage("usage: seedwell settings set --file rules|trackers <json>|-   (- reads the JSON from standard input)".into()));
+                    };
+                    Cmd::SettingsSetFile { file: file.unwrap_or_default(), doc: doc.clone() }
+                }
                 Some("set") => {
                     let mut pairs = Vec::new();
                     for kv in it {
@@ -542,6 +564,8 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, Usage> {
         "awake" => Cmd::Awake(awake::parse(rest)?),
         "agents" => Cmd::Agents(agents::parse(rest)?),
         "update" => Cmd::Update(update::parse(rest)?),
+        "restart" => Cmd::Restart(restart::parse(rest)?),
+        "proxy" => Cmd::Proxy(proxy::parse(rest)?),
         "relay" => Cmd::Relay(sync::parse_relay(rest)?),
         "help" => {
             // Options an agent passes everywhere (`--as kglite`, `--channel C`) change nothing here.
@@ -565,6 +589,7 @@ pub fn parse_log_args(o: &mut Opts) -> Result<LogArgs, Usage> {
         event: o.value(&["--event"])?,
         limit: o.number::<u32>(&["--limit", "-n"])?,
         since_secs: o.value(&["--since"])?.map(|s| parse_duration(&s)).transpose()?,
+        clear: o.flag(&["--clear"]),
     })
 }
 
@@ -645,7 +670,13 @@ mod tests {
         assert!(p("seedwell tracker tl pex maybe").is_err());
         assert!(matches!(p("seedwell stats tl --days 14").unwrap(), Cmd::Stats { days: Some(14), .. }));
         assert_eq!(p("seedwell rules").unwrap(), Cmd::Rules);
-        assert!(matches!(p("seedwell settings get a.b").unwrap(), Cmd::SettingsGet { keys } if keys == vec!["a.b"]));
+        assert!(matches!(p("seedwell settings get a.b").unwrap(), Cmd::SettingsGet { keys, file: None } if keys == vec!["a.b"]));
+        assert!(matches!(p("seedwell settings get --file rules").unwrap(), Cmd::SettingsGet { keys, file: Some(f) } if keys.is_empty() && f == "rules"));
+        assert!(matches!(p("seedwell settings set --file trackers -").unwrap(), Cmd::SettingsSetFile { file, doc } if file == "trackers" && doc == "-"));
+        for bad in ["seedwell settings get a.b --file rules", "seedwell settings set --file rules", "seedwell settings set --file rules a b"] {
+            assert!(p(bad).is_err(), "{bad}");
+        }
+        assert!(matches!(p("seedwell log trackers --clear").unwrap(), Cmd::LogTrackers(a) if a.clear));
         assert!(matches!(p("seedwell settings set a.b=1 c=d").unwrap(), Cmd::SettingsSet { pairs } if pairs.len() == 2));
         assert!(matches!(p("seedwell wait sintel --any --timeout 5").unwrap(), Cmd::Wait { any: true, timeout: 5, .. }));
         assert!(matches!(p("seedwell watch --kinds a,b --count 2").unwrap(), Cmd::Watch { count: Some(2), .. }));

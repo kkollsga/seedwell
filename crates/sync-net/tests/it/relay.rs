@@ -3,11 +3,11 @@
 //! dialed" is the services' test switch that refuses direct sessions between two devices.
 
 use tokio::net::TcpListener;
-use trs_sync_net::session::Via;
-use trs_sync_net::{RelayOptions, run_relay};
-use trs_sync_proto::device::DeviceKey;
-use trs_sync_proto::ids::{DeviceId, FolderId};
-use trs_sync_proto::members::Role;
+use seedwell_sync_net::session::Via;
+use seedwell_sync_net::{RelayOptions, run_relay};
+use seedwell_sync_proto::device::DeviceKey;
+use seedwell_sync_proto::ids::{DeviceId, FolderId};
+use seedwell_sync_proto::members::Role;
 
 use crate::utp::{Device, addr, device_with, read, until};
 
@@ -161,12 +161,12 @@ async fn a_member_relays_a_channel_between_devices_that_cannot_reach_each_other(
     // C leaves the channel: it still relays the session (it shares nothing with them now, but the pipe stands),
     // and the message can only come over the relayed session.
     c.h.chat_leave(&id).unwrap();
-    a.h.chat_send(&id, None, trs_sync_net::chat::MessageKind::Text, "over the relay", None, None).await.unwrap();
+    a.h.chat_send(&id, None, seedwell_sync_net::chat::MessageKind::Text, "over the relay", None, None).await.unwrap();
     until(30, "B has A's message", || texts(&b, &id) == ["over the relay"]).await;
     // A private message never goes over a relayed session (SPEC §7G.7 *Direct messages*).
     assert!(!a.h.test_direct_knows(&bi), "no key over a relay");
-    let e = a.h.chat_send_direct(&bi, trs_sync_net::chat::MessageKind::Text, "just us", None, None).await.unwrap_err().to_string();
-    assert!(e.contains(concat!("not connected to this ", trs_platform::computer!(), " directly")), "{e}");
+    let e = a.h.chat_send_direct(&bi, seedwell_sync_net::chat::MessageKind::Text, "just us", None, None).await.unwrap_err().to_string();
+    assert!(e.contains(concat!("not connected to this ", seedwell_platform::computer!(), " directly")), "{e}");
     assert_eq!(b.h.test_direct_held() + c.h.test_direct_held(), 0);
     for d in [&a, &b, &c] {
         d.h.shutdown().await;
@@ -197,9 +197,9 @@ async fn devices_registered_at_a_relay_server_chat_through_it() {
     })
     .await;
     // With direct sessions refused and no third device, these can only come through the relay.
-    a.h.chat_send(&id, None, trs_sync_net::chat::MessageKind::Text, "through the server", None, None).await.unwrap();
+    a.h.chat_send(&id, None, seedwell_sync_net::chat::MessageKind::Text, "through the server", None, None).await.unwrap();
     until(30, "B has A's message", || texts(&b, &id) == ["through the server"]).await;
-    b.h.chat_send(&id, None, trs_sync_net::chat::MessageKind::Text, "and back", None, None).await.unwrap();
+    b.h.chat_send(&id, None, seedwell_sync_net::chat::MessageKind::Text, "and back", None, None).await.unwrap();
     until(30, "A has B's answer", || texts(&a, &id).last().is_some_and(|t| t == "and back")).await;
     a.h.shutdown().await;
     b.h.shutdown().await;

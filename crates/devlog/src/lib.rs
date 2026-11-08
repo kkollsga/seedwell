@@ -1,7 +1,7 @@
 //! Developer-mode log of tracker communication (SPEC 8.7).
 //!
 //! * [`Entry`] is plain data filled by the engine. [`DevLog::log`] is the **logging boundary**: it
-//!   masks every secret (`trs_state::url::mask_secrets_for_log`, `mask_text`), formats one JSON line
+//!   masks every secret (`seedwell_state::url::mask_secrets_for_log`, `mask_text`), formats one JSON line
 //!   and hands the finished string to a bounded channel. Nothing unmasked ever reaches the writer.
 //! * Off, the cost is one relaxed atomic load ([`DevLog::enabled`]); callers build entries only
 //!   when it is true. No thread exists until the first time the log is switched on.

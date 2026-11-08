@@ -8,17 +8,17 @@
 //! the device that posted it without one. Devices without tags show the notes as small messages.
 
 use serde_json::{Value, json};
-use trs_control::proto::*;
-use trs_control::types::*;
+use seedwell_control::proto::*;
+use seedwell_control::types::*;
 
 use crate::commands::{CliError, R, ask};
 
-pub use trs_control::mail::{KNOWN, Owned, Owner, change, is_tag, line, normalize, note, of, of_agent};
-use trs_control::mail::computer;
+pub use seedwell_control::mail::{KNOWN, Owned, Owner, change, is_tag, line, normalize, note, of, of_agent};
+use seedwell_control::mail::computer;
 
 /// `tag`: changes `me`'s tags on the message `id` in `channel` (nothing to change: shows them). The text to print, and
 /// the JSON.
-pub async fn run(c: &mut trs_control::client::Client, channel: &str, me: &str, id: &str, add: &[String], remove: &[String], clear: bool) -> R<(String, Value)> {
+pub async fn run(c: &mut seedwell_control::client::Client, channel: &str, me: &str, id: &str, add: &[String], remove: &[String], clear: bool) -> R<(String, Value)> {
     let (_, l): (_, ChatMessagesDto) = ask(c, Request::ChatRead(ChatReadParams { channel: channel.to_string(), last: Some(1000), ..Default::default() })).await?;
     let q = id.trim().trim_start_matches('#').to_lowercase();
     if q.len() < 8 {

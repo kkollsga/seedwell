@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import SeedwellApp
 
-// A row's commands (SPEC §8.5) are the core's list (`rowCommands`, tested in trs-ffi's row_commands); the app draws
+// A row's commands (SPEC §8.5) are the core's list (`rowCommands`, tested in seedwell-ffi's row_commands); the app draws
 // it as menu entries and runs each command. These check the drawing and the running against a mock core.
 
 @MainActor @Suite("Row commands", .timeLimit(.minutes(1)))

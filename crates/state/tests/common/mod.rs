@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use trs_state::{OpenOptions, Opened, Store};
+use seedwell_state::{OpenOptions, Opened, Store};
 
 /// A Unix-style absolute test path made absolute on this system: unchanged on Unix, a drive letter in front on Windows.
 pub fn abs(p: &str) -> String {
@@ -25,7 +25,7 @@ pub struct TempDir(PathBuf);
 impl TempDir {
     pub fn new(label: &str) -> Self {
         let n = N.fetch_add(1, Ordering::Relaxed);
-        let p = std::env::temp_dir().join(format!("trs-state-it-{label}-{}-{n}", std::process::id()));
+        let p = std::env::temp_dir().join(format!("seedwell-state-it-{label}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         TempDir(p)

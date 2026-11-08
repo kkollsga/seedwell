@@ -1,5 +1,5 @@
 [package]
-name = "trs-metainfo"
+name = "seedwell-metainfo"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ publish = false
 description = ".torrent and magnet parsing, info-hash and peer-id types for Seedwell"
 
 [dependencies]
-trs-bencode = { path = "../bencode" }
+seedwell-bencode = { path = "../bencode" }
 # RustCrypto SHA-1/SHA-256 0.11: ARM SHA intrinsics on aarch64, picked at runtime
 # (cpufeatures); pure-Rust fallback elsewhere; no asm or linking needed.
 sha1 = { version = "0.11", default-features = false }

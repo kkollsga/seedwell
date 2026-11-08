@@ -1,5 +1,5 @@
 using Microsoft.Win32;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
@@ -63,7 +63,7 @@ static class Registration
         }
         // Explorer's "Share with Seedwell" on folders: the core's title and arguments (--share "%1"), after the quoted
         // path of this exe; the core reads the path back (command_line_routes). Nothing is encoded here.
-        var verb = uniffi.trs_ffi.TrsFfiMethods.ExplorerShareVerb();
+        var verb = uniffi.seedwell_ffi.SeedwellFfiMethods.ExplorerShareVerb();
         foreach (var key in VerbParents)
         {
             using var v = Registry.CurrentUser.CreateSubKey(key);
@@ -87,7 +87,7 @@ static class Registration
     {
         Notifier.Unregister();
         // (Whatever happens here, the rest of the uninstall's clean-up goes on.)
-        try { NavPaneEntry.RemoveAll(TrsFfiMethods.SyncNavPaneMarker()); } catch (Exception e) { AppLog.Write($"navigation pane entry not removed: {e.Message}"); }
+        try { NavPaneEntry.RemoveAll(SeedwellFfiMethods.SyncNavPaneMarker()); } catch (Exception e) { AppLog.Write($"navigation pane entry not removed: {e.Message}"); }
         Registry.CurrentUser.DeleteSubKeyTree($@"{Classes}\{ProgId}", false);
         using (var ext = Registry.CurrentUser.OpenSubKey($@"{Classes}\.torrent\OpenWithProgids", true))
         {

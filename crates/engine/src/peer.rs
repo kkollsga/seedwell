@@ -1,7 +1,7 @@
 //! One peer connection: a tokio task that owns the socket.
 //!
 //! Division of labour (ENGINE.md 2, 4):
-//! * The **peer task** frames messages with `trs-wire`, answers `request`s straight from storage,
+//! * The **peer task** frames messages with `seedwell-wire`, answers `request`s straight from storage,
 //!   writes received blocks straight into storage (no hop through the torrent actor), enforces the
 //!   rate limits, and keeps its read buffer leased only while bytes flow.
 //! * The **torrent actor** makes every decision (what to request, who to unchoke) and sends the
@@ -19,9 +19,9 @@ use std::time::{Duration, Instant};
 
 use bytes::{Buf, Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use trs_utp::UtpSocket;
-use trs_storage::{Pending, StorageError, TorrentHandle, WriteAck};
-use trs_wire::{
+use seedwell_utp::UtpSocket;
+use seedwell_storage::{Pending, StorageError, TorrentHandle, WriteAck};
+use seedwell_wire::{
     BLOCK_SIZE, BlockRequest, Decoder, Encoder, ExtPolicy, ExtendedMessage, HANDSHAKE_LEN,
     Handshake, LocalExtendedHandshake, Limits, Message, MessageRef, MetadataMessage, PeerState,
     Reserved,
@@ -118,7 +118,7 @@ pub(crate) struct DiskCtx {
     pub piece_len: u32,
     pub total_len: u64,
     /// File geometry (for per-file upload accounting; a move keeps it).
-    pub layout: Arc<trs_storage::Layout>,
+    pub layout: Arc<seedwell_storage::Layout>,
 }
 
 /// Payload bytes served per file since the torrent went live. Allocated on the first block served
@@ -130,7 +130,7 @@ pub(crate) struct FileUp {
 
 impl FileUp {
     /// Credits a served block to the files it falls in.
-    pub(crate) fn add(&self, layout: &trs_storage::Layout, piece: u32, begin: u32, len: u32) {
+    pub(crate) fn add(&self, layout: &seedwell_storage::Layout, piece: u32, begin: u32, len: u32) {
         let Some(segs) = layout.piece_segments(piece, begin, len as usize) else { return };
         let v = self.bytes.get_or_init(|| (0..layout.file_count()).map(|_| AtomicU64::new(0)).collect());
         for s in segs.filter(|s| !s.padding) {
@@ -231,6 +231,9 @@ pub(crate) struct PeerCtx {
     pub version: String,
     pub metadata_size: AtomicU32,
     pub complete: AtomicBool,
+    /// We want nothing (complete, or every wanted piece held): BEP 21's `upload_only`, as our extended handshake
+    /// says it. The torrent keeps it current and has connected peers told when it changes.
+    pub upload_only: AtomicBool,
     /// Set while finished files are being moved out of staging: nothing may be served.
     pub hold_uploads: AtomicBool,
     pub connect_timeout: Duration,
@@ -307,10 +310,14 @@ pub(crate) enum PeerCmd {
     Requests(Vec<BlockRequest>),
     Cancel(BlockRequest),
     Pex(Vec<u8>),
-    /// Send a fresh extended handshake (the extensions we offer changed).
+    /// Send a fresh extended handshake if what it says changed (the extensions we offer, `upload_only`).
     ReadvertiseExt,
     Metadata(Box<MetaOut>),
     Disconnect,
+    /// Close after sending what is already queued, above all the extended handshake that says we want
+    /// nothing more (`upload_only`). Without it the peer only sees the connection end, takes us for a peer
+    /// that still downloads and dials us right back.
+    Leave,
 }
 
 /// A `ut_metadata` message to send.
@@ -324,7 +331,7 @@ pub(crate) enum MetaOut {
 pub(crate) enum BlockAck {
     Buffered,
     Duplicate,
-    Complete(Pending<trs_storage::PieceOutcome>),
+    Complete(Pending<seedwell_storage::PieceOutcome>),
 }
 
 /// Messages from a peer.
@@ -343,6 +350,8 @@ pub(crate) enum PeerEvent {
     Block { piece: u32, begin: u32, len: u32, ack: BlockAck },
     Rejected(BlockRequest),
     Pex(Vec<(SocketAddr, bool)>),
+    /// libtorrent's `upload_only` message: the peer wants nothing from us, or wants pieces again.
+    UploadOnly(bool),
     MetaRequest(u32),
     MetaData { piece: u32, total: u32, data: Bytes },
     MetaReject(u32),
@@ -434,20 +443,20 @@ async fn connect_transport(ctx: &PeerCtx, shared: &PeerShared, addr: SocketAddr,
         crate::proxy::Route::Direct => {}
         crate::proxy::Route::Held => return Err(Close::Io("held: the proxy is not working".into())),
         crate::proxy::Route::Via(p) => {
-            return match trs_socks::connect(&p, &trs_socks::Target::Addr(addr), ctx.connect_timeout).await {
+            return match seedwell_socks::connect(&p, &seedwell_socks::Target::Addr(addr), ctx.connect_timeout).await {
                 Ok((s, t)) => {
                     ctx.proxy.dial_ok(t);
                     Ok(PeerIo::Tcp(s))
                 }
                 Err(e) => {
                     ctx.proxy.dial_failed(&e);
-                    Err(if e == trs_socks::Error::TargetTimeout { Close::Timeout } else { Close::Io(e.to_string()) })
+                    Err(if e == seedwell_socks::Error::TargetTimeout { Close::Timeout } else { Close::Io(e.to_string()) })
                 }
             };
         }
     }
     async fn tcp(ctx: &PeerCtx, addr: SocketAddr) -> Result<PeerIo, Close> {
-        let s = tokio::time::timeout(ctx.connect_timeout, trs_platform::net::connect_tcp(addr))
+        let s = tokio::time::timeout(ctx.connect_timeout, seedwell_platform::net::connect_tcp(addr))
             .await
             .map_err(|_| Close::Timeout)?
             .map_err(|e| Close::Io(e.to_string()))?;
@@ -527,11 +536,11 @@ enum Wake {
     Cmd(Option<PeerCmd>),
     Readable(std::io::Result<()>),
     Writable(std::io::Result<()>),
-    ReadDone(trs_storage::Result<()>),
+    ReadDone(seedwell_storage::Result<()>),
     Timer,
 }
 
-/// Sizes of the per-connection structures, for the `TRS_SIZES` diagnostic.
+/// Sizes of the per-connection structures, for the `SEEDWELL_SIZES` diagnostic.
 pub(crate) fn debug_sizes() -> String {
     format!(
         "Peer {} B, PeerSpawn {} B, ReadJob {} B, Run {} B, Decoder {} B, Encoder {} B, PeerState {} B, PeerIo {} B",
@@ -551,7 +560,7 @@ fn poll_front(
     reads: &VecDeque<ReadJob>,
     runs: &mut VecDeque<Run>,
     cx: &mut std::task::Context<'_>,
-) -> std::task::Poll<trs_storage::Result<()>> {
+) -> std::task::Poll<seedwell_storage::Result<()>> {
     use std::task::Poll;
     let Some(job) = reads.front() else { return Poll::Pending };
     let Some(first) = runs.front().map(|r| r.id) else { return Poll::Pending };
@@ -602,7 +611,7 @@ pub(crate) fn fault_kind_of_text(e: &str) -> FaultKind {
         .rsplit_once("(os error ")
         .and_then(|(_, rest)| rest.split_once(')'))
         .and_then(|(n, _)| n.parse::<i32>().ok());
-    if code.is_some_and(trs_storage::os_error_is_write_blocked) { FaultKind::Blocked } else { FaultKind::Other }
+    if code.is_some_and(seedwell_storage::os_error_is_write_blocked) { FaultKind::Blocked } else { FaultKind::Other }
 }
 
 /// A block a peer asked for, answered in request order.
@@ -664,8 +673,15 @@ struct Peer {
     read_pause_until: Option<Instant>,
     up_pause_until: Option<Instant>,
     misbehaviour: u32,
+    /// Both ends speak the extension protocol (BEP 10): extended messages may be sent.
+    ext: bool,
     /// Our extended handshake to this peer listed `ut_pex` (so it may send us PEX).
     advertised_pex: bool,
+    /// Our last extended handshake to this peer said `upload_only`.
+    advertised_upload_only: bool,
+    /// What a libtorrent-family peer (qBittorrent, Deluge) takes our `upload_only` to be: a handshake only ever
+    /// sets it there, and only lt's `upload_only` message clears it.
+    lt_sees_upload_only: bool,
     /// Bytes of the encoder's stream handed to the transport so far.
     enc_written: u64,
     /// Piece payload inside the encoder's queue, as `(start, end)` offsets in the same stream, in
@@ -675,7 +691,7 @@ struct Peer {
 
 /// Peers may queue this many outstanding requests with us (twice our advertised `reqq`, for requests that
 /// cross a cancel on the wire).
-const MAX_QUEUED_READS: usize = 2 * trs_wire::extended::DEFAULT_REQQ as usize;
+const MAX_QUEUED_READS: usize = 2 * seedwell_wire::extended::DEFAULT_REQQ as usize;
 /// Blocks that arrive without a matching request before we hang up.
 const MAX_UNWANTED_BLOCKS: u32 = 64;
 const KEEPALIVE_AFTER: Duration = Duration::from_secs(90);
@@ -742,7 +758,7 @@ impl Peer {
             .map_err(|_| Close::Local)?;
         let welcome = match tokio::time::timeout(Duration::from_secs(10), cmds.recv()).await {
             Ok(Some(PeerCmd::Welcome(w))) => *w,
-            Ok(Some(PeerCmd::Disconnect)) | Ok(None) => return Err(Close::Local),
+            Ok(Some(PeerCmd::Disconnect | PeerCmd::Leave)) | Ok(None) => return Err(Close::Local),
             _ => return Err(Close::Timeout),
         };
         let limits = welcome.num_pieces.map_or_else(Limits::default, Limits::for_pieces);
@@ -778,7 +794,10 @@ impl Peer {
             read_pause_until: None,
             up_pause_until: None,
             misbehaviour: 0,
+            ext,
             advertised_pex: false,
+            advertised_upload_only: false,
+            lt_sees_upload_only: false,
             enc_written: 0,
             payload_marks: VecDeque::new(),
         });
@@ -810,9 +829,26 @@ impl Peer {
         h.listen_port = u16::try_from(lp).ok().filter(|&p| p != 0);
         let ms = self.ctx.metadata_size.load(Ordering::Relaxed);
         h.metadata_size = (ms != 0).then_some(ms);
-        h.upload_only = self.ctx.complete.load(Ordering::Relaxed);
+        h.upload_only = self.ctx.upload_only.load(Ordering::Relaxed);
+        self.advertised_upload_only = h.upload_only;
+        self.lt_sees_upload_only |= h.upload_only;
         h.your_ip = Some(self.addr.ip());
         self.enc.push_extended(0, |b| h.encode_payload(b));
+    }
+
+    /// Tell a peer that lists libtorrent's `upload_only` message what our last handshake said, where it may
+    /// see otherwise: a libtorrent peer never clears our upload-only state from a handshake, so without the
+    /// message a partial seed that wants pieces again still looks upload-only to it and is dropped as
+    /// redundant. `changed`: our value just changed; it is sent then even where the handshake already said
+    /// it, as libtorrent does, so that a peer that reads only the message learns it too.
+    fn tell_lt_upload_only(&mut self, changed: bool) {
+        let id = self.st.remote_upload_only;
+        let now = self.advertised_upload_only;
+        if id == 0 || !changed && self.lt_sees_upload_only == now {
+            return;
+        }
+        self.enc.push_extended(id, |b| seedwell_wire::extended::encode_upload_only(b, now));
+        self.lt_sees_upload_only = now;
     }
 
     fn release_rx(&mut self) {
@@ -888,6 +924,7 @@ impl Peer {
             .await;
             match wake {
                 Wake::Cmd(None) => return Err(Close::Local),
+                Wake::Cmd(Some(PeerCmd::Leave)) => return Err(self.leave().await),
                 Wake::Cmd(Some(c)) => self.on_cmd(c)?,
                 Wake::Readable(r) => {
                     r.map_err(|e| Close::Io(e.to_string()))?;
@@ -1203,7 +1240,7 @@ impl Peer {
     }
 
     /// A storage read finished (or failed): send every block that is ready, in request order.
-    async fn on_read_done(&mut self, res: trs_storage::Result<()>) -> Result<(), Close> {
+    async fn on_read_done(&mut self, res: seedwell_storage::Result<()>) -> Result<(), Close> {
         self.send_ready(res).await?;
         // Blocks left, so there is room to start reads for requests that were held back.
         if self.reads.back().is_some_and(|j| j.run == NO_RUN) {
@@ -1212,7 +1249,7 @@ impl Peer {
         Ok(())
     }
 
-    async fn send_ready(&mut self, res: trs_storage::Result<()>) -> Result<(), Close> {
+    async fn send_ready(&mut self, res: seedwell_storage::Result<()>) -> Result<(), Close> {
         if let Err(e) = res {
             let _ = self.emit(PeerEvent::StorageFault(e.to_string(), fault_kind(&e))).await;
             return Err(Close::Storage(e.to_string()));
@@ -1339,8 +1376,10 @@ impl Peer {
         let parsed = match ExtendedMessage::parse(id, payload, self.ctx.policy()) {
             Ok(m) => m,
             // PEX switched off after we advertised it: the peer is only late to notice.
-            Err(trs_wire::Error::ExtensionDisabled(_)) if self.advertised_pex && id == trs_wire::extended::LOCAL_UT_PEX_ID => return Ok(()),
-            Err(trs_wire::Error::ExtensionDisabled(_)) => {
+            Err(seedwell_wire::Error::ExtensionDisabled(_)) if self.advertised_pex && id == seedwell_wire::extended::LOCAL_UT_PEX_ID => return Ok(()),
+            // A malformed lt `upload_only` is ignored, as libtorrent does.
+            Err(seedwell_wire::Error::InvalidField("upload_only")) => return Ok(()),
+            Err(seedwell_wire::Error::ExtensionDisabled(_)) => {
                 // e.g. PEX on a private torrent: ignore, but a peer that keeps doing it goes.
                 self.misbehaviour += 8;
                 return if self.misbehaviour > MAX_UNWANTED_BLOCKS {
@@ -1354,6 +1393,8 @@ impl Peer {
         match parsed {
             ExtendedMessage::Handshake(h) => {
                 self.st.apply_extended_handshake(&h);
+                // Our upload-only state was cleared before we knew the peer's id for the message.
+                self.tell_lt_upload_only(false);
                 let info = ExtInfo {
                     client: h.client_lossy().map(|c| c.into_owned()),
                     listen_port: h.listen_port,
@@ -1384,12 +1425,13 @@ impl Peer {
                     return Ok(());
                 }
                 let addrs: Vec<(SocketAddr, bool)> =
-                    m.added().map(|p| (p.addr, p.flags.has(trs_wire::PexFlags::UTP))).take(200).collect();
+                    m.added().map(|p| (p.addr, p.flags.has(seedwell_wire::PexFlags::UTP))).take(200).collect();
                 if addrs.is_empty() {
                     return Ok(());
                 }
                 self.emit(PeerEvent::Pex(addrs)).await
             }
+            ExtendedMessage::UploadOnly(v) => self.emit(PeerEvent::UploadOnly(v)).await,
             ExtendedMessage::Unknown { .. } => Ok(()),
         }
     }
@@ -1441,10 +1483,16 @@ impl Peer {
                 self.requested.retain(|&(i, b)| !(i == r.index && b == r.begin));
                 self.enc.push(&Message::<&[u8]>::Cancel(r));
             }
-            // PEX was switched on after the handshake: tell the peer (BEP 10 allows a new handshake).
+            // PEX was switched on, or we became upload-only or want pieces again, after the handshake: tell
+            // the peer (BEP 10 allows a new handshake).
             PeerCmd::ReadvertiseExt => {
-                if !self.advertised_pex && self.ctx.pex.load(Ordering::Relaxed) {
+                let pex = !self.advertised_pex && self.ctx.pex.load(Ordering::Relaxed);
+                let upload_only = self.advertised_upload_only != self.ctx.upload_only.load(Ordering::Relaxed);
+                if self.ext && (pex || upload_only) {
                     self.send_ext_handshake();
+                    if upload_only {
+                        self.tell_lt_upload_only(true);
+                    }
                 }
             }
             PeerCmd::Pex(payload) => {
@@ -1470,8 +1518,41 @@ impl Peer {
                 }
             }
             PeerCmd::Disconnect => return Err(Close::Local),
+            PeerCmd::Leave => return Err(Close::Local),
         }
         Ok(())
+    }
+
+    /// [`PeerCmd::Leave`]: send what is queued, then close. Bounded: a queue longer than a few control
+    /// messages (piece data the peer no longer needs) or a peer that does not read within `LEAVE_WITHIN`
+    /// is cut off as a plain close would.
+    ///
+    /// Over TCP the peer's bytes are read (and dropped) until it closes too: a socket closed with bytes
+    /// unread, or that bytes reach after it closed, answers with a reset, and a reset makes the peer's
+    /// system (Windows above all) discard what it has received from us and not yet read, the
+    /// handshake that says we want nothing among it. uTP has no such reset.
+    async fn leave(&mut self) -> Close {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        const LEAVE_MAX: usize = 4096;
+        const LEAVE_WITHIN: Duration = Duration::from_secs(2);
+        if self.enc.pending().len() <= LEAVE_MAX {
+            let (stream, enc) = (&mut self.stream, &self.enc);
+            let _ = tokio::time::timeout(LEAVE_WITHIN, async {
+                stream.write_all(enc.pending()).await?;
+                // Through RC4 the tail may still be held back.
+                stream.flush().await?;
+                // The end of the stream after the data (a FIN, not a reset that could discard it).
+                stream.shutdown().await?;
+                if !stream.is_utp() {
+                    // On the heap: an array here would be part of every peer task's future, leaving or not.
+                    let mut sink = vec![0u8; 1024];
+                    while stream.read(&mut sink).await? != 0 {}
+                }
+                std::io::Result::Ok(())
+            })
+            .await;
+        }
+        Close::Local
     }
 }
 
@@ -1481,7 +1562,7 @@ mod tests {
 
     #[test]
     fn served_blocks_are_credited_to_the_files_they_fall_in() {
-        use trs_storage::{FilePath, FileSpec, Layout};
+        use seedwell_storage::{FilePath, FileSpec, Layout};
         let spec = |n: &str, len: u64, pad: bool| FileSpec { path: FilePath::Relative(vec![n.into()]), length: len, is_padding: pad };
         // Pieces of 32: a is bytes 0..40, a padding file 40..64, b 64..100.
         let l = Layout::new(32, 100, 4, vec![spec("a", 40, false), spec("pad", 24, true), spec("b", 36, false)]).unwrap();

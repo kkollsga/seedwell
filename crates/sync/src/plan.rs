@@ -5,7 +5,7 @@
 //! deletes (deepest first, so a directory is empty by the time its own delete comes). The puller re-plans
 //! after every round, so a step that could not run yet (a directory that is not empty) simply comes again.
 
-use trs_sync_proto::model::{FileInfo, FileKind};
+use seedwell_sync_proto::model::{FileInfo, FileKind};
 
 use crate::global::Need;
 use crate::index::{LocalRecord, NeedRecord};
@@ -104,8 +104,8 @@ pub fn plan(needs: &[(String, NeedRecord)], local: &dyn Fn(&str) -> Option<Local
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trs_sync_proto::ids::ShortId;
-    use trs_sync_proto::model::{ChunkRef, SignedFile, Version};
+    use seedwell_sync_proto::ids::ShortId;
+    use seedwell_sync_proto::model::{ChunkRef, SignedFile, Version};
 
     fn info(path: &str, kind: FileKind, size: u64, content: u8, deleted: bool) -> FileInfo {
         FileInfo {

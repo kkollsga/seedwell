@@ -4,7 +4,7 @@
 //! * [`proto`]: wire format, every method with its params and required permission.
 //! * [`types`]: result types. [`ops`], [`settings`], [`redact`]: pure logic.
 //! * [`server`]: [`serve_backend`] over any [`Backend`]; with feature `engine`, [`serve`] and
-//!   [`start_for_app`] wire it to `trs_engine::EngineHandle`.
+//!   [`start_for_app`] wire it to `seedwell_engine::EngineHandle`.
 //! * `sync` (feature `sync`): the folder sync service next to the engine (`start_sync`, the DHT
 //!   discovery it borrows, `SyncSlot`) and what the `sync.*` methods need.
 //! * [`client`]: connect, handshake, request, events.
@@ -32,6 +32,7 @@ pub mod ops;
 pub mod others;
 pub mod perm;
 pub mod proto;
+pub mod proxy;
 pub mod redact;
 pub mod server;
 pub mod settings;
@@ -46,13 +47,14 @@ mod engine_backend;
 pub mod sync;
 
 pub use access::AccessDesk;
-pub use activity::ActivityLog;
+pub use activity::{ACTIVITY_FILE, ActivityLog};
 pub use awake::Awake;
 pub use backend::{AddArgs, AddSource, Backend};
 pub use builds::{Builds, BuildsSlot};
 pub use client::{Client, ClientError};
 pub use perm::{Permission, PermissionHandle, PermissionSource};
 pub use proto::{ApiError, ErrorCode, Method, Request, PROTOCOL_VERSION};
+pub use proxy::{ProxyControl, ProxySlot};
 pub use server::{ServerHandle, ServerOptions, serve_backend};
 pub use socket::default_socket_path;
 pub use state::StateAccess;

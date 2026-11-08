@@ -52,7 +52,7 @@ fn dur(secs: i64) -> String {
 /// Local wall-clock `HH:MM:SS`, matching the times the app's list shows (the file itself keeps UTC).
 fn hms(ms: u64) -> String {
     let secs = (ms / 1000) as i64;
-    let local = (secs + i64::from(trs_platform::proc::utc_offset(secs))).rem_euclid(86_400);
+    let local = (secs + i64::from(seedwell_platform::proc::utc_offset(secs))).rem_euclid(86_400);
     format!("{:02}:{:02}:{:02}", local / 3600, local / 60 % 60, local % 60)
 }
 

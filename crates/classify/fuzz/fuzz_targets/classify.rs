@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use trs_classify::{FileEntry, Input, classify};
+use seedwell_classify::{FileEntry, Input, classify};
 
 // Input layout: name \0 hint \0 path:size \n path:size ...  (all lossy UTF-8)
 fuzz_target!(|data: &[u8]| {

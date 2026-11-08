@@ -3,8 +3,8 @@
 
 use bytes::BytesMut;
 use sha1::{Digest, Sha1};
-use trs_wire::metadata::{METADATA_PIECE_LEN, piece_slice};
-use trs_wire::*;
+use seedwell_wire::metadata::{METADATA_PIECE_LEN, piece_slice};
+use seedwell_wire::*;
 
 struct Peer {
     enc: Encoder,

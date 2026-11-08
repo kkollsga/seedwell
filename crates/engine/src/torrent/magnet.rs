@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use trs_wire::{MAX_METADATA_SIZE, MetadataAssembler, metadata};
+use seedwell_wire::{MAX_METADATA_SIZE, MetadataAssembler, metadata};
 
 use super::{Torrent, TorrentMsg, TorrentReport};
 use crate::peer::{MetaOut, PeerCmd, PeerKey};
@@ -193,7 +193,7 @@ impl Torrent {
                         .map_err(|e| e.to_string())
                         .and_then(|f| f.ok_or_else(|| "torrent file missing".to_string()))
                         .and_then(|bytes| {
-                            trs_bencode::raw_dict_get(&bytes, b"info")
+                            seedwell_bencode::raw_dict_get(&bytes, b"info")
                                 .map_err(|e| e.to_string())?
                                 .map(Arc::<[u8]>::from)
                                 .ok_or_else(|| "no info dictionary".to_string())

@@ -13,8 +13,8 @@
 use std::io;
 use std::time::{Duration, Instant};
 
-use trs_sync_proto::ids::ShortId;
-use trs_sync_proto::model::{ChunkRef, FileInfo, FileKind, STATE_DIR, SignedFile, Version};
+use seedwell_sync_proto::ids::ShortId;
+use seedwell_sync_proto::model::{ChunkRef, FileInfo, FileKind, STATE_DIR, SignedFile, Version};
 
 use crate::chunk::{self, Tier};
 use crate::fs::{Fs, Meta};
@@ -671,7 +671,7 @@ impl Scanner<'_> {
         hash_apart_from: Option<u64>,
         pre: Option<Hashed>,
     ) -> io::Result<Option<HashTask>> {
-        if trs_sync_proto::model::validate_path(rel).is_err() {
+        if seedwell_sync_proto::model::validate_path(rel).is_err() {
             report.issues.push(Issue { path: rel.to_string(), kind: IssueKind::BadName });
             return Ok(None);
         }

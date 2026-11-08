@@ -2,7 +2,7 @@
 //! Feeds arbitrary bytes to every extension-payload parser and the bitfield validator.
 
 use libfuzzer_sys::fuzz_target;
-use trs_wire::{
+use seedwell_wire::{
     Bitfield, ExtPolicy, ExtendedHandshake, ExtendedMessage, MetadataAssembler, MetadataMessage,
     PexMessage,
 };

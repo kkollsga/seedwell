@@ -186,6 +186,11 @@ gh pr list --state open --json number,title,author,headRefName,statusCheckRollup
   `git show vX.Y.Z:install.sh | cmp - <scratch>/install.sh`, then `bash <scratch>/install.sh --version X.Y.Z`.
   Confirm `/Applications/Seedwell.app` reports X.Y.Z and `spctl -a -vv` says "Notarized Developer ID", and that the
   app is running again. Development builds are switched on again when development resumes.
+- **When the release changes the sync protocol** (PROTOCOL / MIN_PROTOCOL), ask the other devices' agents to update
+  **before** updating this Mac. Once this Mac runs the new protocol it can no longer reach the old ones, and the agent
+  channel is carried by the same sync, so the request would never arrive. That happened with 0.1.20: Makro had to be
+  updated by hand. Wait for each device's agent to confirm it has updated, or for the device to show the new version
+  in `chat members`, then update this Mac.
 - **The other devices too** (the MacBook, the Windows PC "Makro"): they follow the shared builds folder with
   development builds on, so ask each device's agent in the agent channel to run `seedwell update dev-builds off`
   there (the same way back to the release). Report which did.

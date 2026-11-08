@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use common::*;
-use trs_engine::*;
+use seedwell_engine::*;
 
 async fn seeded(t: &TestTorrent, cfg: impl FnOnce(&mut EngineConfig)) -> Node {
     let seeder = node(cfg).await;

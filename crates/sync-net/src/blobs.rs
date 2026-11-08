@@ -6,9 +6,9 @@
 //!   channel (every image of a private conversation); older ones are "not downloaded" (and their bytes deleted here),
 //!   fetched when asked for ([`crate::service::SyncHandle::chat_attachment_fetch`]). An image over its kind's cap is
 //!   never fetched.
-//! * **From whom**: any connected member whose session has [`trs_sync_proto::msg::FEATURE_BLOBS`] (a private
+//! * **From whom**: any connected member whose session has [`seedwell_sync_proto::msg::FEATURE_BLOBS`] (a private
 //!   conversation's other device only, over a direct session), one after another, in parts of [`PART`] bytes. The
-//!   bytes are checked against the hash, then decoded ([`trs_media::check`]): a peer that sends other bytes is passed
+//!   bytes are checked against the hash, then decoded ([`seedwell_media::check`]): a peer that sends other bytes is passed
 //!   over, an image that does not decode is marked failed for good.
 //! * **When**: when messages with images arrive, when a member connects, and when asked. With nobody to fetch from
 //!   (the author offline), the image waits (its message shows its preview) until a member that has it connects.
@@ -24,8 +24,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use trs_sync_proto::members::hex;
-use trs_sync_proto::msg::{BlobCode, BlobData, BlobWant};
+use seedwell_sync_proto::members::hex;
+use seedwell_sync_proto::msg::{BlobCode, BlobData, BlobWant};
 
 use crate::at_rest::Sealer;
 use crate::room::{Room, named};
@@ -184,7 +184,7 @@ pub fn hash_from_hex(s: &str) -> Option<[u8; 32]> {
 
 /// Where an image a kept message names stands here.
 pub(crate) fn state_of(blobs: &Blobs, kind: u8, size: u64, hash: &[u8; 32], in_budget: bool) -> BlobState {
-    let Some(k) = trs_media::Kind::from_byte(kind) else {
+    let Some(k) = seedwell_media::Kind::from_byte(kind) else {
         return BlobState::Failed("an image of a kind this version cannot show".into());
     };
     if size > k.max_bytes() as u64 {
@@ -225,7 +225,7 @@ pub(crate) fn kick(ctx: &Arc<Ctx>, c: &Arc<dyn Room>) {
 }
 
 /// What the room wants that is not here: (hash, kind, size), newest first.
-fn wanted(ctx: &Ctx, c: &dyn Room) -> Vec<([u8; 32], trs_media::Kind, u64)> {
+fn wanted(ctx: &Ctx, c: &dyn Room) -> Vec<([u8; 32], seedwell_media::Kind, u64)> {
     let pinned = c.blobs().pinned();
     let mut all = Vec::new();
     c.with_index(ctx, &mut |ix| all = ix.wanted_images(&pinned));
@@ -256,7 +256,7 @@ async fn fetch_all(ctx: &Arc<Ctx>, c: &Arc<dyn Room>) {
                 if bytes.len() as u64 != size || sha256(&bytes) != hash {
                     continue;
                 }
-                let checked = tokio::task::spawn_blocking(move || trs_media::check(kind, &bytes).map(|_| bytes)).await;
+                let checked = tokio::task::spawn_blocking(move || seedwell_media::check(kind, &bytes).map(|_| bytes)).await;
                 match checked {
                     Ok(Ok(bytes)) => {
                         if let Err(e) = c.blobs().put(&hash, &bytes) {
@@ -313,7 +313,7 @@ pub(crate) async fn fetch_coded(p: &PeerHandle, c: &dyn Room, hash: &[u8; 32], s
 /// piece goes to [`crate::files::serve`].
 pub(crate) fn serve(ctx: &Ctx, c: &dyn Room, w: &BlobWant) -> BlobData {
     let no = |code| BlobData { id: w.id, code, total: 0, data: Vec::new() };
-    if w.len as usize > trs_sync_proto::msg::MAX_BLOB_CHUNK {
+    if w.len as usize > seedwell_sync_proto::msg::MAX_BLOB_CHUNK {
         return no(BlobCode::Refused);
     }
     match named(ctx, c, &w.hash) {

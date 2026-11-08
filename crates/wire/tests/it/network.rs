@@ -1,6 +1,6 @@
 //! Live test against the public Debian netinst swarm. `#[ignore]`d: run explicitly with
 //!
-//!   cargo test -p trs-wire --test network -- --ignored --nocapture
+//!   cargo test -p seedwell-wire --test network -- --ignored --nocapture
 //!
 //! Politeness: exactly ONE `started` and ONE `stopped` announce to the Debian tracker,
 //! then at most `MAX_PEERS` short connections that only exchange handshakes, extended
@@ -11,7 +11,7 @@ use bytes::BytesMut;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant, SystemTime};
-use trs_wire::*;
+use seedwell_wire::*;
 
 const INFO_HASH: [u8; 20] = hex20("7acf8fb590b2060dd9c3146ef770169d593433b0");
 const TRACKER: &str = "bttracker.debian.org:6969";

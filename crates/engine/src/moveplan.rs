@@ -9,8 +9,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use trs_metainfo::Metainfo;
-use trs_storage::{Layout, PathRef};
+use seedwell_metainfo::Metainfo;
+use seedwell_storage::{Layout, PathRef};
 
 use crate::api::{AddOptions, MoveKind, TorrentId};
 use crate::organize::{self, PlanCtx};
@@ -84,9 +84,9 @@ pub(crate) struct MovePlan {
 }
 
 impl MovePlan {
-    /// The cheap check of `trs_storage::preflight_move` for this plan: nothing is locked and the
+    /// The cheap check of `seedwell_storage::preflight_move` for this plan: nothing is locked and the
     /// folders can be changed. Stats only, so it can run at every automatic check.
-    pub(crate) fn preflight(&self) -> Result<(), trs_storage::StorageError> {
+    pub(crate) fn preflight(&self) -> Result<(), seedwell_storage::StorageError> {
         let mut pairs: Vec<(u32, PathBuf, &Path)> = Vec::new();
         for (i, d) in self.dst.iter().enumerate() {
             let Some(d) = d else { continue };
@@ -100,7 +100,7 @@ impl MovePlan {
             };
             pairs.push((i as u32, src, d.as_path()));
         }
-        trs_storage::preflight_move(pairs.iter().map(|(i, s, d)| (*i, s.as_path(), *d)))
+        seedwell_storage::preflight_move(pairs.iter().map(|(i, s, d)| (*i, s.as_path(), *d)))
     }
 }
 
@@ -256,7 +256,7 @@ pub(crate) fn plan_move(sh: &Shared, src: &MoveSrc, target: &MoveTarget) -> Resu
                 continue;
             }
             let s = p.to_string_lossy().into_owned();
-            let unique = trs_classify::unique_path(&s, |cand| {
+            let unique = seedwell_classify::unique_path(&s, |cand| {
                 let cp = Path::new(cand);
                 (exists(cp) && !own.contains(cp)) || taken.contains(cp) || reserved.contains(cp)
             });
@@ -349,8 +349,8 @@ pub(crate) fn plan_move(sh: &Shared, src: &MoveSrc, target: &MoveTarget) -> Resu
     let (cross, dest_dev) = match (&probe_src, &probe_dst) {
         (Some(a), Some(b)) => {
             let (ad, bd) = (a.parent().unwrap_or(a), b.parent().unwrap_or(b));
-            let crossing = !trs_state::volume::same_volume(ad, bd).unwrap_or(false);
-            (crossing || cfg.force_copy_moves, trs_state::volume::volume_id(bd).unwrap_or(0))
+            let crossing = !seedwell_state::volume::same_volume(ad, bd).unwrap_or(false);
+            (crossing || cfg.force_copy_moves, seedwell_state::volume::volume_id(bd).unwrap_or(0))
         }
         _ => (false, 0),
     };

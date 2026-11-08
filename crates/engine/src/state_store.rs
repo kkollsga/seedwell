@@ -1,9 +1,9 @@
-//! [`Store`] over `trs-state`: the engine's persistence in `state.redb` plus the `torrents/`,
+//! [`Store`] over `seedwell-state`: the engine's persistence in `state.redb` plus the `torrents/`,
 //! `placement/` and `downloads/` folders of the state directory.
 //!
-//! # How the engine's records map onto `trs_state::TorrentRecord`
+//! # How the engine's records map onto `seedwell_state::TorrentRecord`
 //!
-//! `trs-state` knows torrents, not the engine's internals, so a few fields ride along in places
+//! `seedwell-state` knows torrents, not the engine's internals, so a few fields ride along in places
 //! the record already offers (the format is unchanged):
 //!
 //! | Engine field | Where it is stored |
@@ -18,7 +18,7 @@
 //! | skipped files | `skipped_files` bitset (Low/High per-file priorities are not persisted) |
 //! | queue position, last activity, error start, grace countdown (held, stopped) | `torrent-extra.bin` next to the database (losing it falls back to the order of adding) |
 //! | per-file paths of placed torrents | `placement/<hash>.bin` |
-//! | direct downloads | `downloads/<id>.rec` (the resumable bytes are trs-http's own `.part` + sidecar) |
+//! | direct downloads | `downloads/<id>.rec` (the resumable bytes are seedwell-http's own `.part` + sidecar) |
 //! | launch history for the crash-loop guard | `launches.log` |
 //!
 //! Resume data of a complete torrent is stored as `piece_count = 0` plus the file stamps.
@@ -30,11 +30,11 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use trs_classify::Category;
-use trs_metainfo::{Metainfo, MAX_FILES};
-use trs_state::record::{FileStamp, ResumeData, TorrentFlags, TorrentRecord as SRecord};
-use trs_state::{Counters, Day, StatsBucket, StatsScope};
-use trs_tracker::store::TimingStore;
+use seedwell_classify::Category;
+use seedwell_metainfo::{Metainfo, MAX_FILES};
+use seedwell_state::record::{FileStamp, ResumeData, TorrentFlags, TorrentRecord as SRecord};
+use seedwell_state::{Counters, Day, StatsBucket, StatsScope};
+use seedwell_tracker::store::TimingStore;
 
 use crate::api::{SeedGoal, TorrentId};
 use crate::persist::{
@@ -43,7 +43,7 @@ use crate::persist::{
 };
 use crate::policy::{goal_from_state, state_goal, state_priority};
 
-// Spare bits of `TorrentFlags` (bits 0..5 belong to trs-state).
+// Spare bits of `TorrentFlags` (bits 0..5 belong to seedwell-state).
 const E_META: u16 = 1 << 8;
 const E_ADDED_COMPLETE: u16 = 1 << 9;
 const E_STAGED: u16 = 1 << 10;
@@ -59,7 +59,7 @@ fn se(e: impl std::fmt::Display) -> StoreError {
     StoreError(e.to_string())
 }
 
-/// Per-torrent values that have no field in `trs_state::TorrentRecord`: 33 bytes + padding each.
+/// Per-torrent values that have no field in `seedwell_state::TorrentRecord`: 33 bytes + padding each.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Extra {
     queue_pos: u32,
@@ -76,9 +76,9 @@ const EXTRA_LEN: usize = 36;
 
 type TzFn = Arc<dyn Fn(i64) -> i32 + Send + Sync>;
 
-/// The engine's store on top of `trs-state`.
+/// The engine's store on top of `seedwell-state`.
 pub struct StateStore {
-    inner: trs_state::Store,
+    inner: seedwell_state::Store,
     dir: PathBuf,
     tz: TzFn,
     /// Piece count of the torrents that are still incomplete, for turning a bitfield into
@@ -89,11 +89,11 @@ pub struct StateStore {
 impl StateStore {
     /// Wrap an opened store. Day boundaries use the local zone as `/bin/date` reports it; install
     /// the app's own with [`StateStore::with_time_zone`].
-    pub fn new(inner: trs_state::Store) -> Arc<StateStore> {
+    pub fn new(inner: seedwell_state::Store) -> Arc<StateStore> {
         Arc::new(Self::build(inner))
     }
 
-    fn build(inner: trs_state::Store) -> StateStore {
+    fn build(inner: seedwell_state::Store) -> StateStore {
         let dir = inner.dir().to_path_buf();
         StateStore {
             inner,
@@ -104,20 +104,20 @@ impl StateStore {
     }
 
     /// Open (or create) the state directory.
-    pub fn open(dir: impl AsRef<Path>) -> Result<(Arc<StateStore>, trs_state::OpenReport), StoreError> {
-        let opened = trs_state::Store::open(dir).map_err(se)?;
+    pub fn open(dir: impl AsRef<Path>) -> Result<(Arc<StateStore>, seedwell_state::OpenReport), StoreError> {
+        let opened = seedwell_state::Store::open(dir).map_err(se)?;
         Ok((Self::new(opened.store), opened.report))
     }
 
     /// Replace the zone lookup (`unix seconds -> UTC offset seconds`) used to bucket statistics by day.
-    pub fn with_time_zone(store: trs_state::Store, tz: impl Fn(i64) -> i32 + Send + Sync + 'static) -> Arc<StateStore> {
+    pub fn with_time_zone(store: seedwell_state::Store, tz: impl Fn(i64) -> i32 + Send + Sync + 'static) -> Arc<StateStore> {
         let mut s = Self::build(store);
         s.tz = Arc::new(tz);
         Arc::new(s)
     }
 
     /// The underlying store (statistics queries, flushing, backups).
-    pub fn state(&self) -> &trs_state::Store {
+    pub fn state(&self) -> &seedwell_state::Store {
         &self.inner
     }
 
@@ -172,7 +172,7 @@ impl StateStore {
         if let Some(d) = path.parent() {
             std::fs::create_dir_all(d).map_err(se)?;
         }
-        trs_state::fsutil::atomic_write(path, bytes).map_err(se)
+        seedwell_state::fsutil::atomic_write(path, bytes).map_err(se)
     }
 
     fn read_side(path: &Path) -> Result<Option<Vec<u8>>, StoreError> {
@@ -394,7 +394,7 @@ impl StateStore {
                         mi.files().map(|f| (f.offset, f.length, prios.get(f.index).copied().unwrap_or(2), f.is_padding())),
                     ));
                 }
-        } else if let Some(m) = magnet.as_deref().and_then(|m| trs_metainfo::Magnet::parse(m).ok()) {
+        } else if let Some(m) = magnet.as_deref().and_then(|m| seedwell_metainfo::Magnet::parse(m).ok()) {
             announce = Some(m.trackers.iter().map(|t| vec![t.clone()]).collect());
         }
         let complete = f.has(E_COMPLETE);
@@ -422,8 +422,8 @@ impl StateStore {
         };
         let priority_user = rec.priority.is_some();
         let priority = match rec.priority {
-            Some(trs_state::rules::Priority::High) => 0,
-            Some(trs_state::rules::Priority::Low) => 2,
+            Some(seedwell_state::rules::Priority::High) => 0,
+            Some(seedwell_state::rules::Priority::Low) => 2,
             _ => 1,
         };
         let placed = if f.has(E_RENAMED) {
@@ -980,8 +980,8 @@ impl Store for StateStore {
         let path = self.dir.join("launches.log");
         let mut log = Self::launch_log(&path);
         // The log keeps an hour (more than the breaker looks at) and marks which runs ended
-        // cleanly; only this launch and the unclean ones come back (`trs_tracker::crash`).
-        let counted = log.record_launch(trs_tracker::Millis(now_ms));
+        // cleanly; only this launch and the unclean ones come back (`seedwell_tracker::crash`).
+        let counted = log.record_launch(seedwell_tracker::Millis(now_ms));
         self.write_side(&path, log.render().as_bytes())?;
         Ok(counted.into_iter().map(|t| t.0).collect())
     }
@@ -995,9 +995,9 @@ impl Store for StateStore {
 }
 
 impl StateStore {
-    fn launch_log(path: &Path) -> trs_tracker::crash::LaunchLog {
+    fn launch_log(path: &Path) -> seedwell_tracker::crash::LaunchLog {
         let text = Self::read_side(path).ok().flatten().map(|b| String::from_utf8_lossy(&b).into_owned());
-        trs_tracker::crash::LaunchLog::parse(&text.unwrap_or_default())
+        seedwell_tracker::crash::LaunchLog::parse(&text.unwrap_or_default())
     }
 
     fn record_delta(&self, d: &StatDelta) -> Result<(), StoreError> {

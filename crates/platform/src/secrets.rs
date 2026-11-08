@@ -1,4 +1,4 @@
-//! Sealing secrets with the system's per-user protection, for a vault of key files (`trs_sync_net::secrets`): on
+//! Sealing secrets with the system's per-user protection, for a vault of key files (`seedwell_sync_net::secrets`): on
 //! Windows DPAPI (`CryptProtectData` for the current user: only this user, on this PC, can open what it sealed).
 //! The Mac keeps its keys in the Keychain through the app instead (the FFI's `SecretVault`), so it has no sealer
 //! here; nor has Linux yet.

@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::*;
-use trs_engine::config::DetectionConfig;
-use trs_engine::*;
+use seedwell_engine::config::DetectionConfig;
+use seedwell_engine::*;
 
 struct Lab {
     /// The finished location (the app default).
@@ -323,7 +323,7 @@ async fn magnet_is_classified_when_the_metadata_arrives() {
 /// files in their place instead of reporting them missing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stale_staged_flag_does_not_break_the_restart() {
-    use trs_engine::persist::Store;
+    use seedwell_engine::persist::Store;
     let t = tv();
     let l = lab();
     let seeder = seeder_of(&t).await;
@@ -339,7 +339,7 @@ async fn a_stale_staged_flag_does_not_break_the_restart() {
     let mut rec = store.load_torrents().unwrap().remove(0).record;
     assert!(!rec.staged);
     rec.staged = true;
-    store.commit(trs_engine::persist::Batch { torrents: vec![rec], ..Default::default() }).unwrap();
+    store.commit(seedwell_engine::persist::Batch { torrents: vec![rec], ..Default::default() }).unwrap();
     drop(store);
 
     let b = snode(&l.state, &l.dl, None, flat(&l)).await;

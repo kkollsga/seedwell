@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::*;
-use trs_engine::config::{AfterAdd, DetectionConfig, WatchConfig, WatchMode};
-use trs_engine::*;
+use seedwell_engine::config::{AfterAdd, DetectionConfig, WatchConfig, WatchMode};
+use seedwell_engine::*;
 
 struct Rig {
     n: SNode,

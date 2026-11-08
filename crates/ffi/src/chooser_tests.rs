@@ -93,7 +93,7 @@ fn chooser(info: &ChoiceInfo) -> Arc<Chooser> {
 }
 
 /// `rest`, in the test's home folder (`/Users/me`), as the core writes it for the user: `~/rest` on Unix systems, the
-/// full path on Windows, where `~` means nothing (`shown_in`, as `trs_platform::dirs::shown`).
+/// full path on Windows, where `~` means nothing (`shown_in`, as `seedwell_platform::dirs::shown`).
 pub(crate) fn at_home(rest: &str) -> String {
     if cfg!(unix) { format!("~/{rest}") } else { format!("/Users/me/{rest}") }
 }

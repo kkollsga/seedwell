@@ -13,17 +13,17 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use trs_platform::fs::{OtherVolume, TrashError, TrashPlace, Trashed};
+use seedwell_platform::fs::{OtherVolume, TrashError, TrashPlace, Trashed};
 
 use serde_json::json;
-use trs_engine::EngineHandle;
-use trs_sync_net::secrets::SecretStore;
-use trs_sync_net::service::BoxFuture;
-use trs_sync_net::status::{FolderState, FolderStatus, Snapshot};
-use trs_sync_net::{Options, PublicDiscovery, SyncError, SyncHandle};
-use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::keys::Access;
-use trs_sync_proto::members::{InviteLink, Role};
+use seedwell_engine::EngineHandle;
+use seedwell_sync_net::secrets::SecretStore;
+use seedwell_sync_net::service::BoxFuture;
+use seedwell_sync_net::status::{FolderState, FolderStatus, Snapshot};
+use seedwell_sync_net::{Options, PublicDiscovery, SyncError, SyncHandle};
+use seedwell_sync_proto::ids::FolderId;
+use seedwell_sync_proto::keys::Access;
+use seedwell_sync_proto::members::{InviteLink, Role};
 
 use crate::ops;
 use crate::proto::{ApiError, ErrorCode, clip};
@@ -179,14 +179,14 @@ impl PublicDiscovery for DhtDiscovery {
 
 /// Announce `port` under `topic` (or only look it up) and collect the peers found, for at most
 /// [`LOOKUP_SECS`] and [`MAX_PEERS`] addresses.
-pub async fn lookup(dht: Option<trs_dht::DhtHandle>, topic: [u8; 20], announce: Option<u16>) -> Vec<SocketAddr> {
+pub async fn lookup(dht: Option<seedwell_dht::DhtHandle>, topic: [u8; 20], announce: Option<u16>) -> Vec<SocketAddr> {
     collect(dht, topic, announce, Duration::from_secs(LOOKUP_SECS), MAX_PEERS).await
 }
 
-async fn collect(dht: Option<trs_dht::DhtHandle>, topic: [u8; 20], announce: Option<u16>, within: Duration, cap: usize) -> Vec<SocketAddr> {
+async fn collect(dht: Option<seedwell_dht::DhtHandle>, topic: [u8; 20], announce: Option<u16>, within: Duration, cap: usize) -> Vec<SocketAddr> {
     let Some(dht) = dht else { return Vec::new() };
     // A sync topic is public by construction (a daily hash only members can work out).
-    let Some(h) = trs_dht::PublicInfoHash::new(topic, false) else { return Vec::new() };
+    let Some(h) = seedwell_dht::PublicInfoHash::new(topic, false) else { return Vec::new() };
     let deadline = tokio::time::Instant::now() + within;
     let started = match announce {
         Some(port) => tokio::time::timeout_at(deadline, dht.announce(h, port)).await,
@@ -195,7 +195,7 @@ async fn collect(dht: Option<trs_dht::DhtHandle>, topic: [u8; 20], announce: Opt
     let Ok(Ok(Ok(mut stream))) = started else { return Vec::new() };
     let mut out: Vec<SocketAddr> = Vec::new();
     while let Ok(Some(u)) = tokio::time::timeout_at(deadline, stream.next()).await {
-        if let trs_dht::LookupUpdate::Peers(v) = u {
+        if let seedwell_dht::LookupUpdate::Peers(v) = u {
             for p in v {
                 let a = SocketAddr::V4(p);
                 if out.len() < cap && !out.contains(&a) {
@@ -211,14 +211,14 @@ async fn collect(dht: Option<trs_dht::DhtHandle>, topic: [u8; 20], announce: Opt
     out
 }
 
-/// The engine's torrents, for folder sync ([`trs_sync_net::LocalTorrents`]): a folder's files are never moved from under
+/// The engine's torrents, for folder sync ([`seedwell_sync_net::LocalTorrents`]): a folder's files are never moved from under
 /// a torrent, and a torrent missing its files looks again after a folder's files moved (they may be back).
 struct EngineTorrents(EngineHandle);
 
 /// Longest the engine is asked which torrents use a folder, and their paths are resolved on the disk.
 const TORRENTS_WAIT: Duration = Duration::from_secs(10);
 
-impl trs_sync_net::LocalTorrents for EngineTorrents {
+impl seedwell_sync_net::LocalTorrents for EngineTorrents {
     fn using(&self, path: &Path) -> BoxFuture<'static, Result<Vec<String>, String>> {
         let (e, path) = (self.0.clone(), path.to_path_buf());
         Box::pin(async move {
@@ -240,14 +240,14 @@ impl trs_sync_net::LocalTorrents for EngineTorrents {
 }
 
 /// The names of the torrents with files at or below `path`, or whose folder holds it: where they are now, their staging
-/// folders, and where a move puts them ([`trs_engine::TorrentPlaces`]); a torrent on its way to a place not known yet
-/// counts too. Both sides are compared as the disk names them ([`trs_platform::dirs::real_path`]: a folder added
+/// folders, and where a move puts them ([`seedwell_engine::TorrentPlaces`]); a torrent on its way to a place not known yet
+/// counts too. Both sides are compared as the disk names them ([`seedwell_platform::dirs::real_path`]: a folder added
 /// through a link, `~/Movies` → `/Volumes/Media/Movies`, is the folder a torrent saves to), and without regard to case
-/// on a volume that finds names in any case ([`trs_platform::fs::folds_case`]). Reads the disk: off any actor.
-fn torrents_using(torrents: &[trs_engine::TorrentPlaces], path: &Path) -> Vec<String> {
-    let real = |p: &Path| trs_platform::dirs::real_path(p).unwrap_or_else(|| p.to_path_buf());
+/// on a volume that finds names in any case ([`seedwell_platform::fs::folds_case`]). Reads the disk: off any actor.
+fn torrents_using(torrents: &[seedwell_engine::TorrentPlaces], path: &Path) -> Vec<String> {
+    let real = |p: &Path| seedwell_platform::dirs::real_path(p).unwrap_or_else(|| p.to_path_buf());
     let folder = real(path);
-    let fold = trs_platform::fs::folds_case(&folder);
+    let fold = seedwell_platform::fs::folds_case(&folder);
     let names = |p: &Path| -> Vec<String> {
         p.components()
             .map(|c| {
@@ -380,7 +380,7 @@ pub fn parse_role(s: &str) -> Result<Role, ApiError> {
 }
 
 /// One invitation in protocol form.
-pub fn invite_dto(i: &trs_sync_net::InviteInfo) -> SyncInviteDto {
+pub fn invite_dto(i: &seedwell_sync_net::InviteInfo) -> SyncInviteDto {
     SyncInviteDto {
         id: i.id.clone(),
         link: i.link.clone(),
@@ -396,7 +396,7 @@ pub fn invite_dto(i: &trs_sync_net::InviteInfo) -> SyncInviteDto {
 }
 
 /// One member in protocol form.
-pub fn member_dto(m: &trs_sync_net::MemberInfo) -> SyncMemberDto {
+pub fn member_dto(m: &seedwell_sync_net::MemberInfo) -> SyncMemberDto {
     SyncMemberDto {
         device_id: m.device.to_string(),
         name: clip(&ops::clean_name(&m.name), 100),
@@ -406,25 +406,25 @@ pub fn member_dto(m: &trs_sync_net::MemberInfo) -> SyncMemberDto {
         me: m.is_me,
         expires_at: m.expires_s,
         removal: m.removal.as_ref().map(|a| match a {
-            trs_sync_net::removals::Asked::Waiting => "waiting".into(),
-            trs_sync_net::removals::Asked::Refused(_) => "refused".into(),
+            seedwell_sync_net::removals::Asked::Waiting => "waiting".into(),
+            seedwell_sync_net::removals::Asked::Refused(_) => "refused".into(),
         }),
         removal_reason: match &m.removal {
-            Some(trs_sync_net::removals::Asked::Refused(why)) => Some(clip(why, 300)),
+            Some(seedwell_sync_net::removals::Asked::Refused(why)) => Some(clip(why, 300)),
             _ => None,
         },
     }
 }
 
 /// The member `q` names: its device id, an unambiguous prefix (4+ characters), its name or its user's (any case).
-pub fn resolve_member<'a>(members: &'a [trs_sync_net::MemberInfo], q: &str) -> Result<&'a trs_sync_net::MemberInfo, ApiError> {
+pub fn resolve_member<'a>(members: &'a [seedwell_sync_net::MemberInfo], q: &str) -> Result<&'a seedwell_sync_net::MemberInfo, ApiError> {
     let q = q.trim();
     if q.is_empty() || q.len() > 200 {
         return Err(ApiError::params("`device` is a device id, a prefix of it, or the device's name"));
     }
     let nq = norm_id(q);
     let lower = q.to_lowercase();
-    let hits: Vec<&trs_sync_net::MemberInfo> = members
+    let hits: Vec<&seedwell_sync_net::MemberInfo> = members
         .iter()
         .filter(|m| {
             let id = norm_id(&m.device.to_string());
@@ -453,6 +453,7 @@ pub fn folder_dto(f: &FolderStatus) -> SyncFolderDto {
         need_files: f.need_files,
         need_bytes: f.need_bytes,
         rate_in: f.rate_in,
+        eta_secs: f.eta_secs,
         rate_out: f.rate_out,
         connected: f.connected,
         members: f.members,
@@ -476,12 +477,12 @@ pub fn folder_dto(f: &FolderStatus) -> SyncFolderDto {
 }
 
 /// A gone member in protocol form.
-pub fn gone_dto(d: &trs_sync_net::status::GoneDevice) -> GoneDeviceDto {
+pub fn gone_dto(d: &seedwell_sync_net::status::GoneDevice) -> GoneDeviceDto {
     GoneDeviceDto { device_id: d.id.clone(), name: clip(&ops::clean_name(&d.name), 100), last_seen_at: d.last_seen_s }
 }
 
 /// A refused join attempt in protocol form.
-pub fn attempt_dto(a: &trs_sync_net::status::JoinAttemptStatus) -> JoinAttemptDto {
+pub fn attempt_dto(a: &seedwell_sync_net::status::JoinAttemptStatus) -> JoinAttemptDto {
     JoinAttemptDto {
         at: a.at_s,
         device_id: a.device_id.clone(),
@@ -493,7 +494,7 @@ pub fn attempt_dto(a: &trs_sync_net::status::JoinAttemptStatus) -> JoinAttemptDt
 
 /// One conflict copy in protocol form; the device and time come from the copy's name.
 pub fn conflict_dto(copy: &str, original: &str) -> SyncConflictDto {
-    let (device, when) = trs_sync::conflict::parse_conflict(copy).map(|c| (c.device, c.stamp)).unwrap_or_default();
+    let (device, when) = seedwell_sync::conflict::parse_conflict(copy).map(|c| (c.device, c.stamp)).unwrap_or_default();
     SyncConflictDto { copy: clip(copy, 400), original: clip(original, 400), device: clip(&ops::clean_name(&device), 100), when: clip(&when, 40) }
 }
 
@@ -592,20 +593,20 @@ fn is_test_binary() -> bool {
     std::env::current_exe().ok().and_then(|p| p.parent().and_then(|d| d.file_name()).map(|n| n == "deps")).unwrap_or(false)
 }
 
-/// Whether the real-home guard is on: under `cargo test`, or with `TRS_FORBID_REAL_HOME`.
+/// Whether the real-home guard is on: under `cargo test`, or with `SEEDWELL_FORBID_REAL_HOME`.
 fn guard_active() -> bool {
-    (cfg!(test) || is_test_binary() || std::env::var_os("TRS_FORBID_REAL_HOME").is_some()) && std::env::var_os("TRS_ALLOW_REAL_HOME").is_none()
+    (cfg!(test) || is_test_binary() || std::env::var_os("SEEDWELL_FORBID_REAL_HOME").is_some()) && std::env::var_os("SEEDWELL_ALLOW_REAL_HOME").is_none()
 }
 
-/// The engine's real-home guard (`trs_engine::guard`), for sync's paths: under `cargo test`, or with
-/// `TRS_FORBID_REAL_HOME`, nothing inside the real home folder is synced, moved or trashed.
+/// The engine's real-home guard (`seedwell_engine::guard`), for sync's paths: under `cargo test`, or with
+/// `SEEDWELL_FORBID_REAL_HOME`, nothing inside the real home folder is synced, moved or trashed.
 fn guard(what: &str, p: &Path) -> Result<(), ApiError> {
     if !guard_active() {
         return Ok(());
     }
-    let Some(home) = trs_platform::dirs::home().filter(|h| h.is_absolute() && h.parent().is_some()) else { return Ok(()) };
+    let Some(home) = seedwell_platform::dirs::home().filter(|h| h.is_absolute() && h.parent().is_some()) else { return Ok(()) };
     // The temporary folder is inside the home folder on Windows.
-    if p.starts_with(&home) && !trs_platform::dirs::in_temp_folder(p) {
+    if p.starts_with(&home) && !seedwell_platform::dirs::in_temp_folder(p) {
         return Err(ApiError::invalid(format!(
             "refusing to use {what} {} inside the real home directory while running under test (set HOME to a temporary folder)",
             p.display()
@@ -627,7 +628,7 @@ pub fn folder_path(raw: &str, what: &str) -> Result<PathBuf, ApiError> {
 
 /// One path component from a folder name or a link's name hint; `None` when nothing usable is left.
 fn component(name: &str) -> Option<String> {
-    let n: String = trs_platform::fs::clean_name(name).chars().take(100).collect();
+    let n: String = seedwell_platform::fs::clean_name(name).chars().take(100).collect();
     let n = n.trim().trim_start_matches('.').trim().to_owned();
     (!n.is_empty()).then_some(n)
 }
@@ -663,30 +664,30 @@ pub fn default_join_path(default_location: &str, key_or_link: &str) -> Result<Pa
 /// and a folder on another disk is refused (it would have to be copied); the Mac's own Trash keeps a folder in the
 /// Trash of its own volume; the Recycle Bin refuses a folder it would delete outright instead of keeping.
 pub fn trash_target(folder: &Path, trash_dir: Option<&Path>) -> Result<Trashed, ApiError> {
-    match trash_dir.map(|t| TrashPlace::Folder(t.to_path_buf())).or_else(trs_platform::fs::system_trash) {
-        Some(TrashPlace::Folder(t)) => guard(concat!("the ", trs_platform::trash!()), &t)?,
+    match trash_dir.map(|t| TrashPlace::Folder(t.to_path_buf())).or_else(seedwell_platform::fs::system_trash) {
+        Some(TrashPlace::Folder(t)) => guard(concat!("the ", seedwell_platform::trash!()), &t)?,
         Some(TrashPlace::RecycleBin | TrashPlace::VolumeTrash) if guard_active() => {
-            return Err(ApiError::invalid(concat!("refusing to use the ", trs_platform::trash!(), " while running under test (set a Trash folder)")));
+            return Err(ApiError::invalid(concat!("refusing to use the ", seedwell_platform::trash!(), " while running under test (set a Trash folder)")));
         }
         Some(TrashPlace::RecycleBin | TrashPlace::VolumeTrash) => {}
         None => return Err(trash_error(folder, TrashError::NoTrash)),
     }
     guard("the folder", folder)?;
-    trs_platform::fs::trash_check(folder, trash_dir, OtherVolume::Refuse).map_err(|e| trash_error(folder, e))
+    seedwell_platform::fs::trash_check(folder, trash_dir, OtherVolume::Refuse).map_err(|e| trash_error(folder, e))
 }
 
 /// Move `folder` to the Trash, after [`trash_target`] said it can go.
 pub fn move_to_trash(folder: &Path, trash_dir: Option<&Path>) -> Result<Trashed, TrashError> {
-    trs_platform::fs::move_to_trash(folder, trash_dir, OtherVolume::Refuse)
+    seedwell_platform::fs::move_to_trash(folder, trash_dir, OtherVolume::Refuse)
 }
 
 /// What stopping a folder on this computer leaves the other devices: `only_here` is how many of its files no other
-/// device is known to hold ([`trs_sync_net::SyncHandle::only_here`]).
+/// device is known to hold ([`seedwell_sync_net::SyncHandle::only_here`]).
 pub fn others_after_removal(only_here: u64) -> String {
     match only_here {
         0 => "Other devices keep their copy.".into(),
-        1 => concat!("1 file exists only on this ", trs_platform::computer!(), "; other devices lose access to it.").into(),
-        n => format!(concat!("{} files exist only on this ", trs_platform::computer!(), "; other devices lose access to them."), n),
+        1 => concat!("1 file exists only on this ", seedwell_platform::computer!(), "; other devices lose access to it.").into(),
+        n => format!(concat!("{} files exist only on this ", seedwell_platform::computer!(), "; other devices lose access to them."), n),
     }
 }
 
@@ -697,7 +698,7 @@ pub fn trash_shown(t: &Trashed) -> String {
 
 /// Why `folder` cannot go to the Trash, and what to do instead.
 fn trash_error(folder: &Path, e: TrashError) -> ApiError {
-    use trs_platform::{file_manager, trash};
+    use seedwell_platform::{file_manager, trash};
     ApiError::invalid(match e {
         TrashError::NoTrash => concat!("HOME is not set, so there is no ", trash!(), " to move the folder to; remove it without deleting files").into(),
         TrashError::OtherVolume { trash } => format!(
@@ -717,7 +718,7 @@ fn trash_error(folder: &Path, e: TrashError) -> ApiError {
 // ----------------------------------------------------------------------------- channels
 
 /// One channel in protocol form.
-pub fn channel_dto(c: &trs_sync_net::chat::ChannelStatus) -> ChatChannelDto {
+pub fn channel_dto(c: &seedwell_sync_net::chat::ChannelStatus) -> ChatChannelDto {
     ChatChannelDto {
         id: c.id.clone(),
         name: clip(&ops::clean_name(&c.name), 200),
@@ -742,7 +743,7 @@ pub fn channel_dto(c: &trs_sync_net::chat::ChannelStatus) -> ChatChannelDto {
 }
 
 /// One message in protocol form: the same fields as the service's (and a wake-up command's) JSON.
-pub fn message_dto(m: &trs_sync_net::chat::MessageInfo) -> ChatMessageDto {
+pub fn message_dto(m: &seedwell_sync_net::chat::MessageInfo) -> ChatMessageDto {
     ChatMessageDto {
         id: m.id.clone(),
         channel_id: m.channel_id.clone(),
@@ -767,7 +768,7 @@ pub fn message_dto(m: &trs_sync_net::chat::MessageInfo) -> ChatMessageDto {
 }
 
 /// An image of a message in protocol form (its name cleaned as names are).
-pub fn attachment_dto(a: &trs_sync_net::chat::AttachmentInfo) -> ChatAttachmentDto {
+pub fn attachment_dto(a: &seedwell_sync_net::chat::AttachmentInfo) -> ChatAttachmentDto {
     ChatAttachmentDto {
         hash: a.hash.clone(),
         kind: a.kind.clone(),
@@ -784,7 +785,7 @@ pub fn attachment_dto(a: &trs_sync_net::chat::AttachmentInfo) -> ChatAttachmentD
 }
 
 /// The channel `q` names: its id, an unambiguous prefix of it (4+ characters), or its name (any case).
-pub fn resolve_channel<'a>(channels: &'a [trs_sync_net::chat::ChannelStatus], q: &str) -> Result<&'a trs_sync_net::chat::ChannelStatus, ApiError> {
+pub fn resolve_channel<'a>(channels: &'a [seedwell_sync_net::chat::ChannelStatus], q: &str) -> Result<&'a seedwell_sync_net::chat::ChannelStatus, ApiError> {
     let q = q.trim();
     if q.is_empty() || q.len() > 200 {
         return Err(ApiError::params("`channel` is a channel id, a prefix of it, or the channel's name"));
@@ -794,7 +795,7 @@ pub fn resolve_channel<'a>(channels: &'a [trs_sync_net::chat::ChannelStatus], q:
         return Ok(c);
     }
     let lower = q.to_lowercase();
-    let mut hits: Vec<&trs_sync_net::chat::ChannelStatus> = channels.iter().filter(|c| c.name.to_lowercase() == lower).collect();
+    let mut hits: Vec<&seedwell_sync_net::chat::ChannelStatus> = channels.iter().filter(|c| c.name.to_lowercase() == lower).collect();
     if nq.len() >= MIN_FOLDER_PREFIX && nq.len() == q.chars().filter(|c| *c != '-').count() {
         for c in channels.iter().filter(|c| norm_id(&c.id).starts_with(&nq)) {
             if !hits.iter().any(|h| h.id == c.id) {
@@ -814,7 +815,7 @@ pub fn resolve_channel<'a>(channels: &'a [trs_sync_net::chat::ChannelStatus], q:
 }
 
 /// One topic in protocol form.
-pub fn topic_dto(t: &trs_sync_net::chat::TopicStatus) -> ChatTopicDto {
+pub fn topic_dto(t: &seedwell_sync_net::chat::TopicStatus) -> ChatTopicDto {
     ChatTopicDto {
         id: t.id.clone(),
         channel_id: t.channel_id.clone(),
@@ -828,7 +829,7 @@ pub fn topic_dto(t: &trs_sync_net::chat::TopicStatus) -> ChatTopicDto {
 }
 
 /// One private conversation in protocol form.
-pub fn direct_dto(d: &trs_sync_net::direct::DirectStatus) -> ChatDirectDto {
+pub fn direct_dto(d: &seedwell_sync_net::direct::DirectStatus) -> ChatDirectDto {
     ChatDirectDto {
         device_id: d.device.to_string(),
         name: clip(&ops::clean_name(&d.name), 100),
@@ -865,6 +866,7 @@ mod tests {
             need_files: 0,
             need_bytes: 0,
             rate_in: 0,
+            eta_secs: None,
             rate_out: 0,
             connected: 0,
             members: 0,
@@ -887,8 +889,8 @@ mod tests {
         }
     }
 
-    fn places(t: &[(&str, &Path)]) -> Vec<trs_engine::TorrentPlaces> {
-        t.iter().map(|(n, p)| trs_engine::TorrentPlaces { name: (*n).into(), paths: vec![p.to_path_buf()], moving_somewhere: false }).collect()
+    fn places(t: &[(&str, &Path)]) -> Vec<seedwell_engine::TorrentPlaces> {
+        t.iter().map(|(n, p)| seedwell_engine::TorrentPlaces { name: (*n).into(), paths: vec![p.to_path_buf()], moving_somewhere: false }).collect()
     }
 
     /// A torrent counts as using a folder when its files are in it (below it, or the folder itself is the torrent's) or
@@ -923,13 +925,13 @@ mod tests {
         assert_eq!(torrents_using(&t, &link), ["seeding", "new"], "a folder added through a link");
         // In another case (the folder the user typed differently): one folder on a disk that folds case.
         let other_case = dir.path().join("media").join("movies");
-        if trs_platform::fs::folds_case(&media) {
+        if seedwell_platform::fs::folds_case(&media) {
             assert_eq!(torrents_using(&t, &other_case), ["seeding", "new"], "another case on a disk that folds case");
             let t = places(&[("typed", &dir.path().join("MEDIA/MOVIES/not there yet"))]);
             assert_eq!(torrents_using(&t, &link), ["typed"], "a torrent's path in another case");
         }
         // A torrent on its way to a place not known yet may be going there.
-        let moving = [trs_engine::TorrentPlaces { name: "moving".into(), paths: vec![dir.path().join("elsewhere")], moving_somewhere: true }];
+        let moving = [seedwell_engine::TorrentPlaces { name: "moving".into(), paths: vec![dir.path().join("elsewhere")], moving_somewhere: true }];
         assert_eq!(torrents_using(&moving, &link), ["moving"]);
     }
 
@@ -940,7 +942,7 @@ mod tests {
         let json = serde_json::to_value(&d).unwrap();
         assert!(json.get("waiting").is_none() && json.get("gone").is_none() && json.get("can_reshare").is_none(), "nothing to say: nothing given");
         f.waiting = Some("Waiting for Mac mini (last seen 3 days ago: nothing answers at 192.168.68.57:55799)".into());
-        f.gone = vec![trs_sync_net::status::GoneDevice { id: "BONSGYC-X".into(), name: "Mac mini".into(), last_seen_s: Some(7) }];
+        f.gone = vec![seedwell_sync_net::status::GoneDevice { id: "BONSGYC-X".into(), name: "Mac mini".into(), last_seen_s: Some(7) }];
         f.reshare = true;
         let json = serde_json::to_value(folder_dto(&f)).unwrap();
         assert_eq!(json["waiting"], "Waiting for Mac mini (last seen 3 days ago: nothing answers at 192.168.68.57:55799)");
@@ -982,9 +984,9 @@ mod tests {
     }
 
     /// An invitation link to the folder of `key` (an owner's).
-    fn test_link(key: &trs_sync_proto::keys::FolderKey, name: Option<&str>) -> String {
+    fn test_link(key: &seedwell_sync_proto::keys::FolderKey, name: Option<&str>) -> String {
         let s = key.secret().unwrap();
-        let invite = trs_sync_proto::members::new_invite(
+        let invite = seedwell_sync_proto::members::new_invite(
             *s.public_key(),
             [1; 16],
             [2; 32],
@@ -992,7 +994,7 @@ mod tests {
             1,
             0,
             1,
-            trs_sync_proto::members::Signer::Folder,
+            seedwell_sync_proto::members::Signer::Folder,
             &|m| s.sign(m),
         );
         InviteLink { invite, token_seed: [2; 32], name: name.map(str::to_owned), agents: false, reach: None }.format()
@@ -1001,7 +1003,7 @@ mod tests {
     #[test]
     fn joined_folders_get_a_default_place() {
         let dir = tempfile::tempdir().unwrap();
-        let key = trs_sync_proto::keys::FolderKey::Owner(trs_sync_proto::keys::FolderSecret::from_bytes([7; 32]));
+        let key = seedwell_sync_proto::keys::FolderKey::Owner(seedwell_sync_proto::keys::FolderSecret::from_bytes([7; 32]));
         let link = test_link(&key, Some("../My Docs"));
         let base = dir.path().display().to_string();
         assert_eq!(default_join_path(&base, &link).unwrap(), dir.path().join("My Docs"), "the name hint, made safe");

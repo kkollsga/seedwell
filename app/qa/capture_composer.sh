@@ -76,4 +76,35 @@ s=$(qa_ask "chat gallery $dots 2"); check "a thumbnail" "$s" "2 / 2"
 qa_cmd "chat gallery $dots 1"
 s=$(qa_ask "chat chip $dots 2"); check "a click on the reference shows its image" "$s" "shows 2 / 2"
 qa_shot composer-gallery main
+
+# Groups of channels (SPEC 7G.7 Groups), made through the CLI as an agent would: the group above the plain list with
+# its icon from its name, its channel under it and not also in the list, its menu, and closed with its count.
+cli chat new "QA Plain" >/dev/null 2>&1 || { echo "  FAIL: chat new QA Plain"; FAIL=1; }
+cli chat topic "QA Plain" Dinner >/dev/null 2>&1 || { echo "  FAIL: chat topic"; FAIL=1; }
+qa_cmd "chat-channel QA Plain open"
+qa_cmd "chat-channel QA Plain close"
+s=$(qa_ask "chat-groups"); check "a channel's topics closed: no two rows in one place" "$s" "rows ok"
+cli chat group new Agents >/dev/null 2>&1 || { echo "  FAIL: chat group new"; FAIL=1; }
+cli chat group move "QA Composer" Agents >/dev/null 2>&1 || { echo "  FAIL: chat group move"; FAIL=1; }
+s=$(cli chat group list 2>&1); check "the CLI lists the group with its channel" "$s" "1. Agents  [sparkles]  QA Composer"
+s=$(qa_wait "chat-groups ~ Agents [Sparkles] open" 10)
+check "the sidebar draws the group with its channel" "$s" "open, unread 0: QA Composer"
+check "the group's channel is not also in the plain list" "$s" "plain QA Plain"
+check "the group's menu" "$s" "menu Rename Group…|Icon ["
+check "no two rows in one place" "$s" "rows ok"
+qa_shot composer-group-open main
+# Closed while its channel is shown: the page stays, the group's row holds the selection (its icon in the accent).
+qa_cmd "chat open QA Composer"
+qa_cmd "chat-group Agents close"
+s=$(qa_wait "chat-groups ~ closed" 10); check "closed, holding the channel shown" "$s" "Agents [Sparkles] closed holding the channel shown"
+check "no two rows in one place while it closes" "$s" "rows ok"
+s=$(qa_ask "where"); check "the page stays" "$s" "section chat"
+qa_shot composer-group-holding main
+# Another channel shown: the closed group holds nothing, and the rows that went are not drawn under the ones that came.
+qa_cmd "chat open QA Plain"
+s=$(qa_ask "chat-groups"); check "closed" "$s" "Agents [Sparkles] closed, unread 0"
+check "no two rows in one place" "$s" "rows ok"
+qa_shot composer-group-closed main
+cli chat group delete Agents >/dev/null 2>&1 || { echo "  FAIL: chat group delete"; FAIL=1; }
+s=$(qa_wait "chat-groups ~ chat-groups: none" 10); check "deleted: its channel back in the plain list" "$s" "QA Composer"
 qa_end composer

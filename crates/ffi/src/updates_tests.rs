@@ -67,19 +67,19 @@ fn dev_updates(core: &Arc<Core>, n: u32, repo: &str, installer: &Path, now: u64)
 }
 
 /// The build key unit tests sign watched folders' builds with (trusted by `build_keys` in tests only).
-pub(crate) fn test_key() -> trs_buildsig::SigningKey {
-    trs_buildsig::SigningKey::from_seed_hex(&"07".repeat(32)).unwrap()
+pub(crate) fn test_key() -> seedwell_buildsig::SigningKey {
+    seedwell_buildsig::SigningKey::from_seed_hex(&"07".repeat(32)).unwrap()
 }
 
 /// Puts `body` in `folder` as this system's zip of `version` and signs it into the folder's build.json with `key`.
 #[cfg(unix)]
-fn publish(folder: &Path, version: &str, body: &str, key: &trs_buildsig::SigningKey) -> std::path::PathBuf {
+fn publish(folder: &Path, version: &str, body: &str, key: &seedwell_buildsig::SigningKey) -> std::path::PathBuf {
     let zip = folder.join(os::release_zip(version));
     std::fs::write(&zip, body).unwrap();
     let sha = sha256_of(&zip).unwrap();
     let name = os::release_zip(version);
-    let a = trs_buildsig::Adding { zip: &name, sha256: &sha, commit: Some("abc1234"), minimum: None };
-    trs_buildsig::add(folder, &a, key, &[], T0).unwrap();
+    let a = seedwell_buildsig::Adding { zip: &name, sha256: &sha, commit: Some("abc1234"), minimum: None };
+    seedwell_buildsig::add(folder, &a, key, &[], T0).unwrap();
     zip
 }
 
@@ -197,7 +197,7 @@ fn wait_ended(core: &Arc<Core>) {
     let saved: Saved = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
     let pid = saved.pending_pid.expect("the installer's process is kept");
     for _ in 0..500 {
-        if !trs_platform::running::alive(pid) {
+        if !seedwell_platform::running::alive(pid) {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -488,7 +488,7 @@ fn a_release_never_offers_a_development_version_and_a_folder_may() {
     let tagged = doc.replacen(&format!(r#""version":"{v}""#), &format!(r#""version":"{v}","tag":"v{v}""#), 1);
     assert!(parse_latest(tagged.as_bytes(), os::RELEASE_SECTION, os::MINIMUM_SYSTEM_KEY, os::release_zip).is_none());
     // A watched folder's signed build.json names this system's build.
-    let entry = |version: &str, zip: String, minimum: Option<&str>| trs_buildsig::Build {
+    let entry = |version: &str, zip: String, minimum: Option<&str>| seedwell_buildsig::Build {
         version: version.into(),
         commit: None,
         zip,
@@ -636,12 +636,12 @@ fn a_watched_folder_installs_only_a_build_signed_with_a_trusted_key() {
     std::fs::write(&zip, "a build").unwrap();
     let sha = sha256_of(&zip).unwrap();
     std::fs::write(builds.join("latest.json"), format!(r#"{{"version":"{v}","zip":"{}","sha256":"{sha}"}}"#, os::release_zip(&v))).unwrap();
-    std::fs::write(builds.join(trs_buildsig::FILE), "{}").unwrap();
+    std::fs::write(builds.join(seedwell_buildsig::FILE), "{}").unwrap();
     status("is not a signed build manifest");
 
     // Signed by a key nobody trusts.
-    let stranger = trs_buildsig::SigningKey::from_seed_hex(&"09".repeat(32)).unwrap();
-    std::fs::remove_file(builds.join(trs_buildsig::FILE)).unwrap();
+    let stranger = seedwell_buildsig::SigningKey::from_seed_hex(&"09".repeat(32)).unwrap();
+    std::fs::remove_file(builds.join(seedwell_buildsig::FILE)).unwrap();
     publish(&builds, &v, "a stranger's build", &stranger);
     status("does not trust");
 
@@ -649,9 +649,9 @@ fn a_watched_folder_installs_only_a_build_signed_with_a_trusted_key() {
     let stage = dir.path().join("stage");
     std::fs::create_dir(&stage).unwrap();
     publish(&stage, &v, "the user's build", &test_key());
-    let signed = std::fs::read(stage.join(trs_buildsig::FILE)).unwrap();
+    let signed = std::fs::read(stage.join(seedwell_buildsig::FILE)).unwrap();
     std::fs::write(&zip, "someone else's build").unwrap();
-    std::fs::write(builds.join(trs_buildsig::FILE), &signed).unwrap();
+    std::fs::write(builds.join(seedwell_buildsig::FILE), &signed).unwrap();
     status("is not the build build.json signed");
 
     // The manifest changed after signing (another checksum put in).
@@ -659,13 +659,13 @@ fn a_watched_folder_installs_only_a_build_signed_with_a_trusted_key() {
     let theirs = sha256_of(&zip).unwrap();
     let tampered = text.replace(&sha256_of_text("the user's build"), &theirs);
     assert_ne!(tampered, text);
-    std::fs::write(builds.join(trs_buildsig::FILE), tampered).unwrap();
+    std::fs::write(builds.join(seedwell_buildsig::FILE), tampered).unwrap();
     status("does not match it");
     assert!(!ran.exists(), "nothing was installed");
 
     // The signed zip arrives after all: that one is installed.
     std::fs::write(&zip, "the user's build").unwrap();
-    std::fs::write(builds.join(trs_buildsig::FILE), &signed).unwrap();
+    std::fs::write(builds.join(seedwell_buildsig::FILE), &signed).unwrap();
     let args = wait_for(&ran);
     assert!(args.starts_with(&format!("--zip\n{}\n--sha256\n{}\n", zip.display(), sha256_of_text("the user's build"))), "{args}");
 }
@@ -870,6 +870,45 @@ fn update_now_checks_and_starts_the_installer_as_check_now_and_install_do() {
     let _u = updates(&core, false, &serve(503, String::new()), T0);
     let e = core.builds.get().unwrap().update_now().unwrap_err();
     assert!(e.starts_with("the check failed"), "{e}");
+}
+
+/// `restart` (an agent at full, `seedwell restart`) reaches the app's own installer in its restart mode for this very
+/// process, with the state folder every install gets, through the control server's hook. Once: a second restart
+/// within the installer's time would quit the reopened app, and one beside an install would race it; both are
+/// refused, as is one while the app quits. The answer names what the quit interrupts, and says nothing of it when
+/// nothing runs. A copy without its installer cannot restart and says so instead of quitting for good.
+#[cfg(unix)]
+#[test]
+fn restart_starts_the_apps_installer_in_restart_mode_once_and_says_what_it_interrupts() {
+    let (core, dir) = mock();
+    let (script, ran) = fake_installer(dir.path());
+    let u = dev_updates(&core, 1, "http://127.0.0.1:9", &script, T0);
+    let hook = core.builds.get().expect("the control server finds the updater");
+    let d = hook.restart().unwrap();
+    assert_eq!(wait_for(&ran), format!("--restart\n--pid\n{}\n{}\n", std::process::id(), dir.path().display()));
+    assert!(d.note.starts_with("Restarting Seedwell: it quits and opens again"), "{}", d.note);
+    assert!(d.note.contains("; this interrupts ") && d.note.contains("download"), "the mock downloads: {}", d.note);
+    assert_eq!(d.log, u.log_path());
+    std::fs::remove_file(&ran).unwrap();
+    let now = unix_ms();
+    assert!(u.restart(now + MIN).unwrap_err().starts_with("a restart is already under way"));
+    // Its time over (the installer gave up), a restart may be asked again; with nothing running, nothing is interrupted.
+    idle(&core);
+    let d = u.restart(now + INSTALL_RUNS_MS + MIN).unwrap();
+    wait_for(&ran);
+    assert!(!d.note.contains("interrupts"), "{}", d.note);
+    u.quitting();
+    assert!(u.restart(now + 3 * INSTALL_RUNS_MS).unwrap_err().contains("is quitting already"));
+
+    let (core, dir) = mock();
+    let (script, ran) = fake_installer(dir.path());
+    let u = dev_updates(&core, 1, "http://127.0.0.1:9", &script, T0);
+    u.lock().status = Status::Installing { version: format!("{}.2", current()), since_ms: T0, here: true };
+    assert!(u.restart(T0).unwrap_err().starts_with(&format!("installing {}.2 (development build) already", current())));
+    let bare = updates(&core, false, "http://127.0.0.1:9", T0);
+    assert!(bare.restart(T0).unwrap_err().contains("has no installer"));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(!ran.exists(), "nothing was started");
 }
 
 // MARK: A newer Seedwell on the network

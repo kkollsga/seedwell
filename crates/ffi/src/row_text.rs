@@ -2,7 +2,7 @@
 //! §1): the progress a download counts, why it is not moving, the retry note, the category's label, whether it
 //! offers Play, and the countdown phrase of a held torrent.
 
-use trs_control::display as d;
+use seedwell_control::display as d;
 
 use crate::types::{Category, PendingStart, SeedGroup, TransferKind, TransferRow, TransferState};
 

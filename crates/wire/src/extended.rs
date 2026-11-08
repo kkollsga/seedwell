@@ -11,6 +11,13 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 pub const LOCAL_UT_METADATA_ID: u8 = 1;
 /// Extension id we assign to `ut_pex`.
 pub const LOCAL_UT_PEX_ID: u8 = 2;
+/// Extension id we assign to libtorrent's `upload_only` message (what peers send us).
+///
+/// libtorrent and the clients built on it (qBittorrent, Deluge) only ever *set* a peer's upload-only
+/// state from its extended handshake's BEP 21 `upload_only`; they clear it only through this
+/// message, and send it only to peers whose `m` lists `upload_only`. Its payload is one byte,
+/// 0 or 1 (libtorrent `bt_peer_connection::write_upload_only`).
+pub const LOCAL_UPLOAD_ONLY_ID: u8 = 3;
 /// Default `reqq` we advertise: how many outstanding requests we accept from a peer.
 ///
 /// A leecher never queues more than this, and Transmission re-fills its queue only twice a second, so it
@@ -74,6 +81,8 @@ pub struct ExtendedHandshake<'a> {
     pub metadata_size: Option<u32>,
     /// `upload_only` (BEP 21).
     pub upload_only: Option<bool>,
+    /// Peer's id for libtorrent's `upload_only` message (`m.upload_only`), see [`LOCAL_UPLOAD_ONLY_ID`].
+    pub lt_upload_only: Option<u8>,
     /// Raw `m` dictionary span, for [`ExtendedHandshake::unknown_extensions`].
     m_raw: Option<&'a [u8]>,
 }
@@ -93,6 +102,7 @@ impl<'a> ExtendedHandshake<'a> {
                     let m = bencode::Dict(raw);
                     h.ut_metadata = m.get(b"ut_metadata").and_then(ext_id);
                     h.ut_pex = m.get(b"ut_pex").and_then(ext_id);
+                    h.lt_upload_only = m.get(b"upload_only").and_then(ext_id);
                 }
                 (b"v", Val::Bytes(b)) => {
                     h.client = Some(b.get(..MAX_REMOTE_CLIENT_LEN).unwrap_or(b));
@@ -114,7 +124,7 @@ impl<'a> ExtendedHandshake<'a> {
         self.m_raw
             .into_iter()
             .flat_map(|raw| bencode::Dict(raw).iter())
-            .filter(|(k, _)| *k != b"ut_metadata" && *k != b"ut_pex")
+            .filter(|(k, _)| !matches!(*k, b"ut_metadata" | b"ut_pex" | b"upload_only"))
             .filter_map(|(k, v)| ext_id(v).map(|id| (k, id)))
             .take(MAX_EXTRA_EXTENSIONS)
     }
@@ -201,8 +211,10 @@ impl<'a> LocalExtendedHandshake<'a> {
         use bencode::{put_bytes, put_kv_int};
         out.put_u8(b'd');
         // Sorted order: m, metadata_size, p, reqq, upload_only, v, yourip.
-        let mut m: [(&str, u8); MAX_EXTRA_EXTENSIONS + 2] = [("", 0); MAX_EXTRA_EXTENSIONS + 2];
-        let mut n = 0;
+        let mut m: [(&str, u8); MAX_EXTRA_EXTENSIONS + 3] = [("", 0); MAX_EXTRA_EXTENSIONS + 3];
+        // Always accepted: it is how a libtorrent peer tells us it wants pieces again.
+        m[0] = ("upload_only", LOCAL_UPLOAD_ONLY_ID);
+        let mut n = 1;
         if self.policy.allow_metadata {
             m[n] = ("ut_metadata", LOCAL_UT_METADATA_ID);
             n += 1;
@@ -212,7 +224,12 @@ impl<'a> LocalExtendedHandshake<'a> {
             n += 1;
         }
         for &(name, id) in self.extra.iter().take(MAX_EXTRA_EXTENSIONS) {
-            if id != 0 && !name.is_empty() && name.len() <= MAX_EXTENSION_NAME && n < m.len() {
+            if id != 0
+                && !name.is_empty()
+                && name.len() <= MAX_EXTENSION_NAME
+                && n < m.len()
+                && !m.iter().take(n).any(|e| e.0 == name)
+            {
                 m[n] = (name, id);
                 n += 1;
             }
@@ -248,6 +265,11 @@ impl<'a> LocalExtendedHandshake<'a> {
     }
 }
 
+/// Write the payload of libtorrent's `upload_only` message: one byte, 1 when we want nothing.
+pub fn encode_upload_only<B: BufMut>(out: &mut B, upload_only: bool) {
+    out.put_u8(u8::from(upload_only));
+}
+
 /// A decoded extended message, classified by the id *we* assigned in our handshake.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ExtendedMessage<'a> {
@@ -257,6 +279,8 @@ pub enum ExtendedMessage<'a> {
     Metadata(MetadataMessage<'a>),
     /// `ut_pex` (BEP 11).
     Pex(PexMessage<'a>),
+    /// libtorrent's `upload_only`: the peer wants nothing from us (`true`), or wants pieces again.
+    UploadOnly(bool),
     /// An extension we did not register; payload passed through untouched.
     Unknown {
         /// Extension id from the frame.
@@ -271,7 +295,8 @@ impl<'a> ExtendedMessage<'a> {
     ///
     /// Returns [`Error::ExtensionDisabled`] if the peer uses an extension that
     /// `policy` disabled (notably PEX on private torrents); the engine should ignore
-    /// the frame (or drop a persistent offender).
+    /// the frame (or drop a persistent offender). An `upload_only` message whose payload is not
+    /// one byte is [`Error::InvalidField`] (libtorrent ignores such a message).
     pub fn parse(id: u8, payload: &'a [u8], policy: ExtPolicy) -> Result<Self> {
         match id {
             0 => Ok(Self::Handshake(ExtendedHandshake::parse(payload)?)),
@@ -281,6 +306,10 @@ impl<'a> ExtendedMessage<'a> {
             LOCAL_UT_METADATA_ID => Err(Error::ExtensionDisabled("ut_metadata")),
             LOCAL_UT_PEX_ID if policy.allow_pex => Ok(Self::Pex(PexMessage::parse(payload)?)),
             LOCAL_UT_PEX_ID => Err(Error::ExtensionDisabled("ut_pex")),
+            LOCAL_UPLOAD_ONLY_ID => match payload {
+                [b] => Ok(Self::UploadOnly(*b != 0)),
+                _ => Err(Error::InvalidField("upload_only")),
+            },
             _ => Ok(Self::Unknown { id, payload }),
         }
     }
@@ -303,7 +332,7 @@ mod tests {
     #[test]
     fn byte_exact_public() {
         let v = local(ExtPolicy::for_torrent(false));
-        let exp = b"d1:md11:ut_metadatai1e6:ut_pexi2ee13:metadata_sizei31235e1:pi6881e4:reqqi1000e1:v14:Seedwell 0.1.06:yourip4:\x01\x02\x03\x04e";
+        let exp = b"d1:md11:upload_onlyi3e11:ut_metadatai1e6:ut_pexi2ee13:metadata_sizei31235e1:pi6881e4:reqqi1000e1:v14:Seedwell 0.1.06:yourip4:\x01\x02\x03\x04e";
         assert_eq!(String::from_utf8_lossy(&v), String::from_utf8_lossy(exp));
         assert_eq!(v, exp);
     }
@@ -323,7 +352,7 @@ mod tests {
         l.upload_only = true;
         l.listen_port = Some(51413);
         l.your_ip = Some("2001:db8::1".parse().unwrap());
-        l.extra = &[("lt_donthave", 7), ("a_first", 9), ("", 3), ("zero", 0)];
+        l.extra = &[("lt_donthave", 7), ("a_first", 9), ("", 3), ("zero", 0), ("upload_only", 5)];
         let mut v = Vec::new();
         l.encode_payload(&mut v);
         let h = ExtendedHandshake::parse(&v).unwrap();
@@ -332,6 +361,9 @@ mod tests {
         assert_eq!(h.reqq, Some(1000));
         assert_eq!(h.listen_port, Some(51413));
         assert_eq!(h.upload_only, Some(true));
+        // A name in `extra` that we list ourselves is not written twice (a dictionary with a repeated key).
+        assert_eq!(h.lt_upload_only, Some(LOCAL_UPLOAD_ONLY_ID));
+        assert_eq!(v.windows(11).filter(|w| w == b"upload_only").count(), 2, "m's entry and BEP 21's flag only");
         assert_eq!(h.your_ip, Some("2001:db8::1".parse().unwrap()));
         assert_eq!(h.metadata_size, None);
         assert_eq!(h.client, Some(&b"Seedwell 1.2.3"[..]));
@@ -373,16 +405,60 @@ mod tests {
         assert_eq!(h.metadata_size, Some(31235));
         assert_eq!(h.reqq, Some(500));
         assert_eq!(h.your_ip, Some("127.0.0.1".parse().unwrap()));
+        assert_eq!(h.lt_upload_only, Some(3));
         let names: Vec<_> = h.unknown_extensions().map(|(n, _)| n).collect();
+        assert_eq!(names, vec![&b"lt_donthave"[..], b"share_mode", b"ut_holepunch"]);
+    }
+
+    /// A libtorrent-family peer (qBittorrent, Deluge) clears a peer's upload-only state only through
+    /// its `upload_only` message, and sends that message only to a peer whose handshake lists
+    /// `upload_only`. Without the entry in our `m`, a partial seed that wants pieces again stays
+    /// upload-only in its eyes, and it drops us as redundant.
+    #[test]
+    fn our_handshake_lists_lt_upload_only_whatever_the_policy() {
+        for policy in [
+            ExtPolicy::for_torrent(false),
+            ExtPolicy::for_torrent(true),
+            ExtPolicy { allow_pex: false, allow_metadata: false },
+        ] {
+            let mut v = Vec::new();
+            LocalExtendedHandshake::new("1.0", policy).encode_payload(&mut v);
+            let h = ExtendedHandshake::parse(&v).unwrap();
+            assert_eq!(h.lt_upload_only, Some(LOCAL_UPLOAD_ONLY_ID), "{policy:?}");
+            assert_eq!(h.unknown_extensions().count(), 0);
+        }
+    }
+
+    /// The message goes out as libtorrent writes it (`write_upload_only`: length 3, id 20, the
+    /// peer's id, one byte 0 or 1) and is read back as such. A different frame would be ignored by
+    /// a libtorrent peer, which then never sees us want pieces again.
+    #[test]
+    fn lt_upload_only_message_round_trips_in_libtorrents_format() {
+        use crate::{Decoder, Encoder, Limits, Message, Reserved};
+        for (flag, byte) in [(true, 1u8), (false, 0u8)] {
+            let mut e = Encoder::new();
+            e.push_extended(LOCAL_UPLOAD_ONLY_ID, |b| encode_upload_only(b, flag));
+            assert_eq!(e.pending(), [0, 0, 0, 3, 20, LOCAL_UPLOAD_ONLY_ID, byte]);
+            let mut rx = bytes::BytesMut::from(e.pending());
+            let ours = Reserved::ours(false);
+            let m = Decoder::new(Limits::default()).negotiated(&ours, &ours).decode(&mut rx).unwrap().unwrap();
+            let Message::Extended { id, payload } = m else { panic!("{m:?}") };
+            assert_eq!(
+                ExtendedMessage::parse(id, &payload, ExtPolicy::for_torrent(true)).unwrap(),
+                ExtendedMessage::UploadOnly(flag)
+            );
+        }
+        // Any non-zero byte means upload-only, as libtorrent reads it.
         assert_eq!(
-            names,
-            vec![
-                &b"lt_donthave"[..],
-                b"share_mode",
-                b"upload_only",
-                b"ut_holepunch"
-            ]
+            ExtendedMessage::parse(LOCAL_UPLOAD_ONLY_ID, &[7], ExtPolicy::for_torrent(false)).unwrap(),
+            ExtendedMessage::UploadOnly(true)
         );
+        for bad in [&b""[..], &[0, 0], &[1, 2, 3]] {
+            assert_eq!(
+                ExtendedMessage::parse(LOCAL_UPLOAD_ONLY_ID, bad, ExtPolicy::for_torrent(false)).unwrap_err(),
+                Error::InvalidField("upload_only")
+            );
+        }
     }
 
     #[test]

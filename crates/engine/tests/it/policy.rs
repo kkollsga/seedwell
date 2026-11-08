@@ -4,11 +4,11 @@ use crate::common;
 use std::time::Duration;
 
 use common::*;
-use trs_engine::*;
-use trs_state::duration::Secs;
-use trs_state::rules::{DefaultRule, Match, OnGoal, Priority as SPrio, Rule, SeedingGoal};
-use trs_state::trackers::{Profile, UrlPattern};
-use trs_state::{RuleSet, StatsScope, TrackerProfiles};
+use seedwell_engine::*;
+use seedwell_state::duration::Secs;
+use seedwell_state::rules::{DefaultRule, Match, OnGoal, Priority as SPrio, Rule, SeedingGoal};
+use seedwell_state::trackers::{Profile, UrlPattern};
+use seedwell_state::{RuleSet, StatsScope, TrackerProfiles};
 
 fn profile(id: &str, host: &str, rule: Option<&str>) -> Profile {
     Profile {

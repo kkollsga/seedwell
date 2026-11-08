@@ -1,4 +1,4 @@
-//! trs-fswatch: a recursive watcher for one folder root, and a pure aggregator that turns its events into
+//! seedwell-fswatch: a recursive watcher for one folder root, and a pure aggregator that turns its events into
 //! scan batches.
 //!
 //! * [`watch`] starts a watcher on a std thread: FSEvents on macOS, inotify on Linux, ReadDirectoryChangesW

@@ -9,9 +9,9 @@ use crate::adversarial_support;
 use std::time::Duration;
 
 use adversarial_support::*;
-use trs_tracker::gate::GateConfig;
-use trs_tracker::hub::TrackerHub;
-use trs_tracker::{Event, MemoryStore, Millis, TorrentEvent};
+use seedwell_tracker::gate::GateConfig;
+use seedwell_tracker::hub::TrackerHub;
+use seedwell_tracker::{Event, MemoryStore, Millis, TorrentEvent};
 
 const A: &str = "http://a.test/announce";
 
@@ -72,7 +72,7 @@ fn regular_announces_follow_max_of_interval_and_min_interval() {
 }
 
 fn clamp(iv: u64, min: Option<u64>) -> u64 {
-    let t = trs_tracker::clamp_timing(Some(iv as i64), min.map(|m| m as i64));
+    let t = seedwell_tracker::clamp_timing(Some(iv as i64), min.map(|m| m as i64));
     t.interval.as_secs()
 }
 
@@ -365,10 +365,10 @@ fn bug_forward_clock_excursion_silences_trackers() {
 #[test]
 fn bug_gate_bucket_starves_after_forward_excursion() {
     use std::sync::Arc;
-    use trs_tracker::gate::*;
-    use trs_tracker::machine::SendKind;
-    use trs_tracker::{AnnounceParams, RequestId};
-    let u = Arc::new(trs_tracker::TrackerUrl::parse("http://h.test/announce").unwrap());
+    use seedwell_tracker::gate::*;
+    use seedwell_tracker::machine::SendKind;
+    use seedwell_tracker::{AnnounceParams, RequestId};
+    let u = Arc::new(seedwell_tracker::TrackerUrl::parse("http://h.test/announce").unwrap());
     let mut gate = HostGate::new(GateConfig::default());
     for n in 0..4u32 {
         gate.register_torrent(ih(n), vec![u.clone()], &[], Millis(0));
@@ -389,7 +389,7 @@ fn bug_gate_bucket_starves_after_forward_excursion() {
         ipv6: None,
         crypto: Default::default(),
     };
-    let timing = trs_tracker::clamp_timing(Some(1800), None);
+    let timing = seedwell_tracker::clamp_timing(Some(1800), None);
     // the glitch tick drains the (full) bucket: 3 releases at "year 2036"
     let glitch = Millis(10 * 365 * 86_400_000);
     let mut released = 0;
@@ -445,7 +445,7 @@ fn clock_near_u64_max_does_not_panic_or_spin() {
 
 #[test]
 fn persisted_hold_from_another_clock_is_capped_to_one_hour() {
-    use trs_tracker::store::{TimingKey, TimingRecord, TimingStore};
+    use seedwell_tracker::store::{TimingKey, TimingRecord, TimingStore};
     for hold in [0u64, 5, u64::MAX / 2, u64::MAX - 1, u64::MAX] {
         let mut store = MemoryStore::new();
         let spec1 = spec(1, &[&[A]]);
@@ -469,7 +469,7 @@ fn persisted_hold_from_another_clock_is_capped_to_one_hour() {
         hub.add_torrent(spec1, t0).unwrap();
         hub.set_stats(
             &ih(1),
-            trs_tracker::Stats {
+            seedwell_tracker::Stats {
                 uploaded: 0,
                 downloaded: 0,
                 corrupt: 0,

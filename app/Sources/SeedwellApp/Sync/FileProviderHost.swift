@@ -19,6 +19,17 @@ protocol FileProviderDomains: Sendable {
     func materialized(id: String) async throws -> [String]
     /// Asks the system to download an item (it fetches it from the extension when it can).
     func requestDownload(id: String, item: String) async throws
+    /// The name the system reported back for each domain after the host's last add, kept across launches (as the
+    /// system keeps its domains): a later launch finds the domain as it left it and does nothing.
+    func seenNames() async -> [String: SeenDomainName]
+    func setSeenNames(_ seen: [String: SeenDomainName]) async
+}
+
+/// A domain added under the core's name `asked` (the fallback's, when the system refused an empty one) that the system
+/// then reported as `reported`.
+struct SeenDomainName: Codable, Equatable, Sendable {
+    var asked: String
+    var reported: String
 }
 
 /// A registered domain: its folder, name and whether the user allowed it (System Settings).
@@ -79,6 +90,18 @@ struct SystemDomains: FileProviderDomains {
         guard let d = try await domain(id), let m = NSFileProviderManager(for: d) else { return }
         try await m.requestDownloadForItem(withIdentifier: FPIdentifiers.provider(item), requestedRange: NSRange(location: NSNotFound, length: 0))
     }
+
+    /// In the app's defaults.
+    private static let seenKey = "FileProviderSeenDomainNames"
+
+    func seenNames() async -> [String: SeenDomainName] {
+        guard let data = UserDefaults.standard.data(forKey: Self.seenKey) else { return [:] }
+        return (try? JSONDecoder().decode([String: SeenDomainName].self, from: data)) ?? [:]
+    }
+
+    func setSeenNames(_ seen: [String: SeenDomainName]) async {
+        UserDefaults.standard.set(try? JSONEncoder().encode(seen), forKey: Self.seenKey)
+    }
 }
 
 /// On-demand folders in the Finder (SPEC 7G.11), the app's side: it serves the extension (the core's server, at the
@@ -110,13 +133,29 @@ struct SystemDomains: FileProviderDomains {
     /// Domains whose held files were shown downloaded this run (once each, when enabled), and those doing it now.
     @ObservationIgnored private var shownHeld: Set<String> = []
     @ObservationIgnored private var showingHeld: Set<String> = []
+    /// Domains asked to show their held files again while that was running: it looks again once done.
+    @ObservationIgnored private var showAgain: Set<String> = []
     @ObservationIgnored private var poll: Timer?
+    /// The name a domain gets when the system refuses an empty one (the core's).
+    @ObservationIgnored let fallbackName: String
+    /// Domains whose empty name the system refused this run: they go by `fallbackName`, and the empty name is not tried
+    /// again until the next launch.
+    @ObservationIgnored private(set) var refusedEmpty: Set<String> = []
+    /// The name each domain was last added under this run: macOS may report a name back otherwise (an empty one as
+    /// something else), and a domain is never added again for that alone (no add on every report).
+    @ObservationIgnored private var addedAs: [String: String] = [:]
+    /// What the system reported back after the last add of each domain, this run or before (`domains.seenNames`,
+    /// read once): a domain reported so while the core still asks for that name is left alone on a later launch too
+    /// (else the empty name reported back otherwise, or refused for the fallback, made a hand-over and an add, and maybe
+    /// asked the user again, on every launch).
+    @ObservationIgnored private var seen: [String: SeenDomainName]?
     @ObservationIgnored private let log = Logger(subsystem: "io.github.kkollsga.Seedwell", category: "file-provider")
 
     init(core: Core, domains: FileProviderDomains = SystemDomains()) {
         self.core = core
         self.domains = domains
         hub = core.syncHostHubDomain()
+        fallbackName = core.syncHostDomainFallbackName()
         letGo = { folder, visible in try core.syncHostLetGo(id: folder, visible: visible) }
         undoLetGo = { folder in core.syncHostLetGoUndo(id: folder) }
     }
@@ -178,20 +217,41 @@ struct SystemDomains: FileProviderDomains {
         }
         wanted = want
         var new: Set<String> = []
+        var renamed: Set<String> = []
         do {
             let have = try await domains.list()
-            for d in want where !have.contains(where: { $0.id == d.id && $0.name == d.name }) {
+            let seen = await seenNames()
+            for d in want {
+                let name = nameFor(d)
+                let old = have.first { $0.id == d.id }
+                // Registered under the name asked for (the fallback's, after the empty one was refused), added under it
+                // this run whatever macOS reports back, or reported so after an add for the core's same name on an
+                // earlier launch (the empty name read back otherwise, or refused for the fallback): nothing to do.
+                if let old, old.name == name || addedAs[d.id] == name || seen[d.id] == SeenDomainName(asked: d.name, reported: old.name) { continue }
+                if let old, old.enabled {
+                    // A rename (0.1.20's hub was named *Seedwell*, the Finder said "Seedwell - Seedwell"): in place, by
+                    // adding it again under its identifier, which only updates its name (never removed and added: that
+                    // would drop what the system has on disk and ask the user to allow it again). macOS may move its
+                    // folder in ~/Library/CloudStorage to the new name, so what it has pending is handed over first.
+                    let domains = self.domains
+                    await handOver { try await domains.waitForChanges(id: d.id, below: FPIdentifiers.root) }
+                }
                 // One that cannot be added now is tried again on its own.
-                guard await addDomain(d.id, name: d.name) else { continue }
-                if !have.contains(where: { $0.id == d.id }) { new.insert(d.id) }
-                log.info("domain added: \(d.name, privacy: .public)")
+                guard await addDomain(d.id, name: name, isNew: old == nil) else { continue }
+                if let old {
+                    if old.enabled { renamed.insert(d.id) }
+                    log.info("domain renamed: \(old.name, privacy: .public) → \(self.nameFor(d), privacy: .public)")
+                } else {
+                    new.insert(d.id)
+                    log.info("domain added: \(self.nameFor(d), privacy: .public)")
+                }
             }
         } catch {
             log.error("domains: \(error.localizedDescription, privacy: .public)")
         }
         await refreshEnabled()
-        // The hub registered now and kept off by macOS: the user is asked, once.
-        if !new.isDisjoint(with: disabled) { showSetup() }
+        // The hub registered now and kept off by macOS, or switched off by its rename: the user is asked, once.
+        if !new.union(renamed).isDisjoint(with: disabled) { showSetup() }
     }
 
     /// How long the system may take to hand over a folder's pending changes before it is let go of (plumbing: what it
@@ -305,29 +365,94 @@ struct SystemDomains: FileProviderDomains {
     var addRetries: [UInt64] = [1, 2, 4, 8, 16, 32, 64].map { $0 * 1_000_000_000 }
 
     /// Adds (or renames) a domain; one the system refuses is tried again in the background with growing waits. A domain
-    /// added anew shows its held files downloaded again. Whether it was added now.
+    /// added anew shows its held files downloaded again. Whether it was added now. An empty name (the hub's) that the
+    /// system refuses, by an error about the name or by every try failing, goes by `fallbackName` instead, this run: a
+    /// new install never ends up with no entry in the Finder. `isNew`: not registered before (once it is added later,
+    /// in the background, and macOS keeps it off, the user is asked to allow it).
     @discardableResult
-    func addDomain(_ id: String, name: String) async -> Bool {
+    func addDomain(_ id: String, name: String, isNew: Bool = false) async -> Bool {
         do {
             try await domains.add(id: id, name: name)
-            shownHeld.remove(id)
+            didAdd(id, name: name)
             return true
         } catch {
+            if name.isEmpty && Self.refusesName(error) { return await fallBack(id, error, isNew: isNew) }
             log.error("add domain: \(error.localizedDescription, privacy: .public); trying again")
             let waits = addRetries
             Task { @MainActor [weak self] in
+                var last: Error = error
                 for w in waits {
                     try? await Task.sleep(nanoseconds: w)
-                    guard let self, self.wanted.contains(where: { $0.id == id }) else { return }
-                    if (try? await self.domains.add(id: id, name: name)) != nil {
-                        self.shownHeld.remove(id)
+                    guard let self, self.wanted.contains(where: { $0.id == id }), !(name.isEmpty && self.refusedEmpty.contains(id)) else { return }
+                    do {
+                        try await self.domains.add(id: id, name: name)
+                        self.didAdd(id, name: name)
                         await self.refreshEnabled()
+                        if isNew && self.disabled.contains(id) { self.showSetup() }
                         return
+                    } catch {
+                        last = error
+                        if name.isEmpty && Self.refusesName(error) { break }
                     }
+                }
+                // Every try failed: an empty name goes by the fallback's.
+                guard let self, name.isEmpty, !self.refusedEmpty.contains(id), self.wanted.contains(where: { $0.id == id }) else { return }
+                if await self.fallBack(id, last, isNew: isNew) {
+                    await self.refreshEnabled()
+                    if isNew && self.disabled.contains(id) { self.showSetup() }
                 }
             }
             return false
         }
+    }
+
+    /// The system refused domain `id`'s empty name: it goes by `fallbackName` until the next launch.
+    private func fallBack(_ id: String, _ error: Error, isNew: Bool) async -> Bool {
+        refusedEmpty.insert(id)
+        log.error("the system refused the domain's empty name (\(error.localizedDescription, privacy: .public)): named \(self.fallbackName, privacy: .public) this run")
+        return await addDomain(id, name: fallbackName, isNew: isNew)
+    }
+
+    private func didAdd(_ id: String, name: String) {
+        shownHeld.remove(id)
+        addedAs[id] = name
+    }
+
+    /// What the system reports for the domains added this run (under the name they still go by) is kept for the next
+    /// launch; the latest report wins.
+    private func noteSeen(_ list: [FileProviderDomainState]) async {
+        var seen = await seenNames()
+        let before = seen
+        for d in wanted {
+            guard addedAs[d.id] == nameFor(d), let reported = list.first(where: { $0.id == d.id })?.name else { continue }
+            seen[d.id] = SeenDomainName(asked: d.name, reported: reported)
+        }
+        guard seen != before else { return }
+        self.seen = seen
+        await domains.setSeenNames(seen)
+    }
+
+    /// The system's reports kept from before (read once a run).
+    private func seenNames() async -> [String: SeenDomainName] {
+        if let seen { return seen }
+        let read = await domains.seenNames()
+        seen = read
+        return read
+    }
+
+    /// The name domain `d` is registered under: the core's, or `fallbackName` for an empty one the system refused.
+    func nameFor(_ d: SyncHostDomain) -> String {
+        d.name.isEmpty && refusedEmpty.contains(d.id) ? fallbackName : d.name
+    }
+
+    /// Whether the system's error refuses the name itself (an invalid name or argument), not a passing failure.
+    nonisolated static func refusesName(_ error: Error) -> Bool {
+        let e = error as NSError
+        if e.domain == NSCocoaErrorDomain && e.code == CocoaError.Code.fileWriteInvalidFileName.rawValue { return true }
+        if e.domain == NSPOSIXErrorDomain && e.code == Int(EINVAL) { return true }
+        let text = ([e.localizedDescription, e.localizedFailureReason ?? "", e.debugDescription] + e.userInfo.values.map { "\($0)" })
+            .joined(separator: " ").lowercased()
+        return ["displayname", "display name", "argument"].contains { text.contains($0) }
     }
 
     /// What the system kept of a domain removed here goes where the user finds it (the core says where, and moves it,
@@ -351,6 +476,7 @@ struct SystemDomains: FileProviderDomains {
         do {
             let list = try await domains.list()
             now = Set(list.filter { d in !d.enabled && wanted.contains { $0.id == d.id } }.map(\.id))
+            await noteSeen(list)
         } catch {
             return
         }
@@ -385,11 +511,22 @@ struct SystemDomains: FileProviderDomains {
     /// Files the core holds show downloaded in the Finder, not online only (a folder switched to on demand has every
     /// file here; a domain added again finds them here too): the core lists those the system does not have on disk,
     /// and the system is asked for them in the core's batches. Their fetch hands back clones of the cache (no space
-    /// twice, nothing downloaded), and the core never takes them for the system letting go of something.
+    /// twice, nothing downloaded), and the core never takes them for the system letting go of something. Asked again
+    /// while it runs (the core told the hub again: a folder joined), it looks again once it is done, never drops it.
     func showHeld(_ id: String) async {
-        guard !showingHeld.contains(id) else { return }
+        guard !showingHeld.contains(id) else {
+            showAgain.insert(id)
+            return
+        }
         showingHeld.insert(id)
         defer { showingHeld.remove(id) }
+        repeat {
+            showAgain.remove(id)
+            await showHeldOnce(id)
+        } while showAgain.contains(id)
+    }
+
+    private func showHeldOnce(_ id: String) async {
         let onDisk: [String]
         do { onDisk = try await domains.materialized(id: id) } catch {
             shownHeld.remove(id)  // tried again on the next check

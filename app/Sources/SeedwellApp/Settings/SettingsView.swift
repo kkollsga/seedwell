@@ -39,12 +39,18 @@ struct SettingsView: View {
         VStack(spacing: 0) {
             tabBar(page.tabs)
             Divider()
-            switch page.tab {
-            case .devices: DevicesTab(core: model.core, nav: nav)
-            case .rules: RulesTab(model: model, nav: nav)
-            default:
-                SettingsPage { SettingsBlocksView(blocks: page.blocks, model: model, act: act) }
+            // Each tab is a page of its own (`id`): another tab is built afresh, as it is when Settings opens, instead
+            // of SwiftUI turning the old tab's rows into the new one's control by control (one tab to the next took
+            // the main thread about 100 ms, the same tab opened from elsewhere about 10).
+            Group {
+                switch page.tab {
+                case .devices: DevicesTab(core: model.core, nav: nav)
+                case .rules: RulesTab(model: model, nav: nav)
+                default:
+                    SettingsPage { SettingsBlocksView(blocks: page.blocks, model: model, act: act) }
+                }
             }
+            .id(page.tab)
             if let footer = page.footer { versionFooter(footer) }
             if let b = page.banner { banner(b) }
         }
@@ -97,16 +103,18 @@ struct SettingsView: View {
         .background(.bar)
     }
 
+    /// The tabs, 72 points each, narrower (down to 62) when the window is: at the main window's minimum width (820) nine
+    /// tabs of 72 were wider than the page, and the whole page was laid out wider than the window and cut off.
     private func tabBar(_ tabs: [SettingsTabItem]) -> some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 2) {
             ForEach(tabs, id: \.tab) { t in
                 Button { nav.tab = t.tab } label: {
                     VStack(spacing: 4) {
                         Image(systemName: t.tab.symbol).font(.system(size: Theme.Icon.large)).frame(height: 22)
-                        Text(t.title).font(Theme.caption)
+                        Text(t.title).font(Theme.caption).lineLimit(1).fixedSize()
                     }
                     .foregroundStyle(nav.tab == t.tab ? Color.accentColor : .secondary)
-                    .frame(width: 72, height: 52)
+                    .frame(minWidth: 62, maxWidth: 72, minHeight: 52, maxHeight: 52)
                     .background(RoundedRectangle(cornerRadius: 10).fill(nav.tab == t.tab ? Color.primary.opacity(0.08) : .clear))
                     .contentShape(Rectangle())
                 }

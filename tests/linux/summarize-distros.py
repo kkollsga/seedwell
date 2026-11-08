@@ -9,7 +9,7 @@ import os
 import re
 import sys
 
-CRATES = "trs-bencode trs-metainfo trs-wire trs-tracker trs-storage trs-dht trs-utp trs-http trs-state trs-classify trs-engine trs-control trs-cli trs-portmap".split()
+CRATES = "seedwell-bencode seedwell-metainfo seedwell-wire seedwell-tracker seedwell-storage seedwell-dht seedwell-utp seedwell-http seedwell-state seedwell-classify seedwell-engine seedwell-control seedwell-cli seedwell-portmap".split()
 d = sys.argv[1]
 distros = sys.argv[2:] or ["debian", "ubuntu", "fedora", "arch", "alpine"]
 res = {}

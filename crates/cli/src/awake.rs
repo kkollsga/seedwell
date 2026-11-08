@@ -5,8 +5,8 @@
 
 use std::time::Duration;
 
-use trs_control::proto::{AwakeSetParams, Empty, Request};
-use trs_control::types::AwakeDto;
+use seedwell_control::proto::{AwakeSetParams, Empty, Request};
+use seedwell_control::types::AwakeDto;
 
 use crate::args::{Opts, Usage, parse_duration};
 use crate::commands::{Global, R, ask, connect, show};
@@ -40,7 +40,7 @@ pub fn parse(args: Vec<String>) -> Result<Awake, Usage> {
     let words: Vec<&str> = pos.iter().map(String::as_str).collect();
     let cmd = match (words.as_slice(), span) {
         ([], Some(0)) | (["off"], None) => Cmd::Off,
-        ([], Some(s)) if s > trs_control::awake::MAX.as_secs() => return Err(Usage("at most a day (--for 24h)".into())),
+        ([], Some(s)) if s > seedwell_control::awake::MAX.as_secs() => return Err(Usage("at most a day (--for 24h)".into())),
         ([], Some(s)) => Cmd::Hold(Duration::from_secs(s)),
         ([] | ["status"], None) => Cmd::Status,
         (["on"], None) => return Err(Usage("say how long your work needs: seedwell awake --for 3h".into())),
@@ -78,7 +78,7 @@ pub fn words(d: &AwakeDto, mine: Option<(&str, bool)>) -> String {
     let until = |ms: u64| crate::chat::time(ms / 1000);
     let mut t = match mine {
         Some((key, true)) => match d.leases.iter().find(|l| l.key == key) {
-            Some(l) => format!(concat!("Keeping the ", trs_platform::computer!(), " awake for {} until {}."), l.who, until(l.until_ms)),
+            Some(l) => format!(concat!("Keeping the ", seedwell_platform::computer!(), " awake for {} until {}."), l.who, until(l.until_ms)),
             None => "The lease is already over.".into(),
         },
         Some((_, false)) => "Gave the lease back.".into(),
@@ -94,17 +94,17 @@ pub fn words(d: &AwakeDto, mine: Option<(&str, bool)>) -> String {
     if mine.is_none() || !others.is_empty() {
         sep(&mut t);
         t.push_str(&match (mine.is_some(), others.is_empty()) {
-            (_, true) => concat!("No agent asked to keep the ", trs_platform::computer!(), " awake.").to_string(),
-            (false, false) => format!(concat!("Agents keeping the ", trs_platform::computer!(), " awake: {}."), others.join(", ")),
+            (_, true) => concat!("No agent asked to keep the ", seedwell_platform::computer!(), " awake.").to_string(),
+            (false, false) => format!(concat!("Agents keeping the ", seedwell_platform::computer!(), " awake: {}."), others.join(", ")),
             (true, false) => format!("Also: {}.", others.join(", ")),
         });
     }
     if !d.leases.is_empty() {
         sep(&mut t);
         t.push_str(if !d.setting {
-            concat!("But Seedwell's setting \"Keep awake while agents work\" is off, so the ", trs_platform::computer!(), " may sleep.")
+            concat!("But Seedwell's setting \"Keep awake while agents work\" is off, so the ", seedwell_platform::computer!(), " may sleep.")
         } else if !d.host_keeps {
-            concat!("But this Seedwell runs without the app, so nothing holds the ", trs_platform::computer!(), " awake.")
+            concat!("But this Seedwell runs without the app, so nothing holds the ", seedwell_platform::computer!(), " awake.")
         } else {
             "The display still sleeps and the screen still locks."
         });
@@ -115,7 +115,7 @@ pub fn words(d: &AwakeDto, mine: Option<(&str, bool)>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trs_control::types::AwakeLeaseDto;
+    use seedwell_control::types::AwakeLeaseDto;
 
     fn p(s: &str) -> Result<Awake, Usage> {
         parse(s.split_whitespace().map(str::to_owned).collect())
@@ -140,13 +140,13 @@ mod tests {
         let lease = |key: &str, who: &str| AwakeLeaseDto { key: key.into(), who: who.into(), client: "c".into(), since_ms: 0, until_ms: 3_600_000 };
         let d = AwakeDto { leases: vec![lease("agent:kglite", "kglite"), lease("agent:web", "web")], setting: true, host_keeps: true, kept: true };
         let t = words(&d, Some(("agent:kglite", true)));
-        assert!(t.starts_with(concat!("Keeping the ", trs_platform::computer!(), " awake for kglite until ")) && t.contains("Also: web until") && t.ends_with("the screen still locks."), "{t}");
-        assert!(words(&d, None).starts_with(concat!("Agents keeping the ", trs_platform::computer!(), " awake: kglite until")));
+        assert!(t.starts_with(concat!("Keeping the ", seedwell_platform::computer!(), " awake for kglite until ")) && t.contains("Also: web until") && t.ends_with("the screen still locks."), "{t}");
+        assert!(words(&d, None).starts_with(concat!("Agents keeping the ", seedwell_platform::computer!(), " awake: kglite until")));
         let off = AwakeDto { setting: false, kept: false, ..d.clone() };
         assert!(words(&off, None).contains("setting \"Keep awake while agents work\" is off"));
         let daemon = AwakeDto { host_keeps: false, kept: false, ..d };
         assert!(words(&daemon, None).contains("runs without the app"));
-        assert_eq!(words(&AwakeDto::default(), None), concat!("No agent asked to keep the ", trs_platform::computer!(), " awake."));
+        assert_eq!(words(&AwakeDto::default(), None), concat!("No agent asked to keep the ", seedwell_platform::computer!(), " awake."));
         assert_eq!(words(&AwakeDto::default(), Some(("agent:x", false))), "Gave the lease back.");
     }
 }

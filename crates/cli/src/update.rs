@@ -8,8 +8,8 @@
 
 use std::path::PathBuf;
 
-use trs_control::proto::{Empty, Request, UpdateDevBuildsParams, UpdateInstallParams, UpdateWatchParams};
-use trs_control::types::UpdateStatusDto;
+use seedwell_control::proto::{Empty, Request, UpdateDevBuildsParams, UpdateInstallParams, UpdateWatchParams};
+use seedwell_control::types::UpdateStatusDto;
 
 use crate::args::{Opts, Usage};
 use crate::commands::{Global, R, ask, connect, show};

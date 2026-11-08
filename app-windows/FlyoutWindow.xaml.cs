@@ -6,7 +6,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
@@ -225,7 +225,7 @@ public sealed partial class FlyoutWindow : Window
         {
             last = app.TakeSnapshot();
             lastSync = app.Core.SyncSnapshot();
-            model = TrsFfiMethods.MenuModel(last, lastSync, app.Arrivals, App.Now(), app.Updater.Updates.AvailableVersion(), App.HostWindows);
+            model = SeedwellFfiMethods.MenuModel(last, lastSync, app.Arrivals, App.Now(), app.Updater.Updates.AvailableVersion(), App.HostWindows);
         }
         catch (Exception e)
         {
@@ -238,7 +238,7 @@ public sealed partial class FlyoutWindow : Window
             refresh.Start();
             return;
         }
-        SyncMenuModel? sync = syncOpen ? TrsFfiMethods.SyncMenuModel(lastSync, app.SyncRemoval, App.HostWindows) : null;
+        SyncMenuModel? sync = syncOpen ? SeedwellFfiMethods.SyncMenuModel(lastSync, app.SyncRemoval, App.HostWindows) : null;
         try { requests = app.Core.AgentRequests(App.Now()); } catch { requests = null; }
         if (opening || model.Signature != signature || (sync?.Signature ?? "") != syncSignature || (requests?.Signature ?? "") != requestsSignature)
         {
@@ -416,7 +416,7 @@ public sealed partial class FlyoutWindow : Window
         {
             // The chevron at the left opens the torrent's files under the row (one list at a time, the core's FileLists).
             var open = app.MenuFiles.IsExpanded(r.Id);
-            var toggle = TrsFfiMethods.FileListToggle(open);
+            var toggle = SeedwellFfiMethods.FileListToggle(open);
             var chevron = new Button
             {
                 Content = new FontIcon { Glyph = open ? "\uE70D" : "\uE76C", FontSize = 9 },
@@ -521,7 +521,7 @@ public sealed partial class FlyoutWindow : Window
         if (last is null) return null;
         try
         {
-            var m = TrsFfiMethods.MenuModel(last, app.Core.SyncSnapshot(), app.Arrivals, App.Now(), app.Updater.Updates.AvailableVersion(), App.HostWindows);
+            var m = SeedwellFfiMethods.MenuModel(last, app.Core.SyncSnapshot(), app.Arrivals, App.Now(), app.Updater.Updates.AvailableVersion(), App.HostWindows);
             return m.Sections.SelectMany(s => s.Rows).FirstOrDefault(r => r.Expands)?.Id;
         }
         catch { return null; }
@@ -714,8 +714,25 @@ public sealed partial class FlyoutWindow : Window
         }
     }
 
+    /// <summary>QA and the visual QA run: Folder Sync's rows drawn with the pointer on them (their buttons shown, the text stopped short of them).</summary>
+    internal bool QaSyncHover { get; set; }
+
+    /// <summary>A Folder Sync row's button (Edit, Remove): its width.</summary>
+    const int SyncRowButton = 24;
+
+    readonly List<(TextBlock Subtitle, StackPanel Buttons)> qaSyncRows = [];
+
+    /// <summary>QA: each Folder Sync row's grey line as drawn, whether it had to be cut, and whether the row's buttons lie over it.</summary>
+    internal string QaSyncRows() => $"hover {QaSyncHover} rows [{string.Join(" | ", qaSyncRows.Where(r => r.Subtitle.XamlRoot is not null).Select(r =>
+    {
+        var line = r.Subtitle.TransformToVisual(Root).TransformPoint(new Windows.Foundation.Point(0, 0));
+        var buttons = r.Buttons.TransformToVisual(Root).TransformPoint(new Windows.Foundation.Point(0, 0));
+        return $"\"{r.Subtitle.Text}\" trimmed {r.Subtitle.IsTextTrimmed} buttons shown {r.Buttons.Opacity > 0} over it {buttons.Y + r.Buttons.ActualHeight > line.Y + 1}";
+    }))}]";
+
     UIElement SyncPanel(SyncMenuModel sm)
     {
+        qaSyncRows.Clear();
         var panel = new StackPanel { Margin = new Thickness(16, 0, 0, 4) };
         foreach (var r in sm.Rows)
         {
@@ -728,6 +745,13 @@ public sealed partial class FlyoutWindow : Window
             g.Children.Add(badge);
             var text = new StackPanel();
             Grid.SetColumn(text, 1);
+            // As the Mac's: a bin at the row's end (the pencil comes with the folder editor), shown while the pointer or
+            // the keyboard is on the row or while its confirmation is open (the bin then lit); the label is its tooltip
+            // and name. Over the end of the name's line only: the name has the full width while they are hidden, and the
+            // grey line under it ("Syncing · 38 files to go · 1.0 MB/s · 2 min left") always has.
+            var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2, VerticalAlignment = VerticalAlignment.Top };
+            Grid.SetColumn(buttons, 1);
+            buttons.HorizontalAlignment = HorizontalAlignment.Right;
             // What the model's middle cut leaves must still fit: it ends in "…", never mid-letter (the subtitle too).
             var title = Text(r.Title);
             title.TextTrimming = TextTrimming.CharacterEllipsis;
@@ -737,15 +761,9 @@ public sealed partial class FlyoutWindow : Window
                 var subtitle = Text(r.Subtitle, secondary: true, size: 12);
                 subtitle.TextTrimming = TextTrimming.CharacterEllipsis;
                 text.Children.Add(subtitle);
+                qaSyncRows.Add((subtitle, buttons));
             }
             g.Children.Add(text);
-            // As the Mac's: a bin at the row's end (the pencil comes with the folder editor), shown while the pointer or
-            // the keyboard is on the row or while its confirmation is open (the bin then lit); the label is its tooltip
-            // and name.
-            var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
-            // Over the end of the text column: the name has the full width while they are hidden (as the Mac's).
-            Grid.SetColumn(buttons, 1);
-            buttons.HorizontalAlignment = HorizontalAlignment.Right;
             var id = r.Id;
             // The pencil before the bin when the core gives its label (it does only with the folder editor).
             void Edit() { Hide(); EditFolderDialog.Show(app, id); }
@@ -771,15 +789,22 @@ public sealed partial class FlyoutWindow : Window
             }
             buttons.Children.Add(bin);
             g.Children.Add(buttons);
+            // The height of the name's line, so the buttons leave the grey line under it alone.
+            foreach (var b in buttons.Children.OfType<Button>())
+            {
+                b.Width = SyncRowButton;
+                b.Height = 20;
+                b.MinHeight = 0;
+            }
             var path = lastSync?.Folders.FirstOrDefault(f => f.Id == id)?.Path;
-            var line = Line(g, path is null ? null : () => { Hide(); System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"\"{path}\"") { UseShellExecute = true }); });
-            bool pointer = false, keyboard = false;
+            var line = Line(g, path is null ? null : () => { Hide(); Shell.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"\"{path}\"") { UseShellExecute = true }); });
+            bool pointer = QaSyncHover, keyboard = false;
             void Show()
             {
                 bool shown = pointer || keyboard || r.Confirming;
                 buttons.Opacity = shown ? 1 : 0;
-                // The text stops short of it only while it shows (28 px and a gap).
-                text.Margin = new Thickness(0, 0, shown ? 32 : 0, 0);
+                // The name stops short of them only while they show (each button, and a gap).
+                title.Margin = new Thickness(0, 0, shown ? buttons.Children.Count * (SyncRowButton + 2) + 2 : 0, 0);
             }
             Show();
             line.PointerEntered += (_, _) => { pointer = true; Show(); };
@@ -844,12 +869,12 @@ public sealed partial class FlyoutWindow : Window
             }
             catch (CoreException e)
             {
-                alert = TrsFfiMethods.SyncRemoveFailed(FolderName(c.FolderId), TrsFfiMethods.CoreErrorMessage(e));
+                alert = SeedwellFfiMethods.SyncRemoveFailed(FolderName(c.FolderId), SeedwellFfiMethods.CoreErrorMessage(e));
             }
             catch (Exception e)
             {
                 // Anything else (a panic in the core) is said the same way; an async void handler must not let it out.
-                alert = TrsFfiMethods.SyncRemoveFailed(FolderName(c.FolderId), e.Message);
+                alert = SeedwellFfiMethods.SyncRemoveFailed(FolderName(c.FolderId), e.Message);
             }
             app.SyncRemoval.Close();
             Refresh(false);
@@ -883,7 +908,7 @@ public sealed partial class FlyoutWindow : Window
             XamlRoot = Content.XamlRoot,
             Title = alert.Title,
             Content = new TextBlock { Text = alert.Text, TextWrapping = TextWrapping.Wrap },
-            CloseButtonText = TrsFfiMethods.AlertOkTitle(),
+            CloseButtonText = SeedwellFfiMethods.AlertOkTitle(),
             DefaultButton = ContentDialogButton.Close,
         };
         await d.ShowAsync();

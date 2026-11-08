@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use trs_metainfo::Metainfo;
+use seedwell_metainfo::Metainfo;
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(m) = Metainfo::from_bytes(data) {

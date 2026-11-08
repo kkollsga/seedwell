@@ -5,13 +5,13 @@ using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
 /// <summary>
 /// A conversation on Windows (a channel's General, a topic, a private conversation; the Mac's ChatViews), drawn from the
-/// core's <c>chat_page_model</c> (trs-ffi chat_page.rs) in the build-49 look: the toolbar (the agents mark, Members,
+/// core's <c>chat_page_model</c> (seedwell-ffi chat_page.rs) in the build-49 look: the toolbar (the agents mark, Members,
 /// Share, the ⋯ menu), the messages (a channel's runs as one block with a left edge in their author's colour, a private
 /// conversation's bubbles; who wrote a run on a quiet line under it; reply quotes that jump to the original; Markdown,
 /// mail banners, JSON, images on top with galleries, file cards, tags; the time, Tag and Reply in the row under the
@@ -237,7 +237,7 @@ sealed class ChatPage
         }
         // To the minute: the cards' times change only with the day (the Mac's).
         var now = (ulong)(DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 60 * 60);
-        return (TrsFfiMethods.ChatPageModel(new ChatPageInput(place, title, channel, topic, direct, read, known, now), new Clock(), App.HostWindows), channel);
+        return (SeedwellFfiMethods.ChatPageModel(new ChatPageInput(place, title, channel, topic, direct, read, known, now), new Clock(), App.HostWindows), channel);
     }
 
     void Redraw() => _ = Redrawn();
@@ -840,7 +840,7 @@ sealed class ChatPage
         if (!attached[at].Draft.File)
         {
             var index = attached.Take(at).Count(a => !a.Draft.File);
-            draft.Text = TrsFfiMethods.ChatComposerWithoutImage(draft.Text, (uint)index);
+            draft.Text = SeedwellFfiMethods.ChatComposerWithoutImage(draft.Text, (uint)index);
         }
         attached.RemoveAt(at);
         Redraw();
@@ -1000,7 +1000,7 @@ sealed class ChatPage
                 Call(() => app.Core.ChatSetMuted(channel.Id, mute.Muted), e => new SyncAlert(e, ""));
                 return;
             case ChatPageCommand.SetAgents agents when channel is not null:
-                Call(() => app.Core.ChatSetAgents(channel.Id, agents.Open), e => new SyncAlert(TrsFfiMethods.ChatAgentsMenu(channel).FailureTitle, e));
+                Call(() => app.Core.ChatSetAgents(channel.Id, agents.Open), e => new SyncAlert(SeedwellFfiMethods.ChatAgentsMenu(channel).FailureTitle, e));
                 break;
             case ChatPageCommand.SetFollow follow when channel is not null:
                 Call(() => app.Core.SyncSetFollow(channel.Id, follow.On), e => new SyncAlert(e, ""));
@@ -1010,11 +1010,11 @@ sealed class ChatPage
                 break;
             case ChatPageCommand.SetRole sr when channel is not null:
                 var who = members.FirstOrDefault(m => m.DeviceId == sr.DeviceId)?.Name ?? "";
-                Call(() => app.Core.SyncSetRole(channel.Id, sr.DeviceId, sr.Role), e => TrsFfiMethods.SyncSetRoleFailed(who, e), () => LoadMembers(false));
+                Call(() => app.Core.SyncSetRole(channel.Id, sr.DeviceId, sr.Role), e => SeedwellFfiMethods.SyncSetRoleFailed(who, e), () => LoadMembers(false));
                 break;
             case ChatPageCommand.RemoveDevice rd when channel is not null:
                 var name = members.FirstOrDefault(m => m.DeviceId == rd.DeviceId)?.Name ?? "";
-                Call(() => app.Core.SyncRemoveDevice(channel.Id, rd.DeviceId), e => TrsFfiMethods.SyncRemoveDeviceFailed(name, channel.Name, e), () => LoadMembers(false));
+                Call(() => app.Core.SyncRemoveDevice(channel.Id, rd.DeviceId), e => SeedwellFfiMethods.SyncRemoveDeviceFailed(name, channel.Name, e), () => LoadMembers(false));
                 break;
             case ChatPageCommand.MessagePrivately mp:
                 membersFlyout.Hide();
@@ -1026,10 +1026,14 @@ sealed class ChatPage
                 FocusAfter(Redrawn());
                 return;
             case ChatPageCommand.SetTags tags:
-                _ = SendText(TrsFfiMethods.ChatTagNote(tags.MessageId, tags.Tags), null);
+                _ = SendText(SeedwellFfiMethods.ChatTagNote(tags.MessageId, tags.Tags), null);
                 return;
+            case ChatPageCommand.MoveToGroup to when channel is not null:
+                // Into a sidebar group (null: out of its group); the sidebar is read again after it.
+                Call(() => app.Core.ChatSetGroup(channel.Id, to.GroupId), e => new SyncAlert(SeedwellFfiMethods.ChatGroupFailureTitle(true), e), () => app.LibraryWindowIfCreated?.Pane.Refresh());
+                break;
             default:
-                // WakeCommand, NewTopic, Rename, Leave and DeleteConversation come with their dialog (RunItem).
+                // WakeCommand, NewTopic, Rename, Leave, DeleteConversation and NewGroup come with their dialog (RunItem).
                 AppLog.Write($"chat page: {command.GetType().Name} has no dialog here");
                 break;
         }
@@ -1049,7 +1053,7 @@ sealed class ChatPage
         {
             if (!t.IsCompletedSuccessfully)
             {
-                var e = t.Exception?.InnerException is CoreException ce ? TrsFfiMethods.CoreErrorMessage(ce) : t.Exception?.InnerException?.Message ?? "";
+                var e = t.Exception?.InnerException is CoreException ce ? SeedwellFfiMethods.CoreErrorMessage(ce) : t.Exception?.InnerException?.Message ?? "";
                 app.Alert(failed(e));
             }
             done?.Invoke();
@@ -1091,7 +1095,7 @@ sealed class ChatPage
 
     // ----------------------------------------------------------------------------------------------- composer
 
-    bool CanSend() => !sending && TrsFfiMethods.ChatComposerCanSend(draft.Text, (uint)attached.Count);
+    bool CanSend() => !sending && SeedwellFfiMethods.ChatComposerCanSend(draft.Text, (uint)attached.Count);
 
     /// <summary>Return sends (the core's rule for the modifiers); Escape cancels the reply being written, else goes on.</summary>
     void DraftKey(object sender, KeyRoutedEventArgs e)
@@ -1103,7 +1107,7 @@ sealed class ChatPage
         }
         if (e.Key != Windows.System.VirtualKey.Enter) return;
         bool Down(Windows.System.VirtualKey k) => Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(k).HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
-        if (TrsFfiMethods.ChatComposerKey(Down(Windows.System.VirtualKey.Shift), Down(Windows.System.VirtualKey.Menu)) == ChatComposerKey.Send)
+        if (SeedwellFfiMethods.ChatComposerKey(Down(Windows.System.VirtualKey.Shift), Down(Windows.System.VirtualKey.Menu)) == ChatComposerKey.Send)
         {
             e.Handled = true;
             _ = Send();
@@ -1177,7 +1181,7 @@ sealed class ChatPage
                 AppLog.Write($"chat attach: {t.Result.Caption}");
                 if (marker is int at && !t.Result.File)
                 {
-                    var reference = TrsFfiMethods.ChatImageMarker((uint)(attached.Count(a => !a.Draft.File) - 1));
+                    var reference = SeedwellFfiMethods.ChatImageMarker((uint)(attached.Count(a => !a.Draft.File) - 1));
                     var where = Math.Min(at, draft.Text.Length);
                     draft.Text = draft.Text.Insert(where, reference);
                     draft.SelectionStart = where + reference.Length;
@@ -1185,7 +1189,7 @@ sealed class ChatPage
             }
             else
             {
-                var e = t.Exception?.InnerException is CoreException ce ? TrsFfiMethods.CoreErrorMessage(ce) : t.Exception?.InnerException?.Message ?? "";
+                var e = t.Exception?.InnerException is CoreException ce ? SeedwellFfiMethods.CoreErrorMessage(ce) : t.Exception?.InnerException?.Message ?? "";
                 app.Alert(new SyncAlert(e, ""));
             }
             Redraw();
@@ -1234,10 +1238,10 @@ sealed class ChatPage
             }
             catch (Exception e)
             {
-                app.Alert(new SyncAlert(e is CoreException ce ? TrsFfiMethods.CoreErrorMessage(ce) : e.Message, ""));
+                app.Alert(new SyncAlert(e is CoreException ce ? SeedwellFfiMethods.CoreErrorMessage(ce) : e.Message, ""));
             }
         }
-        if (at is uint point && images > 0 && TrsFfiMethods.ChatComposerWithImages(draft.Text, first, images, new ChatTextRange(point, 0)) is ChatComposerEdit edit)
+        if (at is uint point && images > 0 && SeedwellFfiMethods.ChatComposerWithImages(draft.Text, first, images, new ChatTextRange(point, 0)) is ChatComposerEdit edit)
         {
             draft.Text = edit.Text;
             draft.SelectionStart = (int)Math.Min(edit.Caret, (uint)edit.Text.Length);
@@ -1256,7 +1260,7 @@ sealed class ChatPage
     internal async Task<bool> Send()
     {
         if (!CanSend() || model is not ChatPageModel m) return false;
-        var body = TrsFfiMethods.ChatComposerBody(draft.Text);
+        var body = SeedwellFfiMethods.ChatComposerBody(draft.Text);
         var inputs = attached.Select(a => a.Input).ToList();
         bool ok;
         // Nothing is typed into what is on its way (read only keeps the focus; disabled would lose it).
@@ -1312,7 +1316,7 @@ sealed class ChatPage
         }
         catch (Exception e)
         {
-            var message = e is CoreException ce ? TrsFfiMethods.CoreErrorMessage(ce) : e.Message;
+            var message = e is CoreException ce ? SeedwellFfiMethods.CoreErrorMessage(ce) : e.Message;
             AppLog.Write($"chat: send failed: {message}");
             app.Alert(new SyncAlert(message, ""));
             return false;

@@ -1,4 +1,4 @@
-//! trs-utp: uTP (BEP 29) with LEDBAT congestion control (RFC 6817).
+//! seedwell-utp: uTP (BEP 29) with LEDBAT congestion control (RFC 6817).
 //!
 //! * [`Connection`] is a pure state machine: packets and time in, packets and bytes out.
 //! * [`Endpoint`] multiplexes many connections over one UDP socket, hands non-uTP datagrams back

@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use trs_bencode::{decode, decode_prefix, encode, raw_dict_entries, raw_list_items};
+use seedwell_bencode::{decode, decode_prefix, encode, raw_dict_entries, raw_list_items};
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(v) = decode(data) {

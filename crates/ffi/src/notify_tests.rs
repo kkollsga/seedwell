@@ -143,7 +143,7 @@ fn an_automatic_add_says_what_where_and_from_which_tracker() {
     assert_eq!(n.route, NoticeRoute::Transfer { id: "n".into() });
     assert_eq!(posted(run(NoticeEvent::AutoAdded { added: added(None) }, &facts())).body, "Movie · tracker-y.net");
     #[cfg(unix)]
-    if let Some(home) = trs_platform::dirs::home().filter(|h| h.parent().is_some()) {
+    if let Some(home) = seedwell_platform::dirs::home().filter(|h| h.parent().is_some()) {
         let d = home.join("Media/Movies").display().to_string();
         assert_eq!(posted(run(NoticeEvent::AutoAdded { added: added(Some(d)) }, &facts())).body, "Movie · tracker-y.net · → ~/Media/Movies");
     }
@@ -210,10 +210,10 @@ fn an_agent_change_is_announced_when_it_worked_and_the_setting_is_on() {
 /// answers and expiries post nothing.
 #[test]
 fn an_agents_request_is_announced_once_with_approve_and_deny() {
-    use trs_control::access::{Entry, State as RState, TTL_MS, Want};
+    use seedwell_control::access::{Entry, State as RState, TTL_MS, Want};
     let e = Entry {
         id: "5eed0a11".into(),
-        want: Want::Level(trs_control::Permission::Full),
+        want: Want::Level(seedwell_control::Permission::Full),
         agents: vec!["Claude".into()],
         why: Some("to install the release".into()),
         at_ms: 0,
@@ -437,7 +437,7 @@ fn only_a_request_asks_to_stay_in_view() {
 /// the requests still waiting stay.
 #[test]
 fn a_request_no_longer_waiting_takes_its_notice_away() {
-    use trs_control::access::{Entry, State as RState, TTL_MS, Want};
+    use seedwell_control::access::{Entry, State as RState, TTL_MS, Want};
     let waiting = Entry {
         id: "b2".into(),
         want: Want::DevBuilds,
@@ -483,7 +483,7 @@ fn evicted(kept_why: Vec<crate::sync::ondemand::SyncFailed>, failed: Vec<crate::
 /// and the system's own clean-ups say nothing.
 #[test]
 fn a_free_that_kept_files_says_how_many_and_why() {
-    use trs_sync::ondemand::{KEPT_CHANGED, KEPT_PINNED, NOT_HELD_ELSEWHERE};
+    use seedwell_sync::ondemand::{KEPT_CHANGED, KEPT_PINNED, NOT_HELD_ELSEWHERE};
     let (core, _dir) = mock();
     let n = Notices::new(core.clone());
     let f = core.sync_snapshot().folders[0].clone();
@@ -496,10 +496,10 @@ fn a_free_that_kept_files_says_how_many_and_why() {
     // One file: named.
     let one = n.sync_evict_notice(f.id.clone(), evicted(vec![kept("2026/beach.jpg", KEPT_PINNED)], Vec::new()), true).unwrap();
     assert_eq!(one.kind, NoticeKind::SyncKept);
-    assert_eq!(one.title, format!("“beach.jpg” stays on this {}", trs_platform::computer!()));
+    assert_eq!(one.title, format!("“beach.jpg” stays on this {}", seedwell_platform::computer!()));
     assert_eq!(
         one.body,
-        format!("It is set to always stay on this {}: stop keeping it here first. (“{}” in Folder Sync)", trs_platform::computer!(), f.name)
+        format!("It is set to always stay on this {}: stop keeping it here first. (“{}” in Folder Sync)", seedwell_platform::computer!(), f.name)
     );
     assert_eq!(one.route, NoticeRoute::Place { place: LibraryPlace::FolderSync });
     assert_eq!(notice_route(one.click.clone()), one.route);
@@ -512,8 +512,8 @@ fn a_free_that_kept_files_says_how_many_and_why() {
             true,
         )
         .unwrap();
-    assert_eq!(many.title, format!("5 files stay on this {}", trs_platform::computer!()));
-    let pc = trs_platform::computer!();
+    assert_eq!(many.title, format!("5 files stay on this {}", seedwell_platform::computer!()));
+    let pc = seedwell_platform::computer!();
     assert_eq!(
         many.body,
         format!(

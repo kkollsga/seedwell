@@ -15,7 +15,7 @@ from .util import (BENCH, DOWNLOADS, PROFILES, RUNS, TORRENTS, BenchError, ProcS
 
 CSV_DIR = RUNS / "csv"
 PEER_PORT = 51413            # same fixed listen port for every client (runs are strictly sequential)
-API_PORT = {"transmission": 19091, "qbittorrent": 18091, "torrentrs": 0}
+API_PORT = {"transmission": 19091, "qbittorrent": 18091, "seedwell": 0}
 TRACKER_PORT = 7171
 SEEDER_PORT = 51413
 
@@ -542,7 +542,7 @@ def run_hot(client, n, campaign, *, leecher_client="transmission", n_leechers=3,
             rec["tracker_error"] = repr(e)
         if rows:
             rec["csv"] = write_csv(run_id, rows)
-        if rec["status"] == "ok" and os.environ.get("BENCH_KEEP_PROFILE") != "1":   # =1 keeps stderr.log (TRS_UTP_TRACE output)
+        if rec["status"] == "ok" and os.environ.get("BENCH_KEEP_PROFILE") != "1":   # =1 keeps stderr.log (SEEDWELL_UTP_TRACE output)
             rmtree(prof)
         append_result(rec)
     log(f"hot N={n} {client}: mean {(rec.get('upload_Bps_mean') or 0) / 1e6:.0f} MB/s, peak {(rec.get('upload_Bps_peak_1s') or 0) / 1e6:.0f} MB/s, "

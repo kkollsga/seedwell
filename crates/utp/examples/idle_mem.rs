@@ -1,4 +1,4 @@
-//! Memory per idle connection: `cargo run --release -p trs-utp --example idle_mem -- [N]`
+//! Memory per idle connection: `cargo run --release -p seedwell-utp --example idle_mem -- [N]`
 //! Opens N connections between two sockets in this process, exchanges a few bytes, waits for the
 //! idle-release timer, and reports RSS growth per connection (both ends counted).
 
@@ -7,7 +7,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use trs_utp::{Config, UtpSocket};
+use seedwell_utp::{Config, UtpSocket};
 
 fn rss_kib() -> u64 {
     let out = Command::new("ps").args(["-o", "rss=", "-p", &std::process::id().to_string()]).output().unwrap();

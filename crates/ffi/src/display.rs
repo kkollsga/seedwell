@@ -1,6 +1,6 @@
-//! The app's wording for sizes, rates, times and counts (`trs_control::display`), for every host app.
+//! The app's wording for sizes, rates, times and counts (`seedwell_control::display`), for every host app.
 
-use trs_control::display as d;
+use seedwell_control::display as d;
 
 /// "6.2 GB", "412 MB", "999 bytes".
 #[uniffi::export]

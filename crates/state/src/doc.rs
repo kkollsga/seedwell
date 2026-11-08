@@ -843,7 +843,7 @@ pub fn spawn_watcher<T: Document>(
     st.entries.push(Entry { id, interval, due: Instant::now() + interval, poll: Arc::clone(&poll) });
     if !st.running {
         st.running = true;
-        if let Err(e) = std::thread::Builder::new().name("trs-watch".into()).spawn(hub_loop) {
+        if let Err(e) = std::thread::Builder::new().name("seedwell-watch".into()).spawn(hub_loop) {
             st.running = false;
             st.entries.pop();
             return Err(e);

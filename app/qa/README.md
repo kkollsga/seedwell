@@ -18,7 +18,7 @@ run needs neither an awake display nor the Screen Recording permission: start it
 Each script uses its own QA root and tears it down; `run.sh` prints per script PASS or FAIL, its time and its shots,
 then a summary, and exits non-zero when one failed. Shots go to `app/build/qa/`, logs to `app/build/qa/logs/`. Build
 the app first: `tools/sysguard/heavy.sh app/qa/rebuild.sh` (or `SEEDWELL_PROFILE=dev tools/sysguard/heavy.sh bash
-app/build.sh`); the scripts with a local seeder use `target/release/seedwell` (`cargo build --release -p trs-cli`).
+app/build.sh`); the scripts with a local seeder use `target/release/seedwell` (`cargo build --release -p seedwell-cli`).
 
 ## Writing a script
 
@@ -76,6 +76,9 @@ check that nothing happens for a while.
 | `capture_cancel.sh` | Cancel on a held torrent (SPEC 7A.6; own QA root `seedwell-qa-cancel`): `.torrent` files in the QA home's Downloads and a watch folder, `SEEDWELL_QA_TRASH_DIR` as a fake Trash inside the QA root (the real Trash is never used); Cancel trashes the file, `starting cancel keep` (⇧-Cancel) keeps it, a replaced file is never trashed, a magnet link has no Shift variant; asserts the files, `cancel-normal\|shift\|expanded\|expanded-shift\|watch\|magnet.png`. QA commands: `open-file <path>`, `starting shift on\|off`, `starting cancel [name] keep` |
 | `capture_composer.sh` | the chat composer end to end (own QA root `seedwell-qa-composer`; a channel made with `seedwell chat new`): typing, Shift- and Option-Return, an input method's composition that Return commits (never sends), a paste of text and of a picture, a drop before a character and onto the chips, Reply (the field takes the keyboard) and Escape, Return sending; asserts `chat state` after each step and the message through `seedwell chat read`; `composer-draft\|reply\|sent.png`. QA commands: `chat …` (below) |
 | `capture_proxy.sh` | the torrent proxy (SPEC §7H; own QA root `seedwell-qa-proxy`) against `fake_socks5.py`, the loopback SOCKS5 fake the isolated run's core uses in place of NordVPN (`<state>/qa/proxy-servers.txt`; NordVPN is never contacted): every shield state (no key, off, on, slow, failed) in Settings › Network, the menu bar menu and the window (guide hidden and shown), dark and light; copied credentials filling the empty fields (QA's own pasteboard), Enable NordVPN's "Testing…", the clicks in Settings and the menu, the right-click menu and its country list (6 rows with a scrollbar, in the menu bar popover and the window: `proxy-country-menu|window-<mode>.png`), Find a Faster Server, a wrong key, a custom proxy, Remove Key; `proxy-*.png`. QA commands: `proxy …` (`Support/QAProxy.swift`) |
+| `capture_bigfolder.sh` | "every part of the app stays interactive while a big folder is added" (own QA roots `seedwell-qa-bigfolder` and `seedwell-qa-bigfolder-peer`): ~400 sparse films (~900 GB that take no disk space) and ~3,600 small real files in nested folders, added through the Add Folder window as the user did (From this computer, On all my devices, Files on demand for the others), with a second QA run paired through Settings › Devices' calls so the folder comes to it; a 10 s baseline and the 15 s after Start cycle through the menu and its Folder Sync submenu, the window's sections, Settings and every tab of it (`settings-tab <tab>`: a click on its tab bar), a chat channel, Get Info, `ui ping` and (after Start) the folder's page, Edit and Share windows, under the latency probes, with CLI round trips through the control socket; `bigfolder.py` times every command and prints baseline against add. Fails, naming why, on a main-thread beat over 100 ms (QA's shots excused), a surface command over 500 ms, a CLI round trip over 1 s, a core read over 500 ms, or the folder missing from `sync list` or the menu. `BIGFOLDER_PEER=0` runs alone; `BIGFOLDER_RUNS=<file>` appends each run's numbers; `bigfolder-*.png` |
+| `capture_settingsfit.sh` | Settings fits the main window at its 820x600 minimum (own QA root `seedwell-qa-settingsfit`): every tab, Rules' Trackers side included, at 820x600 and 1180x820, dark and light, with nothing laid out past the window's edges (`ui overflow`): a tab wider than the window pushed the whole content, sidebar and tab bar too, aside. Six rules, so Rules' list scrolls above the editor at 820. `settingsfit-<820\|1180>-<tab>-<dark\|light>.png` |
+| `bigfolder.py` | the big-folder scene's phases (`phase`: probes, the cycle, CLI round trips, a JSON per phase) and its verdict and table (`verdict <baseline.json> <add.json>`) |
 | `fake_socks5.py` | `fake_socks5.py <root> <port> <user> <pass>`: a SOCKS5 handshake on 127.0.0.1 and ::1; `<root>/socks-delay-v4\|v6` (seconds) makes either slow |
 | `age.py` | rewrites last-activity so most torrents are dormant (the engine needs 24 h otherwise) |
 | `rebuild.sh`, `sb.sh` | fast (no LTO) rebuild of the app; Swift-only rebuild with error filtering |
@@ -90,6 +93,21 @@ input (AGENTS.md, Safety). A click or a key is the QA command that makes the cal
 `choice tick`, `key escape`, `menu-press quit`, ...); `ui dump`, `ui state` and `ui ping [win=main|chooser|popover]` only
 read the window. That a click lands on the control drawn under it (an unticked box, a chevron beside its glyph) is
 checked by `app/Tests/SeedwellAppTests/HitAreaTests.swift` through SwiftUI's accessibility hit test, not in the app.
+
+**Interactivity** (`Support/QALatency.swift`): `ui latency start` starts two probes. A thread posts a beat to the main
+queue every 10 ms (the queue and run-loop modes of the hang watchdog) and notes each beat's delay and the UI action then
+(`UIAction.current`); the part of a delay spent in the renderer's own captures (`shot`) is reported apart and not counted.
+Another thread calls the core's reads the UI refreshes from (`snapshot`, `syncSnapshot`) every 50 ms: a core lock held
+for seconds shows there although the UI thread never waits for it. `ui latency stop` ends the run; `ui latency report`
+writes beats, max (with its action), p99, beats over 50 and 100 ms, the five worst (time since start, action), each core
+read's max and p99, and the same as one `latency-json:` line.
+
+**Folder Sync windows**: `sync-add open | choose <path> | devices all|this | ondemand on|off | start | cancel | state` is
+the Add Folder window as its controls call it (`choose` hands the model the path the open panel would give; each reports
+the window's state and the open Edit and Share windows); `sync-edit <folder>`, `sync-share <folder>` (the Edit window's
+Share…), `sync-page <folder>` (its page in the main window) and `sync-close` open and close the folder's windows.
+`settings-tab <tab>` is a click on Settings' tab bar, `rules-section rules|trackers` the control at the top of Rules, and `ui overflow` reports the views laid out past the window's left or right edge (`overflow: none` when Settings fits). `devices pair | join <link> | confirm | state` are Settings › Devices' Pair a Device…, Pair with a Link… and Pair: two QA
+runs pair with each other (the QA control refuses the user's app).
 
 **Chat** (`Support/QAChat.swift`; every `chat` command but `open`, `messages`, `reply` and a message's own reports the
 composer's state after it):

@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use common::*;
-use trs_engine::config::{DetectionConfig, MoveFaultFn};
-use trs_engine::*;
+use seedwell_engine::config::{DetectionConfig, MoveFaultFn};
+use seedwell_engine::*;
 
 struct Lab {
     /// Root of the category folders.
@@ -283,7 +283,7 @@ async fn crash_case(force_copy: bool, stop_at: u32) -> Option<bool> {
         c.force_copy_moves = force_copy;
         c.move_fault = Some(MoveFaultFn(Arc::new(move |n| {
             // Storage steps (below `MOVE_STEP_BEFORE_MARK`) stop from `stop_at` on; a post-switch step stops there.
-            if n >= stop_at && (stop_at >= trs_engine::MOVE_STEP_BEFORE_MARK || n < trs_engine::MOVE_STEP_BEFORE_MARK) {
+            if n >= stop_at && (stop_at >= seedwell_engine::MOVE_STEP_BEFORE_MARK || n < seedwell_engine::MOVE_STEP_BEFORE_MARK) {
                 f2.store(n, Ordering::SeqCst);
                 false
             } else {
@@ -359,7 +359,7 @@ async fn crash_case(force_copy: bool, stop_at: u32) -> Option<bool> {
         tree(gone)
     );
     for root in [&l.dl, &l.other] {
-        assert!(!tree(root).iter().any(|p| p.ends_with(".trs-part")), "copy={force_copy} step={stop_at}: {:?}", tree(root));
+        assert!(!tree(root).iter().any(|p| p.ends_with(".seedwell-part")), "copy={force_copy} step={stop_at}: {:?}", tree(root));
     }
     // It serves correct bytes.
     let _ = leech_all(&s2, &t).await;
@@ -393,7 +393,7 @@ async fn crash_at_every_step(force_copy: bool) {
             assert!(step < 200, "the move never finished");
         }
         let storage_steps = step - 1;
-        for special in [trs_engine::MOVE_STEP_BEFORE_MARK, trs_engine::MOVE_STEP_BEFORE_COMMIT] {
+        for special in [seedwell_engine::MOVE_STEP_BEFORE_MARK, seedwell_engine::MOVE_STEP_BEFORE_COMMIT] {
             let outcome = crash_case(force_copy, special).await.expect("the post-switch steps are always reached");
             assert!(outcome, "a crash after the record points at the new place finishes the move");
             tally(outcome);
@@ -437,15 +437,15 @@ async fn a_changed_default_folder_proposes_and_moves_the_torrents() {
 /// torrents of that tracker now sit elsewhere, and accepting moves them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_changed_tracker_folder_proposes_and_moves_its_torrents() {
-    use trs_state::trackers::{Profile, UrlPattern};
+    use seedwell_state::trackers::{Profile, UrlPattern};
     let t = standard_named("trackerbundle", 50_000, Some("http://tracker-z.test/announce".into()), false, 912);
     let l = lab();
     let profile = |folder: Option<&Path>| {
         let mut p = Profile { id: "tz".into(), name: "TZ".into(), urls: vec![UrlPattern::parse("tracker-z.test").unwrap()], ..Profile::default() };
         p.location.finished_dir = folder.map(|f| f.display().to_string());
-        let mut tp = trs_state::TrackerProfiles::default();
+        let mut tp = seedwell_state::TrackerProfiles::default();
         tp.add(p).unwrap();
-        PolicyData { rules: trs_state::RuleSet::default(), profiles: tp, private_min_seed: None, idle: None }
+        PolicyData { rules: seedwell_state::RuleSet::default(), profiles: tp, private_min_seed: None, idle: None }
     };
     t.write_to(&l.dl);
     let s = snode(&l.state, &l.dl, Some(profile(None)), plain(&l)).await;
@@ -548,12 +548,12 @@ impl DiskImage {
             std::process::Command::new("hdiutil")
                 .args(args)
                 .env("HOME", &home)
-                .env("TRS_FORBID_REAL_HOME", "1")
+                .env("SEEDWELL_FORBID_REAL_HOME", "1")
                 .output()
                 .ok()
                 .filter(|o| o.status.success())
         };
-        run(&["create", "-size", &format!("{mb}m"), "-fs", "APFS", "-volname", "trsmoves", "-ov", img.to_str()?])?;
+        run(&["create", "-size", &format!("{mb}m"), "-fs", "APFS", "-volname", "seedwellmoves", "-ov", img.to_str()?])?;
         let di = DiskImage { mount: mount.clone(), _dir: dir };
         run(&["attach", "-nobrowse", "-mountpoint", mount.to_str()?, img.to_str()?])?;
         Some(di)
@@ -588,7 +588,7 @@ async fn a_move_onto_a_real_second_volume() {
     let t = bundle("realvol", 920, 4_000_000);
     let l = lab();
     let s = seeding_node(&l, &t, |c| c.move_reserve_bytes = 1 << 20).await;
-    assert!(!trs_engine::same_volume(&l.dl, &img.mount).unwrap(), "the image is another device");
+    assert!(!seedwell_engine::same_volume(&l.dl, &img.mount).unwrap(), "the image is another device");
     let mut ev = s.h.subscribe();
     let dest = img.mount.join("Moved");
     s.h.move_to(&[t.id], &dest).await.unwrap();
@@ -808,7 +808,7 @@ async fn the_places_of_an_unfinished_download_include_its_staging_folder() {
     n.h.add_torrent_file(t.bytes.clone(), AddOptions::default()).await.unwrap();
     let places = n.h.torrent_places().await.unwrap();
     let p = places.iter().find(|p| p.name == "placesstaged").expect("the torrent has places");
-    assert!(p.paths.contains(&l.inc.join(trs_engine::util::hex(&t.id))), "its staging folder: {p:?}");
+    assert!(p.paths.contains(&l.inc.join(seedwell_engine::util::hex(&t.id))), "its staging folder: {p:?}");
     assert!(!p.moving_somewhere, "{p:?}");
 }
 
@@ -817,7 +817,7 @@ async fn the_places_of_an_unfinished_download_include_its_staging_folder() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore]
 async fn copy_throughput_report() {
-    let mib: usize = std::env::var("TRS_COPY_MIB").ok().and_then(|v| v.parse().ok()).unwrap_or(1024);
+    let mib: usize = std::env::var("SEEDWELL_COPY_MIB").ok().and_then(|v| v.parse().ok()).unwrap_or(1024);
     let t = bundle("speedbundle", 990, mib << 20);
     let l = lab();
     let s = seeding_node(&l, &t, |c| c.force_copy_moves = true).await;

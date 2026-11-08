@@ -32,8 +32,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 
 use sha2::{Digest, Sha256};
-use trs_sync_proto::ids::ShortId;
-use trs_sync_proto::model::{Causality, ChunkRef, FileInfo, FileKind, STATE_DIR, SignedFile, Version};
+use seedwell_sync_proto::ids::ShortId;
+use seedwell_sync_proto::model::{Causality, ChunkRef, FileInfo, FileKind, STATE_DIR, SignedFile, Version};
 
 use crate::chunk;
 use crate::clock::{self, Clock};
@@ -113,7 +113,7 @@ pub enum StreamFail {
 }
 
 /// Bytes asked for in one piece of a stream.
-pub const STREAM_PIECE: u32 = trs_sync_proto::msg::STREAM_PIECE;
+pub const STREAM_PIECE: u32 = seedwell_sync_proto::msg::STREAM_PIECE;
 
 /// Fetches chunks from peers. Blocking; an implementation fetches the requests of one call in parallel.
 pub trait ChunkSource: Sync {

@@ -113,7 +113,7 @@ def _build(i, seed, data_dir, announce):
     else:
         info["length"] = paths[0][1]
         total = paths[0][1]
-    t = {"announce": announce, "created by": "torrentrs-bench", "info": info}
+    t = {"announce": announce, "created by": "seedwell-bench", "info": info}
     return name, t, total, multi
 
 

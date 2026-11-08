@@ -1,7 +1,7 @@
-//! Writes seed corpora for the fuzz targets: `cargo run -p trs-state --example seeds -- fuzz/corpus`.
+//! Writes seed corpora for the fuzz targets: `cargo run -p seedwell-state --example seeds -- fuzz/corpus`.
 use std::fs;
-use trs_state::record::{FileStamp, PartialPiece};
-use trs_state::{Config, Document, ResumeData, RuleSet, TorrentRecord, TrackerProfiles};
+use seedwell_state::record::{FileStamp, PartialPiece};
+use seedwell_state::{Config, Document, ResumeData, RuleSet, TorrentRecord, TrackerProfiles};
 
 fn main() {
     let out = std::path::PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "fuzz/corpus".into()));

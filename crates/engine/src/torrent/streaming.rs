@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use tokio::sync::oneshot;
-use trs_stream::FileRange;
+use seedwell_stream::FileRange;
 
 use super::Torrent;
 use crate::api::Priority;
@@ -42,7 +42,7 @@ impl Torrent {
             return Err(OpenError::Complete);
         }
         let name = match m.layout.file_path(file) {
-            trs_storage::PathRef::Relative(p) | trs_storage::PathRef::Absolute(p) => {
+            seedwell_storage::PathRef::Relative(p) | seedwell_storage::PathRef::Absolute(p) => {
                 let s = p.to_string_lossy();
                 s.rsplit('/').next().unwrap_or(&s).to_owned()
             }

@@ -7,8 +7,8 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use common::{TempDir, id, open};
-use trs_state::{Counters, Day, StatsBucket, StatsScope, TorrentRecord};
-use trs_tracker::store::{TimingKey, TimingRecord, TimingStore};
+use seedwell_state::{Counters, Day, StatsBucket, StatsScope, TorrentRecord};
+use seedwell_tracker::store::{TimingKey, TimingRecord, TimingStore};
 
 /// Rewrite the current-format file at `dir/state.redb` as redb 2.6 would have written it, row for
 /// row. The rows were encoded by the store itself, so this is exactly what Seedwell 0.1 left on disk.
@@ -159,7 +159,7 @@ fn an_old_schema_in_a_0_1_file_is_converted_then_migrated() {
     assert!(o.report.converted.is_some());
     let m = o.report.migrated.clone().expect("schema 1 -> current");
     assert_eq!(m.from, 1);
-    assert_eq!(o.report.schema_version, trs_state::store::SCHEMA.current);
+    assert_eq!(o.report.schema_version, seedwell_state::store::SCHEMA.current);
     drop(o);
     assert_seeded(dir.path());
 }
@@ -175,7 +175,7 @@ fn a_damaged_0_1_file_is_never_lost() {
     for cut in [original.len() / 2, original.len() - 4096, 8192] {
         let dir = TempDir::new("legacy-cut");
         std::fs::write(dir.path().join("state.redb"), &original[..cut]).unwrap();
-        match trs_state::Store::open_with(dir.path(), &common::fast()) {
+        match seedwell_state::Store::open_with(dir.path(), &common::fast()) {
             Ok(o) => assert!(o.report.converted.is_some() || o.report.recovered.is_some(), "cut {cut}: {:?}", o.report),
             Err(e) => assert!(dir.path().join("state.redb").exists(), "cut {cut}: {e}"),
         }

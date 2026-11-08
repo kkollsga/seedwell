@@ -3,7 +3,7 @@ import AppKit
 // The menu bar's Folder Sync submenu (SPEC 8.2 item 5, 7G.5): one row per folder (status image, name, grey line,
 // Edit and Delete at the right edge on hover), a delete confirmation that slides out under its row while the menu
 // stays open (the same mechanism as the inline file list), and Add Folder… last. What it shows is the core's
-// `SyncMenuModel` (trs-ffi `sync_menu.rs`); this draws it and handles hover, the keyboard and the clicks.
+// `SyncMenuModel` (seedwell-ffi `sync_menu.rs`); this draws it and handles hover, the keyboard and the clicks.
 
 extension SyncBadge {
     /// The row's status image, 16 pt: the green tick, a progress ring, or a symbol.

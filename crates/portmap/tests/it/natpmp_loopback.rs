@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use common::net::*;
 use common::*;
-use trs_portmap::driver::spawn;
-use trs_portmap::{Event, Failure, Method, Protocol};
+use seedwell_portmap::driver::spawn;
+use seedwell_portmap::{Event, Failure, Method, Protocol};
 
 #[tokio::test]
 async fn maps_tcp_and_udp_and_reports_the_external_address() {

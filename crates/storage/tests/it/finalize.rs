@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use common::*;
-use trs_storage::{
+use seedwell_storage::{
     DiskConfig, DiskIo, FilePath, FinalizeOptions, Location, Mode, StorageError, TorrentConfig,
     TorrentHandle, WriteAck,
 };
@@ -78,7 +78,7 @@ fn assert_finalized(h: &TorrentHandle, s: &Synth, root: &Path) {
     assert_eq!(h.location(), Location::Final);
     let mut leftovers = Vec::new();
     for e in walk(root) {
-        if e.to_string_lossy().ends_with(".trs-part") || e.to_string_lossy().ends_with(".journal") {
+        if e.to_string_lossy().ends_with(".seedwell-part") || e.to_string_lossy().ends_with(".journal") {
             leftovers.push(e);
         }
     }
@@ -220,7 +220,7 @@ fn interrupted_finalize_resumes_at_every_step_rename_path() {
 
 #[test]
 fn interrupted_finalize_resumes_at_every_step_copy_path() {
-    // 2.5 MiB file => several copy chunks, so crashes also land mid-copy with a partial .trs-part.
+    // 2.5 MiB file => several copy chunks, so crashes also land mid-copy with a partial .seedwell-part.
     let steps = crash_and_resume(true, 2_621_440);
     assert!(steps >= 25, "only {steps} crash points exercised");
 }
@@ -310,7 +310,7 @@ fn unplugged_volume() -> std::path::PathBuf {
         let free = ('D'..='Z').rev().map(|d| std::path::PathBuf::from(format!("{d}:\\"))).find(|p| !p.exists());
         free.expect("a free drive letter")
     } else {
-        std::path::PathBuf::from("/Volumes/__trs_unplugged__")
+        std::path::PathBuf::from("/Volumes/__seedwell_unplugged__")
     }
 }
 
@@ -326,7 +326,7 @@ fn foreign_journal_is_rejected() {
     );
     populate_staging(&h, &s);
     let j = root.join("foreign.journal");
-    std::fs::write(&j, b"TRSJ\x01garbage-garbage-garbage").unwrap();
+    std::fs::write(&j, b"SWFJ\x01garbage-garbage-garbage").unwrap();
     let r = h.finalize(j, FinalizeOptions::default()).unwrap().wait();
     assert!(matches!(r, Err(StorageError::CorruptJournal)), "{r:?}");
 }
@@ -375,4 +375,56 @@ fn finalize_by_copy_keeps_extended_attributes() {
     let n = unsafe { libc::getxattr(cfin.as_ptr(), cname.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
     assert_eq!(&buf[..n.max(0) as usize], tag, "xattr after the finalize copy");
     assert_eq!(std::fs::read(&fin).unwrap(), s.file_bytes(0));
+}
+
+/// What a version from before the 2026-11-07 rename of the internal names left on disk: the
+/// journal's magic and the partial copy's suffix.
+const PRE_RENAME_JOURNAL_MAGIC: &[u8; 4] = b"TRSJ";
+const PRE_RENAME_PART_SUFFIX: &str = ".trs-part";
+
+/// Fails if a finalize cut off by a crash before the 2026-11-07 rename is not finished after the
+/// update: its journal has the old magic (refused as foreign, the download stuck in `.incomplete`) or
+/// its partial copy has the old suffix (left behind beside the finished file).
+#[test]
+fn finalize_cut_off_before_the_rename_resumes_after_the_update() {
+    for k in 0u32..200 {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("dl");
+        let (s, _) = staged_torrent(dir.path(), 2_621_440);
+        let journal = root.join(".incomplete").join("t.journal");
+        let cfg = || TorrentConfig::seed(&root).with_default_staging();
+        let io = disk();
+        let h = io.add_torrent(s.layout.clone(), cfg());
+        populate_staging(&h, &s);
+        let opts = FinalizeOptions { force_copy: true, fault: Some(Arc::new(move |step| step < k)) };
+        let r = h.finalize(journal.clone(), opts).unwrap().wait();
+        assert!(matches!(r, Err(StorageError::Interrupted)), "no crash point left a partial copy: {r:?}");
+        let parts: Vec<PathBuf> =
+            walk(&root).into_iter().filter(|p| p.to_string_lossy().ends_with(".seedwell-part")).collect();
+        if parts.is_empty() {
+            continue;
+        }
+        drop(h);
+        drop(io);
+        let mut j = std::fs::read(&journal).unwrap();
+        j[..4].copy_from_slice(PRE_RENAME_JOURNAL_MAGIC);
+        std::fs::write(&journal, j).unwrap();
+        for p in &parts {
+            let old = PathBuf::from(p.to_string_lossy().replace(".seedwell-part", PRE_RENAME_PART_SUFFIX));
+            std::fs::rename(p, old).unwrap();
+        }
+
+        let io2 = disk();
+        let h2 = io2.add_torrent(s.layout.clone(), cfg());
+        h2.finalize(journal.clone(), FinalizeOptions { force_copy: true, fault: None })
+            .unwrap()
+            .wait()
+            .unwrap_or_else(|e| panic!("a journal from before the rename was not resumed: {e}"));
+        assert_finalized(&h2, &s, &root);
+        let old: Vec<PathBuf> =
+            walk(&root).into_iter().filter(|p| p.to_string_lossy().ends_with(PRE_RENAME_PART_SUFFIX)).collect();
+        assert!(old.is_empty(), "partial copies from before the rename left behind: {old:?}");
+        return;
+    }
+    panic!("no crash point left a partial copy");
 }

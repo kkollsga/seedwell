@@ -11,7 +11,7 @@
 //! exists at its destination (SPEC 7A.3: the torrent's own layout below the finished location)
 //! with exactly the same size. It is *at another quality* when
 //! that is not so but a file in the item's destination folder yields the same identity key
-//! (`trs_classify::library_identities`: same show + season + episode, same title + year, same
+//! (`seedwell_classify::library_identities`: same show + season + episode, same title + year, same
 //! book) or, for albums, the folder holds at least half as many audio files as the album has.
 //! Software builds are matched by destination only.
 
@@ -19,11 +19,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use trs_classify::{
+use seedwell_classify::{
     Category, Classification, FileEntry, GroupKind, Input, Item, Os, Structure, StructureKind, classify,
     library_identities, structure,
 };
-use trs_metainfo::Metainfo;
+use seedwell_metainfo::Metainfo;
 
 use crate::api::*;
 use crate::config::{AskMode, EngineConfig};
@@ -201,13 +201,13 @@ fn os_name(o: Os) -> &'static str {
     }
 }
 
-fn cpu_name(c: trs_classify::Cpu) -> &'static str {
+fn cpu_name(c: seedwell_classify::Cpu) -> &'static str {
     match c {
-        trs_classify::Cpu::Arm64 => "arm64",
-        trs_classify::Cpu::X86_64 => "x86_64",
-        trs_classify::Cpu::Universal => "universal",
-        trs_classify::Cpu::X86 => "x86",
-        trs_classify::Cpu::Any => "any",
+        seedwell_classify::Cpu::Arm64 => "arm64",
+        seedwell_classify::Cpu::X86_64 => "x86_64",
+        seedwell_classify::Cpu::Universal => "universal",
+        seedwell_classify::Cpu::X86 => "x86",
+        seedwell_classify::Cpu::Any => "any",
     }
 }
 
@@ -216,8 +216,8 @@ fn free_space(cfg: &EngineConfig, destination: Option<&Path>, stage: Option<&Pat
     if let Some(v) = cfg.smart_add.free_space_override {
         return Some(v);
     }
-    let a = destination.and_then(|p| trs_storage::available_space(p).ok());
-    let b = stage.and_then(|p| trs_storage::available_space(p).ok());
+    let a = destination.and_then(|p| seedwell_storage::available_space(p).ok());
+    let b = stage.and_then(|p| seedwell_storage::available_space(p).ok());
     match (a, b) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),

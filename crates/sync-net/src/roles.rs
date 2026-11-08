@@ -10,11 +10,11 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use trs_sync_proto::codec::{Reader, put_bytes, put_varint};
-use trs_sync_proto::ids::{DeviceId, ShortId};
-use trs_sync_proto::keys::{Access, FolderSecret, Proof};
-use trs_sync_proto::members::{Body, INVITE_VERSION, Membership, Role, Statement, check_redeem, redeem_proof};
-use trs_sync_proto::msg::{Members, Message, OwnerKey};
+use seedwell_sync_proto::codec::{Reader, put_bytes, put_varint};
+use seedwell_sync_proto::ids::{DeviceId, ShortId};
+use seedwell_sync_proto::keys::{Access, FolderSecret, Proof};
+use seedwell_sync_proto::members::{Body, INVITE_VERSION, Membership, Role, Statement, check_redeem, redeem_proof};
+use seedwell_sync_proto::msg::{Members, Message, OwnerKey};
 
 use crate::shared::{Ctx, Space, SpaceKind, lock};
 
@@ -27,17 +27,17 @@ const MEMBERS_FORMAT: u64 = 1;
 const OLD_MAGIC: &[u8] = b"SWM2";
 
 /// The secret store's name for a folder's (or channel's) secret `S` (owners only).
-pub(crate) fn secret_name(id: &trs_sync_proto::ids::FolderId) -> String {
+pub(crate) fn secret_name(id: &seedwell_sync_proto::ids::FolderId) -> String {
     format!("folder-{id}")
 }
 
 /// The secret store's name for the invitation this device joins a folder with.
-pub(crate) fn invite_name(id: &trs_sync_proto::ids::FolderId) -> String {
+pub(crate) fn invite_name(id: &seedwell_sync_proto::ids::FolderId) -> String {
     format!("invite-{id}")
 }
 
 /// The secret store's name for the links of the invitations this device made for a folder (one per line).
-pub(crate) fn links_name(id: &trs_sync_proto::ids::FolderId) -> String {
+pub(crate) fn links_name(id: &seedwell_sync_proto::ids::FolderId) -> String {
     format!("links-{id}")
 }
 
@@ -145,28 +145,72 @@ impl Serials {
     }
 }
 
-/// Signs with `f`'s owner key what `make` decides, on the membership as it is, and adds it, all under one write lock:
-/// `make` gets the membership and the serials to give (above every owner statement in it), and returns the bodies.
-/// Owner statements made at once (a confirmation of an admin's admission and the user's role change, say) never share
-/// a serial, and none is decided on an older look at the membership and added after a newer decision (which reset a
-/// device just made an admin to Read only). `make` takes no lock (the membership's is held); the file is
-/// saved after, outside it. `None`: the owner key is not on this device; else as [`add`].
+/// Signs with `f`'s owner key what `make` decides, on the membership as it is, and adds it, all under one write lock
+/// ([`add_decided`]): `make` gets the membership and the serials to give (above every owner statement in it), and
+/// returns the bodies. Owner statements made at once (a confirmation of an admin's admission and the user's role
+/// change, say) never share a serial, and none is decided on an older look at the membership and added after a newer
+/// decision (which reset a device just made an admin to Read only). `None`: the owner key is not on this device; else
+/// as [`add`].
 pub(crate) fn add_by_owner(f: &Space, make: impl FnOnce(&Membership, &mut Serials) -> Vec<Body>) -> Option<bool> {
     let secret = f.secret.read().unwrap_or_else(|e| e.into_inner()).clone()?;
+    Some(add_decided(f, |m| {
+        let mut serials = Serials(m.next_serial());
+        make(m, &mut serials).into_iter().map(|b| Statement::by_owner(&secret, b)).collect()
+    }))
+}
+
+/// Adds the statements `make` decides on `f`'s membership as it is, decided, signed and added under one write lock:
+/// for every statement whose serial or whose "only when it changes something" check reads the membership (an owner's
+/// grant, a device's Follow in the devices group, a channel's Agents). Two such changes made at once then never take
+/// the same serial, and neither is decided on a look from before the other was added (the user's later choice was
+/// lost: it saw the earlier one's "before" and said nothing). `make` takes no lock (the membership's is held; read
+/// another space's membership before, never inside); the file is saved after, outside it. As [`add`].
+pub(crate) fn add_decided(f: &Space, make: impl FnOnce(&Membership) -> Vec<Statement>) -> bool {
     {
         let mut m = f.membership.write().unwrap_or_else(|e| e.into_inner());
         let ended = m.set_now(now_s());
-        let mut serials = Serials(m.next_serial());
-        let bodies = make(&m, &mut serials);
-        #[cfg(test)]
-        tests::decided(&f.id);
-        let statements: Vec<Statement> = bodies.into_iter().map(|b| Statement::by_owner(&secret, b)).collect();
-        if statements.is_empty() || !m.add(statements) {
-            return Some(ended);
+        let statements = make(&m);
+        if statements.is_empty() {
+            return ended;
+        }
+        decided(&f.id);
+        if !m.add(statements) {
+            return ended;
         }
     }
     keep(f);
-    Some(true)
+    true
+}
+
+/// A hook [`add_decided`] runs once for a space ([`test_while_deciding`]).
+type DecidedHook = Box<dyn FnOnce() + Send>;
+static DECIDED: std::sync::Mutex<std::collections::BTreeMap<String, DecidedHook>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+static DECIDED_HOOKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// **Tests:** `hook` runs once, in the next [`add_decided`] on space `id` that decides to say something: after the
+/// decision and before its statements are added, with the membership's write lock held (as a second change made at
+/// that moment would land). `None` takes it away.
+#[doc(hidden)]
+pub fn test_while_deciding(id: &seedwell_sync_proto::ids::FolderId, hook: Option<Box<dyn FnOnce() + Send>>) {
+    let mut hooks = DECIDED.lock().unwrap_or_else(|e| e.into_inner());
+    hooks.remove(&id.to_string());
+    hooks.extend(hook.map(|h| (id.to_string(), h)));
+    DECIDED_HOOKED.store(!hooks.is_empty(), std::sync::atomic::Ordering::SeqCst);
+}
+
+fn decided(id: &seedwell_sync_proto::ids::FolderId) {
+    if !DECIDED_HOOKED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let hook = {
+        let mut hooks = DECIDED.lock().unwrap_or_else(|e| e.into_inner());
+        let hook = hooks.remove(&id.to_string());
+        DECIDED_HOOKED.store(!hooks.is_empty(), std::sync::atomic::Ordering::SeqCst);
+        hook
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
 }
 
 /// Writes a space's membership to its file. The membership is locked only while its bytes are made, never for the
@@ -197,7 +241,7 @@ pub(crate) fn by_owner(f: &Space, body: Body) -> Option<Statement> {
 /// it published (or it published none): every member then shows them, also one that never met this device. True
 /// when it added one (call [`changed`] then, so the sessions get it).
 pub(crate) fn publish_profile(ctx: &Ctx, f: &Space) -> bool {
-    use trs_sync_proto::members::profile_name_ok;
+    use seedwell_sync_proto::members::profile_name_ok;
     let me = *ctx.key.public_key();
     let name = lock(&ctx.device_name).clone();
     let user = lock(&ctx.user_name).clone();
@@ -261,7 +305,7 @@ pub(crate) fn held_read_only(m: &Membership, me: &[u8; 32]) -> bool {
 /// membership is applied: held, the core notes it, so once it signs again (here, or at the next start) what it changed
 /// meanwhile becomes its own versions; not held and not signing by its `role` (it reads only, or was removed), it
 /// forgets it (a reader's changes stay local differences). Otherwise the core clears it itself as it signs again.
-pub(crate) fn core_held(core: &mut trs_sync::folder::FolderCore, held: bool, role: Option<Role>) -> io::Result<()> {
+pub(crate) fn core_held(core: &mut seedwell_sync::folder::FolderCore, held: bool, role: Option<Role>) -> io::Result<()> {
     if held {
         core.set_held(true)
     } else if role.is_none_or(|r| r.access() == Access::Read) {
@@ -361,7 +405,7 @@ pub(crate) async fn changed(ctx: &Arc<Ctx>, f: &Arc<Space>) {
                 }
                 let ended = f.membership.read().unwrap_or_else(|e| e.into_inner()).expired(&p.device_pk);
                 let reason = if ended { "this folder is no longer shared" } else { "this device was removed from a folder" }.to_string();
-                let _ = p.control.send(Message::Close(trs_sync_proto::msg::Close { reason })).await;
+                let _ = p.control.send(Message::Close(seedwell_sync_proto::msg::Close { reason })).await;
             }
             // A device this one (an admin) asked the owners to remove: cut off here until their removal comes.
             Some(_) if crate::removals::waiting(f, &p.device_pk) => crate::removals::cut_off(f, &p).await,
@@ -479,7 +523,7 @@ pub(crate) fn check(ctx: &Ctx, f: &Space, peer_pk: &[u8; 32], exporter: &[u8; 32
             }
         }
         // A device that is not an owner or admin does not admit: the joining device keeps looking.
-        Err(trs_sync_proto::members::AdmitError::NotAllowed) if !f.role_of(me).is_some_and(Role::admits) => Proved::Nothing,
+        Err(seedwell_sync_proto::members::AdmitError::NotAllowed) if !f.role_of(me).is_some_and(Role::admits) => Proved::Nothing,
         Err(e) if f.kind == SpaceKind::Devices => Proved::Refused(crate::devices::refusal(e)),
         Err(e) => Proved::Refused(e.to_string()),
     }
@@ -533,23 +577,12 @@ mod tests {
         assert!(load(&p, *s.public_key()).unwrap_err().to_string().contains("test build"));
     }
 
-    /// Hooks [`add_by_owner`] runs once for a space, after `make` decided and before the statements are added.
-    type Hook = Box<dyn FnOnce() + Send>;
-    static DECIDED: std::sync::Mutex<std::collections::BTreeMap<String, Hook>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
-
-    pub(super) fn decided(id: &trs_sync_proto::ids::FolderId) {
-        let hook = DECIDED.lock().unwrap_or_else(|e| e.into_inner()).remove(&id.to_string());
-        if let Some(hook) = hook {
-            hook();
-        }
-    }
-
     /// A folder whose owner is `owner` and admin `host`, with devices the host admitted at `admitted` (role, time).
-    fn admitted_by_host(admitted: &[(Role, u64)]) -> (FolderSecret, Membership, Vec<trs_sync_proto::device::DeviceKey>) {
-        use trs_sync_proto::device::DeviceKey;
-        use trs_sync_proto::members::{Signer, new_invite};
+    fn admitted_by_host(admitted: &[(Role, u64)]) -> (FolderSecret, Membership, Vec<seedwell_sync_proto::device::DeviceKey>) {
+        use seedwell_sync_proto::device::DeviceKey;
+        use seedwell_sync_proto::members::{Signer, new_invite};
         let s = FolderSecret::from_bytes([4; 32]);
-        let fid = trs_sync_proto::ids::FolderId::of_public_key(s.public_key());
+        let fid = seedwell_sync_proto::ids::FolderId::of_public_key(s.public_key());
         let (owner, host) = (DeviceKey::from_seed(&[1; 32]), DeviceKey::from_seed(&[2; 32]));
         let mut m = Membership::new(*s.public_key());
         let by_owner = |device: &DeviceKey, role, serial| Statement::by_owner(&s, Body::Grant { device: *device.public_key(), role, serial, at_s: now_s(), invite: None });
@@ -566,7 +599,7 @@ mod tests {
         (s, m, devices)
     }
 
-    fn member(m: &Membership, d: &trs_sync_proto::device::DeviceKey) -> trs_sync_proto::members::Member {
+    fn member(m: &Membership, d: &seedwell_sync_proto::device::DeviceKey) -> seedwell_sync_proto::members::Member {
         *m.members().find(|(pk, _)| *pk == d.public_key()).unwrap().1
     }
 
@@ -605,9 +638,9 @@ mod tests {
     #[test]
     fn a_confirmation_and_a_new_role_at_once_leave_the_new_role_with_unique_serials() {
         use std::sync::mpsc::channel;
-        use trs_sync_proto::ids::FolderId;
-        use trs_sync_proto::keys::FolderKey;
-        use trs_sync_proto::members::Signer;
+        use seedwell_sync_proto::ids::FolderId;
+        use seedwell_sync_proto::keys::FolderKey;
+        use seedwell_sync_proto::members::Signer;
         let came_on = now_s() - 10;
         let (s, m, devices) = admitted_by_host(&[(Role::ReadOnly, came_on + 1)]);
         let n = *devices[0].public_key();
@@ -618,10 +651,10 @@ mod tests {
         // The confirmation decides, then waits.
         let (decided_tx, decided_rx) = channel();
         let (go_tx, go_rx) = channel::<()>();
-        DECIDED.lock().unwrap().insert(id.to_string(), Box::new(move || {
+        test_while_deciding(&id, Some(Box::new(move || {
             decided_tx.send(()).unwrap();
             let _ = go_rx.recv_timeout(std::time::Duration::from_secs(10));
-        }));
+        })));
         let confirm = {
             let f = f.clone();
             std::thread::spawn(move || add_by_owner(&f, confirmations))
@@ -658,7 +691,7 @@ mod tests {
     #[test]
     fn two_owner_devices_switching_read_only_at_once_settle_on_one_answer() {
         let s = FolderSecret::from_bytes([4; 32]);
-        let id = trs_sync_proto::ids::FolderId::of_public_key(s.public_key());
+        let id = seedwell_sync_proto::ids::FolderId::of_public_key(s.public_key());
         let dir = tempfile::tempdir().unwrap();
         let mut seed: u64 = 0x5eed;
         let mut rand = move |n: u64| {
@@ -668,7 +701,7 @@ mod tests {
         for run in 0..300 {
             let owners: Vec<Arc<Space>> = (0..2)
                 .map(|i| {
-                    let public = trs_sync_proto::keys::FolderKey::Member(*s.public_key());
+                    let public = seedwell_sync_proto::keys::FolderKey::Member(*s.public_key());
                     let path = dir.path().join(format!("{run}-{i}.members"));
                     Arc::new(Space::new(id, SpaceKind::Folder, public, Some(s.clone()), Membership::new(*s.public_key()), path, None, Default::default(), "Films".into()))
                 })

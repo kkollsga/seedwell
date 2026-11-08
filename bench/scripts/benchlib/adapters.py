@@ -1,4 +1,4 @@
-"""Pluggable client adapters: Transmission, qBittorrent, TorrentRS (external binary).
+"""Pluggable client adapters: Transmission, qBittorrent, Seedwell (external binary).
 
 An adapter owns one client *process* with an isolated profile directory.  The runners only use:
 
@@ -350,18 +350,18 @@ class QBittorrent(Adapter):
         return rc
 
 
-# =============================================================================== TorrentRS
-class TorrentRS(Adapter):
-    """External TorrentRS bench binary; contract documented in bench/README.md ("TorrentRS adapter contract").
+# =============================================================================== Seedwell
+class Seedwell(Adapter):
+    """External Seedwell bench binary; contract documented in bench/README.md ("Seedwell adapter contract").
 
-        $TRS_BENCH_BIN add FILE.torrent [--add FILE.torrent ...] --download-dir DIR --state-dir DIR
+        $SEEDWELL_BENCH_BIN add FILE.torrent [--add FILE.torrent ...] --download-dir DIR --state-dir DIR
                         --listen-port P [--no-dht --no-pex --no-lsd --no-portmap]
     prints one JSON line per second on stdout and keeps running (seeding) until SIGTERM."""
-    name = "torrentrs"
+    name = "seedwell"
 
     def __init__(self, label=""):
         super().__init__(label)
-        self.bin = os.environ.get("TRS_BENCH_BIN", "")
+        self.bin = os.environ.get("SEEDWELL_BENCH_BIN", "")
         self.last = None
         self.lines = 0
         self._thr = None
@@ -369,22 +369,22 @@ class TorrentRS(Adapter):
 
     def available(self):
         if not self.bin:
-            return False, "TRS_BENCH_BIN not set"
+            return False, "SEEDWELL_BENCH_BIN not set"
         if not os.access(self.bin, os.X_OK):
-            return False, f"TRS_BENCH_BIN={self.bin} is not executable"
+            return False, f"SEEDWELL_BENCH_BIN={self.bin} is not executable"
         return True, ""
 
     def version(self):
         r = subprocess.run([self.bin, "--version"], capture_output=True, text=True)
-        return (r.stdout.strip() or r.stderr.strip() or "torrentrs (no --version)").splitlines()[0]
+        return (r.stdout.strip() or r.stderr.strip() or "seedwell (no --version)").splitlines()[0]
 
     def launch(self, cfg, torrents):
         self.cfg = cfg
         if not torrents:
-            raise BenchError("torrentrs adapter needs at least one torrent at launch")
+            raise BenchError("seedwell adapter needs at least one torrent at launch")
         dirs = {str(d) for _, d in torrents}
         if len(dirs) != 1:
-            raise BenchError("torrentrs adapter: all torrents of one process share one --download-dir")
+            raise BenchError("seedwell adapter: all torrents of one process share one --download-dir")
         dl = dirs.pop()
         Path(dl).mkdir(parents=True, exist_ok=True)
         cfg.profile_dir.mkdir(parents=True, exist_ok=True)
@@ -394,9 +394,9 @@ class TorrentRS(Adapter):
         cmd += ["--download-dir", dl, "--state-dir", str(cfg.profile_dir), "--listen-port", str(cfg.listen_port)]
         if cfg.mode == "local":
             cmd += ["--no-dht", "--no-pex", "--no-lsd", "--no-portmap"]
-            # Seedwell's defaults (uTP and encryption on) are what ships; BENCH_TRS_NO_UTP=1 turns uTP off
+            # Seedwell's defaults (uTP and encryption on) are what ships; BENCH_SEEDWELL_NO_UTP=1 turns uTP off
             # for a TCP-only comparison.
-            if os.environ.get("BENCH_TRS_NO_UTP") == "1":
+            if os.environ.get("BENCH_SEEDWELL_NO_UTP") == "1":
                 cmd += ["--no-utp"]
         self.n_added = len(torrents)
         err = open(cfg.profile_dir / "stderr.log", "ab")
@@ -443,7 +443,7 @@ class TorrentRS(Adapter):
         self.proc.send_signal(signal.SIGTERM)
         rc = wait_exit(self.proc, timeout)
         if rc is None:
-            log("torrentrs did not exit within the timeout after SIGTERM; killing")
+            log("seedwell did not exit within the timeout after SIGTERM; killing")
             self.kill()
         return rc
 
@@ -456,4 +456,4 @@ def _which(cmd):
     return None
 
 
-ADAPTERS = {"transmission": Transmission, "qbittorrent": QBittorrent, "torrentrs": TorrentRS}
+ADAPTERS = {"transmission": Transmission, "qbittorrent": QBittorrent, "seedwell": Seedwell}

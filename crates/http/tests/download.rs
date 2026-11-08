@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use sha2::{Digest, Sha256};
-use trs_http::{
+use seedwell_http::{
     DownloadTask, Downloader, DownloaderConfig, Error, Event, RestartReason, State, TokenBucket, get_small, list_staged,
 };
 

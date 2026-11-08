@@ -261,12 +261,17 @@ core_async! {
     apart fn sync_set_channel_async = sync_set_channel "sync_set_channel" (id: String, channel_id: Option<String>) -> Result<(), CoreError>;
     apart fn sync_pause_async = sync_pause "sync_pause" (id: String, paused: bool) -> Result<(), CoreError>;
     apart fn sync_set_lan_only_async = sync_set_lan_only "sync_set_lan_only" (id: String, lan_only: bool) -> Result<(), CoreError>;
+    /// The Add Folder window's pasted link's places, read from the disk (`Core::sync_add_set_link` leaves them out); the
+    /// host gives the answer to `sync_add_set_places`.
+    apart fn sync_add_places_async = sync_add_places "sync_add_places" (link: String) -> crate::sync_dialogs::SyncAddPlaces;
     /// The Add Folder window's Add (or Join).
     apart fn sync_add_start_async = sync_add_start "sync_add_start" (form: SyncAddForm) -> Result<SyncFolder, CoreError>;
     /// The Edit Folder window's Save (a rename, a move).
     apart fn sync_edit_save_async = sync_edit_save "sync_edit_save" (form: SyncEditForm) -> Result<SyncFolder, CoreError>;
     /// The Share window's Copy Link (adds a new folder first).
     apart fn sync_share_copy_link_async = sync_share_copy_link "sync_share_copy_link" (form: SyncShareForm) -> Result<SyncShareCopied, CoreError>;
+    /// The Share window's Extend (the period's end read and moved in the core).
+    apart fn sync_share_extend_async = sync_share_extend "sync_share_extend" (id: String, days: u32, now_unix_s: u64) -> Result<(), CoreError>;
     apart fn sync_set_on_demand_async = sync_set_on_demand "sync_set_on_demand" (id: String, on_demand: bool, path: Option<String>) -> Result<SyncFolder, CoreError>;
     apart fn sync_add_folder_on_demand_async = sync_add_folder_on_demand "sync_add_folder_on_demand" (path: String) -> Result<SyncFolder, CoreError>;
     apart fn sync_join_on_demand_async = sync_join_on_demand "sync_join_on_demand" (link: String, place: String) -> Result<SyncFolder, CoreError>;
@@ -324,6 +329,16 @@ core_async! {
     in_sync_order fn chat_set_wake_command_async = chat_set_wake_command "chat_set_wake_command" (id: String, command: Option<String>) -> Result<(), CoreError>;
     /// The channel's name on this device.
     in_sync_order fn chat_rename_async = chat_rename "chat_rename" (id: String, name: String) -> Result<(), CoreError>;
+    /// A new sidebar group (`icon` `None`: the one its name suggests), with `channel_id` in it when given.
+    in_sync_order fn chat_group_new_async = chat_group_new "chat_group_new" (name: String, icon: Option<ChatGroupIcon>, channel_id: Option<String>) -> Result<SyncChatGroup, CoreError>;
+    in_sync_order fn chat_group_rename_async = chat_group_rename "chat_group_rename" (id: String, name: String) -> Result<(), CoreError>;
+    in_sync_order fn chat_group_set_icon_async = chat_group_set_icon "chat_group_set_icon" (id: String, icon: ChatGroupIcon) -> Result<(), CoreError>;
+    /// One place up (`up`) or down in the sidebar's order.
+    in_sync_order fn chat_group_move_async = chat_group_move "chat_group_move" (id: String, up: bool) -> Result<(), CoreError>;
+    /// Its channels go back to the plain list, as they are.
+    in_sync_order fn chat_group_delete_async = chat_group_delete "chat_group_delete" (id: String) -> Result<(), CoreError>;
+    /// The sidebar group a channel is listed under (`None`: none).
+    in_sync_order fn chat_set_group_async = chat_set_group "chat_set_group" (channel_id: String, group_id: Option<String>) -> Result<(), CoreError>;
     /// Saves the device-wide settings of folder sync.
     in_sync_order fn set_sync_settings_async = set_sync_settings "set_sync_settings" (settings: SyncSettings) -> Result<(), CoreError>;
     /// Moves folder sync to `port`: refused when another app has it; otherwise sync starts again on it in the

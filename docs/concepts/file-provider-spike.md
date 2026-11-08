@@ -42,8 +42,8 @@ shapes carry over.
   change sequence; content arrives as a file written into the domain's `temporaryDirectoryURL` (or streamed over
   the socket for small files). App not running: answer `serverUnreachable`, so the system retries; the app starts
   at login, and a "Seedwell isn't running" notice is the host's.
-- **Core (Rust decides)**: an on-demand folder mode (SPEC §7G.6) in trs-sync: metadata always, contents only on a
-  fetch or a pin; the request/answer protocol and its decisions in trs-ffi, so the Windows Cloud Files shim reuses
+- **Core (Rust decides)**: an on-demand folder mode (SPEC §7G.6) in seedwell-sync: metadata always, contents only on a
+  fetch or a pin; the request/answer protocol and its decisions in seedwell-ffi, so the Windows Cloud Files shim reuses
   them.
 - **Enablement**: after `add(domain)`, read `userEnabled`; while false, the host shows "Turn on Seedwell in System
   Settings" with a button that opens the Extensions pane (verify the exact `x-apple.systempreferences:` URL for

@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub use trs_socks::Credentials;
+pub use seedwell_socks::Credentials;
 
 /// A handshake (connect, greeting, login) slower than this makes the proxy [`ProxyHealth::Slow`].
 ///
@@ -60,8 +60,8 @@ impl ProxyConfig {
         self.servers == other.servers && self.port == other.port && self.auth == other.auth
     }
 
-    fn proxy(&self, i: usize) -> trs_socks::Proxy {
-        trs_socks::Proxy { host: self.servers[i].clone(), port: self.port, auth: self.auth.clone() }
+    fn proxy(&self, i: usize) -> seedwell_socks::Proxy {
+        seedwell_socks::Proxy { host: self.servers[i].clone(), port: self.port, auth: self.auth.clone() }
     }
 }
 
@@ -123,14 +123,14 @@ pub struct ProxyStatus {
 #[derive(Clone, Debug)]
 pub(crate) enum Route {
     Direct,
-    Via(Arc<trs_socks::Proxy>),
+    Via(Arc<seedwell_socks::Proxy>),
     /// On and no server works: send nothing.
     Held,
 }
 
 #[derive(Default)]
 struct Inner {
-    active: Option<Arc<trs_socks::Proxy>>,
+    active: Option<Arc<seedwell_socks::Proxy>>,
     status: ProxyStatus,
     connect_avg: Option<f64>,
     kicked: Option<Instant>,
@@ -200,7 +200,7 @@ impl ProxyState {
     }
 
     /// A connection through the proxy failed: when the proxy itself is at fault, the monitor tests it now.
-    pub(crate) fn dial_failed(&self, e: &trs_socks::Error) {
+    pub(crate) fn dial_failed(&self, e: &seedwell_socks::Error) {
         if e.is_proxy_fault() {
             self.kick();
         }
@@ -218,7 +218,7 @@ impl ProxyState {
     }
 
     /// A connection through the proxy worked: its CONNECT time goes into the average.
-    pub(crate) fn dial_ok(&self, t: trs_socks::Timing) {
+    pub(crate) fn dial_ok(&self, t: seedwell_socks::Timing) {
         let mut g = lock(&self.inner);
         let v = t.connect.as_secs_f64() * 1000.0;
         let avg = g.connect_avg.map_or(v, |a| a * 0.8 + v * 0.2);
@@ -250,7 +250,7 @@ impl ProxyState {
         g.status.ranks += 1;
     }
 
-    fn set_up(&self, p: trs_socks::Proxy, took: Duration) -> bool {
+    fn set_up(&self, p: seedwell_socks::Proxy, took: Duration) -> bool {
         let mut g = lock(&self.inner);
         let was_held = g.active.is_none();
         let label = p.label();
@@ -282,7 +282,7 @@ impl ProxyState {
         };
     }
 
-    fn active(&self) -> Option<Arc<trs_socks::Proxy>> {
+    fn active(&self) -> Option<Arc<seedwell_socks::Proxy>> {
         lock(&self.inner).active.clone()
     }
 }
@@ -290,7 +290,7 @@ impl ProxyState {
 /// The choice after testing every candidate (see [`choose_preferring`] with no preference): the fastest that
 /// answered (the earlier on a tie), or why none did.
 #[cfg(test)]
-pub(crate) fn choose(results: &[Result<Duration, trs_socks::Error>]) -> Result<(usize, Duration), ProxyProblem> {
+pub(crate) fn choose(results: &[Result<Duration, seedwell_socks::Error>]) -> Result<(usize, Duration), ProxyProblem> {
     choose_preferring(results, &[]).map(|c| (c.index, c.took))
 }
 
@@ -307,7 +307,7 @@ pub(crate) struct Choice {
 /// preference): among the servers that answered, the most preferred, the fastest within it (the earlier on a tie).
 /// A preferred server slower than [`SLOW_HANDSHAKE`] never wins over a healthy one: when any server is healthy, only
 /// healthy ones are chosen from. Or why none answered.
-pub(crate) fn choose_preferring(results: &[Result<Duration, trs_socks::Error>], preference: &[u16]) -> Result<Choice, ProxyProblem> {
+pub(crate) fn choose_preferring(results: &[Result<Duration, seedwell_socks::Error>], preference: &[u16]) -> Result<Choice, ProxyProblem> {
     let pref = |i: usize| preference.get(i).copied().unwrap_or(0);
     let ok: Vec<(usize, Duration)> = results.iter().enumerate().filter_map(|(i, r)| r.as_ref().ok().map(|d| (i, *d))).collect();
     let healthy: Vec<(usize, Duration)> = ok.iter().copied().filter(|(_, d)| *d <= SLOW_HANDSHAKE).collect();
@@ -317,27 +317,27 @@ pub(crate) fn choose_preferring(results: &[Result<Duration, trs_socks::Error>], 
         let passed_over = ok.iter().copied().min_by_key(|(i, d)| (pref(*i), *d, *i)).filter(|(i, _)| pref(*i) < pref(index));
         return Ok(Choice { index, took, passed_over });
     }
-    let errs: Vec<&trs_socks::Error> = results.iter().filter_map(|r| r.as_ref().err()).collect();
+    let errs: Vec<&seedwell_socks::Error> = results.iter().filter_map(|r| r.as_ref().err()).collect();
     if errs.is_empty() {
         return Err(ProxyProblem::NoServer);
     }
-    if errs.iter().any(|e| **e == trs_socks::Error::AuthRejected) {
+    if errs.iter().any(|e| **e == seedwell_socks::Error::AuthRejected) {
         return Err(ProxyProblem::AuthRejected);
     }
-    if errs.iter().any(|e| **e == trs_socks::Error::NoMethod) {
+    if errs.iter().any(|e| **e == seedwell_socks::Error::NoMethod) {
         return Err(ProxyProblem::AuthMissing);
     }
     Err(ProxyProblem::Unreachable(errs[errs.len() - 1].to_string()))
 }
 
 /// Tests every candidate at once.
-async fn probe_all(cfg: &ProxyConfig) -> Vec<Result<Duration, trs_socks::Error>> {
+async fn probe_all(cfg: &ProxyConfig) -> Vec<Result<Duration, seedwell_socks::Error>> {
     let mut set = tokio::task::JoinSet::new();
     for i in 0..cfg.servers.len() {
         let p = cfg.proxy(i);
-        set.spawn(async move { (i, trs_socks::handshake(&p, PROBE_TIMEOUT).await) });
+        set.spawn(async move { (i, seedwell_socks::handshake(&p, PROBE_TIMEOUT).await) });
     }
-    let mut out: Vec<Result<Duration, trs_socks::Error>> = (0..cfg.servers.len()).map(|_| Err(trs_socks::Error::Timeout)).collect();
+    let mut out: Vec<Result<Duration, seedwell_socks::Error>> = (0..cfg.servers.len()).map(|_| Err(seedwell_socks::Error::Timeout)).collect();
     while let Some(r) = set.join_next().await {
         if let Ok((i, r)) = r {
             out[i] = r;
@@ -377,7 +377,7 @@ pub(crate) async fn run(st: Arc<ProxyState>, cfg: ProxyConfig, restored: impl Fn
         } else if let Some(p) = st.active() {
             // A ranking asked for meanwhile ("Find a Faster Server") does not wait for a server that hangs: the check
             // stops and every server is tested at once. Other kicks (a failed dial) are this very check.
-            let check = trs_socks::handshake(&p, PROBE_TIMEOUT);
+            let check = seedwell_socks::handshake(&p, PROBE_TIMEOUT);
             tokio::pin!(check);
             let checked = loop {
                 tokio::select! {
@@ -415,7 +415,7 @@ pub(crate) async fn run(st: Arc<ProxyState>, cfg: ProxyConfig, restored: impl Fn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trs_socks::Error as E;
+    use seedwell_socks::Error as E;
 
     /// Failure: a slower server is chosen over a faster one, or wrong credentials are reported as "unreachable"
     /// (the user would look for a network problem instead of the key).
@@ -453,7 +453,7 @@ mod tests {
     /// ranks (6 s more): past its 10 s it says the servers didn't answer, though another one works.
     #[tokio::test]
     async fn a_ranking_asked_for_does_not_wait_for_a_hanging_health_check() {
-        use trs_socks::testkit::FakeProxy;
+        use seedwell_socks::testkit::FakeProxy;
         let a = FakeProxy::start("u", "p").await;
         let at = std::net::SocketAddr::new(std::net::Ipv6Addr::LOCALHOST.into(), a.addr().port());
         let Some(b) = FakeProxy::start_on(at, "u", "p").await else {
@@ -464,7 +464,7 @@ mod tests {
         let cfg = ProxyConfig {
             servers: vec!["127.0.0.1".into(), "::1".into()],
             port: a.addr().port(),
-            auth: Some(trs_socks::Credentials::new("u", "p").unwrap()),
+            auth: Some(seedwell_socks::Credentials::new("u", "p").unwrap()),
             preference: Vec::new(),
         };
         let st = Arc::new(ProxyState::new(true));
@@ -521,7 +521,7 @@ mod tests {
         let st = ProxyState::new(true);
         assert!(st.held() && matches!(st.route(), Route::Held));
         assert_eq!(st.status().health, ProxyHealth::Checking);
-        let p = trs_socks::Proxy { host: "127.0.0.1".into(), port: 1080, auth: None };
+        let p = seedwell_socks::Proxy { host: "127.0.0.1".into(), port: 1080, auth: None };
         assert!(st.set_up(p, Duration::from_millis(2000)), "was held");
         assert!(matches!(st.route(), Route::Via(_)));
         assert_eq!(st.status().health, ProxyHealth::Slow);

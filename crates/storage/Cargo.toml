@@ -1,5 +1,5 @@
 [package]
-name = "trs-storage"
+name = "seedwell-storage"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
-trs-platform = { path = "../platform" }
+seedwell-platform = { path = "../platform" }
 # SHA-1 / SHA-256. 0.11 has the ARMv8 SHA backends (runtime-detected via cpufeatures); 0.10 silently
 # uses the portable code on aarch64 (measured 1.28 GB/s vs 2.84 GB/s SHA-1 on M4).
 sha1 = { version = "0.11", default-features = false }

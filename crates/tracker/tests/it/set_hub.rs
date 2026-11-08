@@ -9,14 +9,14 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use common::*;
-use trs_tracker::gate::{GateConfig, GatedRequest};
-use trs_tracker::hub::{TorrentSpec, TrackerHub};
-use trs_tracker::machine::MachineConfig;
-use trs_tracker::response::{AnnounceError, TransportError};
-use trs_tracker::rng::SplitMix64;
-use trs_tracker::set::{SetInput, TrackerSet};
-use trs_tracker::store::{StoreError, TimingKey, TimingRecord, TimingStore};
-use trs_tracker::*;
+use seedwell_tracker::gate::{GateConfig, GatedRequest};
+use seedwell_tracker::hub::{TorrentSpec, TrackerHub};
+use seedwell_tracker::machine::MachineConfig;
+use seedwell_tracker::response::{AnnounceError, TransportError};
+use seedwell_tracker::rng::SplitMix64;
+use seedwell_tracker::set::{SetInput, TrackerSet};
+use seedwell_tracker::store::{StoreError, TimingKey, TimingRecord, TimingStore};
+use seedwell_tracker::*;
 
 /// Host-scripted responder: hosts in `down` time out, everything else succeeds.
 struct Scripted {
@@ -96,7 +96,7 @@ fn duplicates_and_cap() {
         .map(|i| TrackerUrl::parse(&format!("http://t{}.test/a", i % 50)).unwrap())
         .collect();
     let s = TrackerSet::new(&cfg, vec![urls], |_| None, &mut SplitMix64::new(1));
-    assert_eq!(s.len(), trs_tracker::set::MAX_TRACKERS);
+    assert_eq!(s.len(), seedwell_tracker::set::MAX_TRACKERS);
     let u: std::collections::HashSet<_> = s.urls().iter().map(|u| u.raw().to_owned()).collect();
     assert_eq!(u.len(), s.len());
 }
@@ -534,7 +534,7 @@ fn set_input_enum_is_usable_directly() {
     );
     set.handle(SetInput::Torrent(TorrentEvent::Start), Millis(0), &mut out);
     set.handle(SetInput::Timer, Millis(10_000), &mut out);
-    assert!(out.iter().any(|i| matches!(&i.intent, trs_tracker::Intent::SendAnnounce(s) if s.params.event == Some(Event::Started))));
+    assert!(out.iter().any(|i| matches!(&i.intent, seedwell_tracker::Intent::SendAnnounce(s) if s.params.event == Some(Event::Started))));
     let _: Option<TorrentSpec> = None;
 }
 

@@ -47,9 +47,9 @@ use std::time::{Duration, Instant};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 use tokio::sync::Notify;
-use trs_sync_proto::device::{self, DeviceKey};
-use trs_sync_proto::ids::{DeviceId, FolderId};
-use trs_sync_proto::keys::lan_tag;
+use seedwell_sync_proto::device::{self, DeviceKey};
+use seedwell_sync_proto::ids::{DeviceId, FolderId};
+use seedwell_sync_proto::keys::lan_tag;
 
 use crate::service::SyncHandle;
 use crate::shared::{Ctx, lock};
@@ -230,7 +230,7 @@ pub async fn run(h: SyncHandle) {
 /// tests, can all listen; broadcast and multicast reach each).
 fn open(addr: SocketAddr, groups: bool) -> io::Result<UdpSocket> {
     let s = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
-    trs_platform::net::share_udp_port(&s)?;
+    seedwell_platform::net::share_udp_port(&s)?;
     if addr.is_ipv6() {
         s.set_only_v6(true)?;
     }
@@ -287,14 +287,14 @@ async fn send_loop(h: &SyncHandle, v4: Option<&UdpSocket>, v6: Option<&UdpSocket
     loop {
         if groups {
             // Joined again every round: after a network change the default interface is another one. An
-            // existing membership answers with an error that says so (trs_platform::net::already_member).
+            // existing membership answers with an error that says so (seedwell_platform::net::already_member).
             if let Some(s) = v4 {
                 let r = s.join_multicast_v4(GROUP_V4, Ipv4Addr::UNSPECIFIED);
-                quiet.note("joining", g4, r.or_else(|e| if trs_platform::net::already_member(&e) { Ok(()) } else { Err(e) }));
+                quiet.note("joining", g4, r.or_else(|e| if seedwell_platform::net::already_member(&e) { Ok(()) } else { Err(e) }));
             }
             if let Some(s) = v6 {
                 let r = s.join_multicast_v6(&GROUP_V6, 0);
-                quiet.note("joining", g6, r.or_else(|e| if trs_platform::net::already_member(&e) { Ok(()) } else { Err(e) }));
+                quiet.note("joining", g6, r.or_else(|e| if seedwell_platform::net::already_member(&e) { Ok(()) } else { Err(e) }));
             }
         }
         if let Some(pkt) = build(h, instance, round) {
@@ -426,7 +426,7 @@ fn handle(h: &SyncHandle, rx: &Mutex<Rx>, b: &[u8], src: SocketAddr) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trs_sync_proto::keys::{FolderKey, FolderSecret};
+    use seedwell_sync_proto::keys::{FolderKey, FolderSecret};
 
     fn key(seed: u8) -> DeviceKey {
         DeviceKey::from_seed(&[seed; 32])

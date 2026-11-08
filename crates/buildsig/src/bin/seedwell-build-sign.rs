@@ -13,7 +13,7 @@ use std::io::Read as _;
 use std::path::Path;
 use std::process::ExitCode;
 
-use trs_buildsig as sig;
+use seedwell_buildsig as sig;
 
 const USAGE: &str = "usage: seedwell-build-sign keygen | public | add <folder> <zip> --sha256 HEX [--commit C] [--minimum V] | verify <folder> [--key HEX]";
 
@@ -75,7 +75,7 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             if !sig::trusted_keys().contains(&key.public_key()) {
                 eprintln!(
-                    "note: this key ({}) is not among the keys this tree's Seedwell trusts (trs-buildsig TRUSTED_KEYS)",
+                    "note: this key ({}) is not among the keys this tree's Seedwell trusts (seedwell-buildsig TRUSTED_KEYS)",
                     sig::hex(&key.public_key())
                 );
             }

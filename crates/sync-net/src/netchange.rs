@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::Notify;
-use trs_sync_proto::msg::Message;
+use seedwell_sync_proto::msg::Message;
 
 use crate::service::SyncHandle;
 use crate::session::Via;
@@ -119,7 +119,7 @@ impl SyncHandle {
     /// all of them, else the one it is bound to.
     fn own_ips(&self) -> BTreeSet<IpAddr> {
         let bind = self.inner.bind;
-        if bind.is_unspecified() { trs_platform::net::lan_addresses().into_iter().collect() } else { [bind].into() }
+        if bind.is_unspecified() { seedwell_platform::net::lan_addresses().into_iter().collect() } else { [bind].into() }
     }
 
     /// One check without the operating system's signal: a change of this device's addresses, or a session on a gone
@@ -178,7 +178,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
-    use trs_sync_proto::members::Role;
+    use seedwell_sync_proto::members::Role;
 
     use super::*;
     use crate::service::Options;
@@ -216,7 +216,7 @@ mod tests {
         let (a, b) = (device(da.path(), "Anna").await, device(db.path(), "Bo").await);
         let docs = df.path().join("Docs");
         std::fs::create_dir_all(&docs).unwrap();
-        let id: trs_sync_proto::FolderId = a.add_folder(docs).await.unwrap().id.parse().unwrap();
+        let id: seedwell_sync_proto::FolderId = a.add_folder(docs).await.unwrap().id.parse().unwrap();
         b.join_folder(&a.create_invite(&id, Role::ReadWrite, 1, 7).unwrap().link, df.path().join("B")).await.unwrap();
         let bob = b.device_id();
         until(20, "connected", || a.inner.ctx.registry.peer(&bob).is_some() && b.inner.ctx.registry.peer(&a.device_id()).is_some()).await;
@@ -257,7 +257,7 @@ mod tests {
         let (a, b) = (device(da.path(), "Anna").await, device(db.path(), "Bo").await);
         let docs = df.path().join("Docs");
         std::fs::create_dir_all(&docs).unwrap();
-        let id: trs_sync_proto::FolderId = a.add_folder(docs).await.unwrap().id.parse().unwrap();
+        let id: seedwell_sync_proto::FolderId = a.add_folder(docs).await.unwrap().id.parse().unwrap();
         b.join_folder(&a.create_invite(&id, Role::ReadWrite, 1, 7).unwrap().link, df.path().join("B")).await.unwrap();
         let bob = b.device_id();
         until(20, "connected", || a.inner.ctx.registry.peer(&bob).is_some()).await;

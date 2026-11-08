@@ -3,14 +3,14 @@
 //! first.
 #![cfg(feature = "transport")]
 
-use trs_tracker::gate::GateConfig;
-use trs_tracker::http::HttpTransport;
-use trs_tracker::hub::{TorrentSpec, TrackerHub};
-use trs_tracker::machine::Report;
-use trs_tracker::store::{StoreError, TimingKey, TimingRecord, TimingStore};
-use trs_tracker::udp::UdpConfig;
-use trs_tracker::url::Scheme;
-use trs_tracker::{Millis, Stats, TorrentEvent, TrackerUrl};
+use seedwell_tracker::gate::GateConfig;
+use seedwell_tracker::http::HttpTransport;
+use seedwell_tracker::hub::{TorrentSpec, TrackerHub};
+use seedwell_tracker::machine::Report;
+use seedwell_tracker::store::{StoreError, TimingKey, TimingRecord, TimingStore};
+use seedwell_tracker::udp::UdpConfig;
+use seedwell_tracker::url::Scheme;
+use seedwell_tracker::{Millis, Stats, TorrentEvent, TrackerUrl};
 
 struct BoxedTiming(Box<dyn TimingStore + Send>);
 
@@ -27,7 +27,7 @@ impl TimingStore for BoxedTiming {
 fn the_engine_driver_compiles_against_this_api_and_works() {
     let mut hub = TrackerHub::new(
         GateConfig::default(),
-        BoxedTiming(Box::new(trs_tracker::MemoryStore::new())),
+        BoxedTiming(Box::new(seedwell_tracker::MemoryStore::new())),
         7,
     );
     hub.hold_until(Millis(0));
@@ -63,8 +63,8 @@ fn the_engine_driver_compiles_against_this_api_and_works() {
         hub.charge_extra(req.url().host(), 0);
         hub.complete(
             req.ticket(),
-            Err(trs_tracker::AnnounceError::Transport(
-                trs_tracker::TransportError::Connect,
+            Err(seedwell_tracker::AnnounceError::Transport(
+                seedwell_tracker::TransportError::Connect,
             )),
             Millis(10_000),
         );

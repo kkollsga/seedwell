@@ -560,14 +560,14 @@ mod tests {
     use super::*;
 
     /// Set in the copy of this test binary that [`standard_error_that_goes_nowhere_goes_to_the_log`] starts: the log.
-    const STDERR_CHILD: &str = "TRS_PLATFORM_TEST_STDERR_LOG";
+    const STDERR_CHILD: &str = "SEEDWELL_PLATFORM_TEST_STDERR_LOG";
 
     /// This test binary again, running only `test` (its output not captured), with `log` to write to.
     fn child(test: &str, log: &std::path::Path, nowhere: bool) -> std::process::Output {
         let mut c = std::process::Command::new(std::env::current_exe().unwrap());
         c.args([test, "--exact", "--nocapture", "--test-threads=1"]).env(STDERR_CHILD, log).stdin(std::process::Stdio::null());
         if nowhere {
-            c.env("TRS_PLATFORM_TEST_STDERR_NONE", "1");
+            c.env("SEEDWELL_PLATFORM_TEST_STDERR_NONE", "1");
         } else {
             c.stderr(std::process::Stdio::piped());
         }
@@ -579,7 +579,7 @@ mod tests {
         let name = format!("{}::standard_error_that_goes_nowhere_goes_to_the_log", module_path!().split_once("::").unwrap().1);
         if let Some(log) = std::env::var_os(STDERR_CHILD) {
             // The copy: it says whether it redirected, then something on standard error, then panics.
-            if std::env::var_os("TRS_PLATFORM_TEST_STDERR_NONE").is_some() {
+            if std::env::var_os("SEEDWELL_PLATFORM_TEST_STDERR_NONE").is_some() {
                 test_stderr_to_nowhere();
             }
             let moved = stderr_to_log(std::path::Path::new(&log)).unwrap();
@@ -677,28 +677,28 @@ mod tests {
     }
 
     /// Not a test on its own: `a_detached_child_does_not_hold_the_callers_pipes` runs the test binary
-    /// with `TRS_DETACHED_HELPER` set to play the processes it needs.
+    /// with `SEEDWELL_DETACHED_HELPER` set to play the processes it needs.
     #[test]
     fn detached_helper() {
         use std::io::Write as _;
-        let Some(mode) = std::env::var_os("TRS_DETACHED_HELPER") else { return };
+        let Some(mode) = std::env::var_os("SEEDWELL_DETACHED_HELPER") else { return };
         let me = std::env::current_exe().unwrap();
         let helper = |m: &str| {
             let mut c = std::process::Command::new(&me);
-            c.args(["--exact", "proc::tests::detached_helper", "--nocapture"]).env("TRS_DETACHED_HELPER", m);
+            c.args(["--exact", "proc::tests::detached_helper", "--nocapture"]).env("SEEDWELL_DETACHED_HELPER", m);
             c
         };
         match mode.to_str().unwrap() {
             // Lives long, says who it is.
             "grandchild" => {
-                std::fs::write(std::env::var_os("TRS_DETACHED_PID").unwrap(), std::process::id().to_string()).unwrap();
+                std::fs::write(std::env::var_os("SEEDWELL_DETACHED_PID").unwrap(), std::process::id().to_string()).unwrap();
                 std::thread::sleep(std::time::Duration::from_secs(30));
             }
             "print" => writeln!(std::io::stdout(), "printed through an inherited stdout").unwrap(),
             // What `seedwell sim add` does: a detached child with its own streams, then it ends.
             _ => {
                 let mut g = detached_command(&me);
-                g.args(["--exact", "proc::tests::detached_helper"]).env("TRS_DETACHED_HELPER", "grandchild");
+                g.args(["--exact", "proc::tests::detached_helper"]).env("SEEDWELL_DETACHED_HELPER", "grandchild");
                 g.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
                 #[allow(clippy::zombie_processes, reason = "detached on purpose; the test ends it by its pid")]
                 g.spawn().unwrap();
@@ -718,8 +718,8 @@ mod tests {
         let t = std::time::Instant::now();
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "proc::tests::detached_helper", "--nocapture"])
-            .env("TRS_DETACHED_HELPER", "middle")
-            .env("TRS_DETACHED_PID", &pid_file)
+            .env("SEEDWELL_DETACHED_HELPER", "middle")
+            .env("SEEDWELL_DETACHED_PID", &pid_file)
             .output()
             .unwrap();
         let took = t.elapsed();

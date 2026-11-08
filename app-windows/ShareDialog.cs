@@ -1,18 +1,21 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
 /// <summary>
 /// The Share dialog on Windows (the Mac's Share window) for a synced folder, a folder not synced yet, or a channel,
-/// drawn from the core's <c>SyncShareWindowModel</c> (trs-ffi sync_share.rs): the role a link gives, Single use and Link
+/// drawn from the core's <c>SyncShareWindowModel</c> (seedwell-ffi sync_share.rs): the role a link gives, Single use and Link
 /// expires with their menus, Include a chat, the summary, the sharing period (its countdown and Extend, or Stop sharing
 /// after), "On all my devices", "Read only", and the active links with Revoke. The form is the core's value: this keeps it and edits its fields, reads
 /// the links off the UI thread when it opens and after every change, and draws the model again. Copy Link runs
 /// <c>sync_share_copy_link</c> off the UI thread (it syncs a new folder and makes a new chat first) and puts the link on
-/// the clipboard: a secret, never shown or logged.
+/// the clipboard: a secret, never shown or logged. It opens at once with nothing read (<c>sync_share_form_opening</c>):
+/// a ring, no Copy Link, while the folder's form is read off the UI thread. While open it asks again as often as the
+/// model's <c>refresh_ms</c> says (the countdown, changes made elsewhere), off the UI thread, drawn only when the result
+/// differs and never under an open drop-down (a drawing makes the controls anew, which would close it).
 /// </summary>
 sealed class ShareDialog
 {
@@ -27,11 +30,24 @@ sealed class ShareDialog
     bool copying;
     bool copied;
     bool settingDevices;
+    bool opening;
+    bool refreshing;
+    readonly TaskCompletionSource ready = new();
+    // This drawing's drop-downs and menus: a refresh waits while one is open.
+    readonly List<ComboBox> combos = [];
+    readonly List<MenuFlyout> menus = [];
+    // The rows waiting to be shown, as the dialog opens (Unfold).
+    readonly List<UIElement> folded = [];
+    readonly TaskCompletionSource unfolded = new();
 
-    ShareDialog(App app, XamlRoot root, SyncShareForm form)
+    /// <summary>QA only (an isolated run): reading the folder's form takes this long (SEEDWELL_QA_SLOW_SHARE_FORM_MS).</summary>
+    static readonly int SlowFormMs = Program.StateDir is not null && int.TryParse(Environment.GetEnvironmentVariable("SEEDWELL_QA_SLOW_SHARE_FORM_MS"), out var ms) ? ms : 0;
+
+    ShareDialog(App app, XamlRoot root, SyncShareForm form, bool opening)
     {
         this.app = app;
         this.form = form;
+        this.opening = opening;
         model = Window();
         dialog = new ContentDialog
         {
@@ -49,34 +65,76 @@ sealed class ShareDialog
         };
         dialog.Opened += (_, _) => Tips();
         dialog.Closed += (_, _) => countdown.Stop();
-        countdown.Tick += (_, _) => Draw();
+        countdown.Tick += (_, _) => _ = Refresh();
         Draw();
-        LoadInvites();
+        if (!opening) LoadInvites();
     }
 
     /// <summary>The dialog open now (QA).</summary>
     internal static ShareDialog? Open { get; private set; }
 
-    /// <summary>Opens the Share dialog for folder or channel <paramref name="id"/>. One at a time.</summary>
-    internal static void Show(App app, string id) => Show(app, f => f.SyncShareForm(id), id);
+    /// <summary>The first real drawing is there: the folder's form and its links are read (or could not be).</summary>
+    internal Task Ready => ready.Task;
 
-    /// <summary>Opens it for <paramref name="path"/>, a folder not synced yet (a seedwell:// share link outside every folder).</summary>
-    internal static void ShowNew(App app, string path) => Show(app, f => f.SyncShareFormNew(path), path);
+    /// <summary>All its rows are shown (QA).</summary>
+    internal Task Unfolded => unfolded.Task;
 
-    static async void Show(App app, Func<Core, SyncShareForm> make, string what)
+    /// <summary>Opens the Share dialog for folder or channel <paramref name="id"/>, its form read off the UI thread. One at a time.</summary>
+    internal static void Show(App app, string id) => Show(app, id, id, () => app.Core.SyncShareForm(id));
+
+    /// <summary>Opens it for <paramref name="path"/>, a folder not synced yet (a seedwell:// share link outside every folder), the same way.</summary>
+    internal static void ShowNew(App app, string path) => Show(app, "", "a new folder", () => app.Core.SyncShareFormNew(path));
+
+    static async void Show(App app, string id, string what, Func<SyncShareForm> read)
     {
         if (Open is not null || await AddFolderDialog.Root(app) is not XamlRoot root || Open is not null)
         {
             return;
         }
-        var d = new ShareDialog(app, root, make(app.Core));
+        var d = new ShareDialog(app, root, SeedwellFfiMethods.SyncShareFormOpening(id), true);
         Open = d;
-        AppLog.Write($"share: open on {(d.form.NewPath is null ? what : "a new folder")}");
-        try { await d.dialog.ShowAsync(); } catch (Exception e) { AppLog.Write($"share failed: {e.Message}"); }
+        AppLog.Write($"share: open on {what}");
+        d.ReadForm(read);
+        // A moment for the real content, so a quick read never flashes the opening state.
+        await Task.WhenAny(d.Ready, Task.Delay(150));
+        // Unfolded completes on every path: QA's share open waits for it (else it waits for the run's limit).
+        if (Open != d) { d.unfolded.TrySetResult(); return; }
+        d.Fold();
+        try { var showing = d.dialog.ShowAsync(); d.Unfold(); await showing; } catch (Exception e) { AppLog.Write($"share failed: {e.Message}"); }
+        finally { d.unfolded.TrySetResult(); }
         if (Open == d)
         {
             Open = null;
         }
+    }
+
+    /// <summary>
+    /// The dialog opens with its first rows and the others follow, a few to a turn, while it fades in. The system lays out and
+    /// makes the templates of all that is shown in one turn, 35-65 ms for the whole dialog, and that turn with a collection in it
+    /// held the UI thread over 100 ms (the check interactive). The first control stays: the dialog gives it the keyboard.
+    /// </summary>
+    void Fold()
+    {
+        if (!Ready.IsCompleted) return;
+        foreach (var row in content.Children.Skip(FirstRows).Where(r => r.Visibility == Visibility.Visible))
+        {
+            row.Visibility = Visibility.Collapsed;
+            folded.Add(row);
+        }
+    }
+
+    const int FirstRows = 2, RowsATurn = 3;
+
+    async void Unfold()
+    {
+        // (A drawing in between makes the rows anew, all shown: nothing is left to do.)
+        while (folded.Count > 0)
+        {
+            await Quiet.AfterLayout();
+            foreach (var row in folded.Take(RowsATurn)) row.Visibility = Visibility.Visible;
+            folded.RemoveRange(0, Math.Min(RowsATurn, folded.Count));
+        }
+        unfolded.TrySetResult();
     }
 
     static Brush Res(string key) => (Brush)Application.Current.Resources[key];
@@ -87,10 +145,38 @@ sealed class ShareDialog
 
     SyncShareWindowModel Window() => app.Core.SyncShareWindow(form, invites, Now(), new Clock());
 
-    void LoadInvites()
+    /// <summary>The folder's form, off the UI thread (it reads the core); the dialog is opening until it is there.</summary>
+    void ReadForm(Func<SyncShareForm> read)
+    {
+        _ = Task.Run(() =>
+        {
+            if (SlowFormMs > 0) Thread.Sleep(SlowFormMs);
+            return read();
+        }).ContinueWith(t => content.DispatcherQueue.TryEnqueue(() =>
+        {
+            opening = false;
+            if (t.IsCompletedSuccessfully)
+            {
+                // Drawn once, with its links: the form alone first would be one whole drawing more in the same moment.
+                form = t.Result;
+                failure.Visibility = Visibility.Collapsed;
+                LoadInvites(true);
+                return;
+            }
+            AppLog.Write($"share: the form could not be read: {Message(t.Exception)}");
+            Draw();
+            AddFolderDialog.Failed(failure, Message(t.Exception));
+            ready.TrySetResult();
+        }));
+    }
+
+    /// <param name="first">The form just arrived and is not drawn yet: drawn whatever the links' read comes to.</param>
+    void LoadInvites(bool first = false)
     {
         if (form.Id.Length == 0)
         {
+            if (first) { Draw(); Tips(); }
+            ready.TrySetResult();
             return;
         }
         var id = form.Id;
@@ -101,7 +187,62 @@ sealed class ShareDialog
                 invites = t.Result;
                 Draw();
             }
+            else if (first)
+            {
+                Draw();
+            }
+            if (first) Tips();
+            ready.TrySetResult();
         }));
+    }
+
+    /// <summary>A drop-down or menu of this drawing is open.</summary>
+    internal bool MenuOpen => combos.Any(c => c.IsDropDownOpen) || menus.Any(m => m.IsOpen);
+
+    // Records with arrays in them do not compare by value: what they hold is compared.
+    static string Signature(SyncShareWindowModel m) => System.Text.Json.JsonSerializer.Serialize(m);
+
+    /// <summary>
+    /// The model's refresh_ms ran out: the links and the model read off the UI thread, drawn only when they differ (a
+    /// refresh mostly finds nothing changed). A change since has its own drawing; a drop-down open keeps its drawing, and
+    /// the refresh is tried again a moment later.
+    /// </summary>
+    internal async Task Refresh()
+    {
+        if (refreshing || opening || copying || settingDevices) return;
+        refreshing = true;
+        var (f, listed, shown) = (form, invites, model);
+        try
+        {
+            var (list, next, same) = await Task.Run(() =>
+            {
+                var l = f.Id.Length > 0 ? app.Core.SyncInvites(f.Id) : listed;
+                var w = app.Core.SyncShareWindow(f, l, Now(), new Clock());
+                return (l, w, Signature(w) == Signature(shown));
+            });
+            if (!ReferenceEquals(form, f)) return;
+            invites = list;
+            if (!same && MenuOpen)
+            {
+                countdown.Interval = TimeSpan.FromSeconds(1);
+                countdown.Start();
+                return;
+            }
+            if (same)
+            {
+                if (next.RefreshMs is uint ms) countdown.Interval = TimeSpan.FromMilliseconds(ms);
+                return;
+            }
+            Draw();
+        }
+        catch (Exception e)
+        {
+            AppLog.Write($"share: refresh failed: {e.Message}");
+        }
+        finally
+        {
+            refreshing = false;
+        }
     }
 
     void Change(SyncShareForm next)
@@ -111,14 +252,27 @@ sealed class ShareDialog
         Draw();
     }
 
-    void Draw()
+    void Draw() => FocusKeeper.Redraw(content, dialog.XamlRoot, DrawAnew);
+
+    void DrawAnew()
     {
+        Draws++;
+        folded.Clear();
         model = Window();
+        combos.Clear();
+        menus.Clear();
         dialog.Title = AddFolderDialog.Title(model.Caption, model.Title);
         dialog.CloseButtonText = model.CloseTitle;
-        dialog.PrimaryButtonText = model.CopyTitle is string copy ? (copied ? model.CopiedTitle : copy) : "";
-        dialog.IsPrimaryButtonEnabled = model.CopyTitle is not null && !copying;
-        // A sharing period counting down is drawn again as it runs.
+        dialog.PrimaryButtonText = model.CopyTitle is string copy && !opening ? (copied ? model.CopiedTitle : copy) : "";
+        dialog.IsPrimaryButtonEnabled = model.CopyTitle is not null && !copying && !opening;
+        if (opening)
+        {
+            (failure.Parent as Panel)?.Children.Remove(failure);
+            content.Children.Clear();
+            content.Children.Add(new ProgressRing { IsActive = true, Width = 32, Height = 32, Margin = new Thickness(0, 48, 0, 48), HorizontalAlignment = HorizontalAlignment.Center });
+            return;
+        }
+        // Asked again as often as the core says, while it is open: the countdown, and changes made elsewhere (Refresh).
         if (model.RefreshMs is uint ms)
         {
             countdown.Interval = TimeSpan.FromMilliseconds(ms);
@@ -148,6 +302,7 @@ sealed class ShareDialog
             roles.Items.Add(r.Title);
         }
         roles.SelectedIndex = Array.FindIndex(model.Roles, r => r.Role == model.Role);
+        combos.Add(roles);
         roles.SelectionChanged += (_, _) =>
         {
             if (roles.SelectedIndex >= 0 && model.Roles[roles.SelectedIndex].Role != form.Role) Change(form with { Role = model.Roles[roles.SelectedIndex].Role });
@@ -186,6 +341,7 @@ sealed class ShareDialog
                     }
                 }
                 pick.Flyout = menu;
+                menus.Add(menu);
                 Grid.SetColumn(pick, 1);
                 row.Children.Add(pick);
             }
@@ -214,7 +370,7 @@ sealed class ShareDialog
                     {
                         var item = new MenuFlyoutItem { Text = c.Label };
                         var days = c.Value;
-                        item.Click += (_, _) => ShareUntil(TrsFfiMethods.SyncSharingExtended(CurrentUntil(), days, Now()));
+                        item.Click += (_, _) => Extend(days);
                         menu.Items.Add(item);
                     }
                     menu.Items.Add(new MenuFlyoutSeparator());
@@ -222,6 +378,7 @@ sealed class ShareDialog
                     noEnd.Click += (_, _) => ShareUntil(0);
                     menu.Items.Add(noEnd);
                     b.Flyout = menu;
+                    menus.Add(menu);
                     Grid.SetColumn(b, 1);
                     row.Children.Add(b);
                 }
@@ -229,7 +386,7 @@ sealed class ShareDialog
             }
             else if (sharing.Start is SyncShareSetting start)
             {
-                content.Children.Add(Setting(start, on => { if (on) ShareUntil(TrsFfiMethods.SyncSharingEnd(form.ShareDays, Now())); }, v => Change(form with { ShareDays = v })));
+                content.Children.Add(Setting(start, on => { if (on) ShareUntil(SeedwellFfiMethods.SyncSharingEnd(form.ShareDays, Now())); }, v => Change(form with { ShareDays = v })));
             }
             content.Children.Add(Note(sharing.Line));
         }
@@ -298,6 +455,7 @@ sealed class ShareDialog
                 values.Items.Add(c.Label);
             }
             values.SelectedIndex = Array.FindIndex(s.Choices, c => c.Value == s.Value);
+            combos.Add(values);
             values.SelectionChanged += (_, _) =>
             {
                 if (values.SelectedIndex >= 0 && s.Choices[values.SelectedIndex].Value != s.Value) setValue(s.Choices[values.SelectedIndex].Value);
@@ -310,18 +468,18 @@ sealed class ShareDialog
 
     void Tips()
     {
-        foreach (var b in RowCommands.Descendants(dialog.XamlRoot).OfType<Button>())
+        foreach (var b in RowCommands.DialogButtons(dialog))
         {
             if (model.CopyTitle is string copy && Equals(b.Content, copy)) AddFolderDialog.Help(b, model.CopyHelp);
             else if (Equals(b.Content, model.CloseTitle)) AddFolderDialog.Help(b, model.CloseHelp);
         }
     }
 
-    /// <summary>When the folder's or channel's sharing period ends now (Unix seconds; none: no end).</summary>
-    ulong? CurrentUntil()
+    /// <summary>Extend: the sharing period ends <paramref name="days"/> later (the core reads when it ends now).</summary>
+    void Extend(uint days)
     {
-        var folder = app.Core.SyncSnapshot().Folders.FirstOrDefault(f => f.Id == form.Id);
-        return folder is not null ? folder.ShareUntilS : app.Core.ChatChannels().FirstOrDefault(c => c.Id == form.Id)?.ShareUntilS;
+        var id = form.Id;
+        Background(() => app.Core.SyncShareExtend(id, days, Now()), $"extend {days}");
     }
 
     void ShareUntil(ulong until) => Background(() => app.Core.SyncSetShareUntil(form.Id, until), $"share until {until}");
@@ -368,7 +526,7 @@ sealed class ShareDialog
         }));
     }
 
-    static string Message(AggregateException? e) => e?.InnerException is CoreException ce ? TrsFfiMethods.CoreErrorMessage(ce) : e?.InnerException?.Message ?? "";
+    static string Message(AggregateException? e) => e?.InnerException is CoreException ce ? SeedwellFfiMethods.CoreErrorMessage(ce) : e?.InnerException?.Message ?? "";
 
     /// <summary>Copy Link: makes the link (syncing a new folder, making a new chat first), copies it, keeps the new form.</summary>
     internal async Task<bool> Copy()
@@ -388,7 +546,7 @@ sealed class ShareDialog
         }
         catch (CoreException e)
         {
-            error = TrsFfiMethods.CoreErrorMessage(e);
+            error = SeedwellFfiMethods.CoreErrorMessage(e);
         }
         copying = false;
         if (done is null)
@@ -426,8 +584,26 @@ sealed class ShareDialog
     {
         if (model.Links.FirstOrDefault() is SyncShareLink l) Revoke(l.Id);
     }
-    internal void QaShareFor(uint days) => ShareUntil(TrsFfiMethods.SyncSharingEnd(days, Now()));
+    internal void QaShareFor(uint days) => ShareUntil(SeedwellFfiMethods.SyncSharingEnd(days, Now()));
     internal void QaNoEnd() => ShareUntil(0);
+    internal void QaExtend(uint days) => Extend(days);
+    internal void QaDropDown(bool open) { if (combos.FirstOrDefault() is ComboBox c) c.IsDropDownOpen = open; }
+    internal bool Opening => opening;
+    /// <summary>QA: a tooltip opens over the dialog, as the pointer or the keyboard's focus may open one at any moment.</summary>
+    internal void QaTooltip(bool open)
+    {
+        if (combos.FirstOrDefault() is not ComboBox c) return;
+        if (ToolTipService.GetToolTip(c) is not ToolTip tip)
+        {
+            tip = new ToolTip { Content = "A tooltip over the dialog, about as wide as the real ones are" };
+            ToolTipService.SetToolTip(c, tip);
+        }
+        tip.IsOpen = open;
+    }
+    internal string QaFocused => FocusKeeper.Describe(content, dialog.XamlRoot);
+    internal Task<string> QaWalk() => FocusKeeper.QaWalk(content, dialog.XamlRoot, Draw);
+    internal bool QaFocus(string label) => FocusKeeper.QaFocus(content, label);
+    internal int Draws { get; private set; }
     internal void QaDevices(bool on) => SetDevices(on);
     internal void QaReadOnly(bool on) => SetReadOnly(on);
     internal bool SettingDevices => settingDevices;

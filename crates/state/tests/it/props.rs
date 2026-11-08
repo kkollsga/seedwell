@@ -3,14 +3,14 @@
 //! codecs, and "never panics on arbitrary input".
 
 use proptest::prelude::*;
-use trs_classify::Category;
-use trs_state::config::*;
-use trs_state::duration::Secs;
-use trs_state::record::{FileStamp, PartialPiece, TorrentFlags};
-use trs_state::rules::*;
-use trs_state::trackers::*;
-use trs_state::url::{AnnounceUrl, redact_url};
-use trs_state::{Config, Day, Document, ResumeData, TorrentRecord};
+use seedwell_classify::Category;
+use seedwell_state::config::*;
+use seedwell_state::duration::Secs;
+use seedwell_state::record::{FileStamp, PartialPiece, TorrentFlags};
+use seedwell_state::rules::*;
+use seedwell_state::trackers::*;
+use seedwell_state::url::{AnnounceUrl, redact_url};
+use seedwell_state::{Config, Day, Document, ResumeData, TorrentRecord};
 
 // ------------------------------------------------------------------ generators
 
@@ -274,7 +274,7 @@ proptest! {
     }
 
     #[test]
-    fn duration_text_roundtrips(n in 0u64..=trs_state::duration::MAX_SECS) {
+    fn duration_text_roundtrips(n in 0u64..=seedwell_state::duration::MAX_SECS) {
         prop_assert_eq!(Secs::parse(&Secs(n).to_string()), Ok(Secs(n)));
     }
 

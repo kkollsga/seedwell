@@ -1,11 +1,11 @@
 //! The pieces together, as two devices use them: invite, redeem, admit, exchange membership and signed entries.
 
-use trs_sync_proto::codec::Frame;
-use trs_sync_proto::model::{ChunkRef, FileInfo, FileKind, IndexEntry, Version};
-use trs_sync_proto::members::{AdmitError, Body, Signer, Statement, check_redeem, new_invite, redeem_proof};
-use trs_sync_proto::msg::{Index, Join, JoinFolder, Members, Message};
-use trs_sync_proto::sign::{Writer, WriterTable, sign_file};
-use trs_sync_proto::{Access, DeviceKey, FolderKey, InviteLink, Membership, Proof, Random, Role, random::RandomFailed};
+use seedwell_sync_proto::codec::Frame;
+use seedwell_sync_proto::model::{ChunkRef, FileInfo, FileKind, IndexEntry, Version};
+use seedwell_sync_proto::members::{AdmitError, Body, Signer, Statement, check_redeem, new_invite, redeem_proof};
+use seedwell_sync_proto::msg::{Index, Join, JoinFolder, Members, Message};
+use seedwell_sync_proto::sign::{Writer, WriterTable, sign_file};
+use seedwell_sync_proto::{Access, DeviceKey, FolderKey, InviteLink, Membership, Proof, Random, Role, random::RandomFailed};
 
 /// A deterministic random source, as simulations use.
 struct Counter(u8);

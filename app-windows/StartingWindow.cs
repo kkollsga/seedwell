@@ -4,14 +4,14 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
 /// <summary>
 /// The starting notifier (SPEC 8.6; the Mac's StartingNotifier and StartingView): a small window at the tray, above the
 /// taskbar, for as long as a new torrent waits to start. It never takes the focus from the app in front (shown, never
-/// activated). One block per torrent as the core lays it out (<c>Starting</c>, trs-ffi starting.rs): a countdown with
+/// activated). One block per torrent as the core lays it out (<c>Starting</c>, seedwell-ffi starting.rs): a countdown with
 /// its ring and line (<c>starting_tick</c>, animated between looks), Cancel and Start; a choice, compact or with its
 /// checklist (the shared chooser); a magnet link fetching its files. When it shows, when it closes and what each
 /// button does are the core's; this shows the window, ticks while it is up and runs the actions.
@@ -163,7 +163,9 @@ sealed class StartingWindow : Window
 
     static Brush Res(string key) => Theme.Res(key);
 
-    void Draw()
+    void Draw() => FocusKeeper.Redraw(root, root.XamlRoot, DrawAnew);
+
+    void DrawAnew()
     {
         blocks.Children.Clear();
         clocks.Clear();
@@ -272,7 +274,7 @@ sealed class StartingWindow : Window
     {
         foreach (var (ring, line, countdown) in clocks)
         {
-            var t = TrsFfiMethods.StartingTick(countdown, (ulong)App.Now());
+            var t = SeedwellFfiMethods.StartingTick(countdown, (ulong)App.Now());
             line.Text = t.Line;
             line.Foreground = Res(t.Paused ? "TextFillColorSecondaryBrush" : "TextFillColorPrimaryBrush");
             ring.Children.Clear();
@@ -345,6 +347,7 @@ sealed class StartingWindow : Window
     }
 
     internal FrameworkElement RootElement => root;
+    internal Task<string> QaWalk() => FocusKeeper.QaWalk(root, root.XamlRoot, Draw);
 
     /// <summary>QA: the chevron in front of a block's title.</summary>
     internal void QaChevron(string id)
@@ -363,7 +366,7 @@ sealed class StartingWindow : Window
             case "cancel": Cancel(id, arg == "keep"); break;
             case "title": Open(id); break;
             case "category":
-                if (TrsFfiMethods.CategoryChoices(Category.Other).FirstOrDefault(c => string.Equals(c.Title, arg, StringComparison.OrdinalIgnoreCase)) is CategoryChoice cc) ChangeCategory(id, cc.Category);
+                if (SeedwellFfiMethods.CategoryChoices(Category.Other).FirstOrDefault(c => string.Equals(c.Title, arg, StringComparison.OrdinalIgnoreCase)) is CategoryChoice cc) ChangeCategory(id, cc.Category);
                 break;
             case "all": store.Edit(id, c => c.SelectAll(true)); break;
             case "none": store.Edit(id, c => c.SelectAll(false)); break;

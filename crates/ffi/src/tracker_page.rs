@@ -13,7 +13,7 @@ use crate::host::HostWindow;
 use crate::settings::{ProfileRecord, VolumeWarning};
 use crate::types::{DailyStat, RowQuery, TrackerLine, TrackerStats, TrackerSummary, TransferKind, TransferRow};
 use crate::Core;
-use trs_control::display as d;
+use seedwell_control::display as d;
 
 /// How often the host reads the tracker again while its page is shown (and when its torrent count changes).
 const REFRESH_MS: u32 = 10_000;

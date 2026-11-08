@@ -1,11 +1,11 @@
-# trs-bencode
+# seedwell-bencode
 
 Strict, zero-copy bencode (BEP 3) decoder and encoder. No `unsafe`, no dependencies.
 
 ## API sketch
 
 ```rust
-use trs_bencode::{decode, decode_prefix, encode, raw_dict_get, Value, DecodeLimits};
+use seedwell_bencode::{decode, decode_prefix, encode, raw_dict_get, Value, DecodeLimits};
 
 let v = decode(b"d3:cow3:mooe")?;                  // must consume all input
 v.get(b"cow").and_then(Value::as_str);             // Some("moo")

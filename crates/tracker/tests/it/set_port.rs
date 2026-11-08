@@ -8,9 +8,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use common::*;
-use trs_tracker::gate::{GateConfig, GatedRequest};
-use trs_tracker::time::Millis;
-use trs_tracker::{Event, InfoHash20};
+use seedwell_tracker::gate::{GateConfig, GatedRequest};
+use seedwell_tracker::time::Millis;
+use seedwell_tracker::{Event, InfoHash20};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Seen {

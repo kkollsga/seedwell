@@ -51,8 +51,23 @@ fn a_pasted_link_brings_its_place_and_a_folder_of_that_name_already_there() {
     let f = core.sync_add_folder("/tmp/seedwell-mock/Team".into()).unwrap();
     let link = core.sync_create_invite(f.id.clone(), SyncRole::ReadWrite, 1, 7, None).unwrap().link;
     core.sync_remove(f.id, false).unwrap();
-    let form = core.sync_add_form(Some(link.clone()));
-    assert_eq!(form.mode, SyncAddMode::Shared);
+    let opening = core.sync_add_form(Some(link.clone()));
+    assert_eq!(opening.mode, SyncAddMode::Shared);
+    // Its places are read off the UI thread: until then no place and no Start, and the popup says it is looking.
+    assert!(opening.places_pending && opening.location.is_empty());
+    let w = core.sync_add_window(opening.clone(), host_features_all());
+    assert_eq!((w.link_ok, w.can_start, w.location_placeholder.as_str()), (true, false, "Finding a place…"));
+    assert_eq!(w.location_picker.start, None);
+    let form = sync_add_set_places(opening.clone(), core.sync_add_places(opening.key.clone()));
+    assert!(!form.places_pending);
+    // An answer that comes again, or for another link, changes nothing.
+    assert_eq!(sync_add_set_places(form.clone(), core.sync_add_places(link.clone())), form);
+    let other = core.sync_add_set_link(opening.clone(), "hello".into());
+    assert_eq!(sync_add_set_places(other.clone(), core.sync_add_places(link.clone())), other);
+    // Another link still waiting for its own places: the first one's answer is not its.
+    let other = core.sync_add_set_link(opening.clone(), format!(" {link}"));
+    assert!(other.places_pending);
+    assert_eq!(sync_add_set_places(other.clone(), core.sync_add_places(link.clone())), other);
     let w = core.sync_add_window(form.clone(), host_features_all());
     assert_eq!((w.link_line.as_str(), w.link_ok, w.location_enabled), ("Read & write · Team", true, true));
     let plain = places.path().join("Team").display().to_string();
@@ -77,6 +92,8 @@ fn a_pasted_link_brings_its_place_and_a_folder_of_that_name_already_there() {
     assert!(core.sync_add_window(form.clone(), host_features_all()).location_note.unwrap().contains("The files in it stay"));
     let form = core.sync_add_set_link(form, link.clone());
     assert_eq!(form.location, existing);
+    let form = sync_add_set_places(form.clone(), core.sync_add_places(form.key.clone()));
+    assert_eq!(form.location, existing, "the user's choice stays when the places come");
     // The default picked again: it follows the link again.
     let default = form.default_location.clone().unwrap();
     assert!(!sync_add_set_location(form.clone(), default).location_chosen);
@@ -91,7 +108,8 @@ fn a_pasted_link_brings_its_place_and_a_folder_of_that_name_already_there() {
     assert_eq!((w.link_line.as_str(), w.link_ok, w.can_start), ("Not a Seedwell folder link", false, false));
     assert_eq!(crate::sync_text::core_error_message(core.sync_add_start(bad).unwrap_err()), "Not a Seedwell folder link");
     // Joined.
-    let j = core.sync_add_start(core.sync_add_form(Some(link))).unwrap();
+    let form = core.sync_add_form(Some(link.clone()));
+    let j = core.sync_add_start(sync_add_set_places(form, core.sync_add_places(link))).unwrap();
     assert_eq!(j.state, SyncState::WaitingForAdmin);
 }
 
@@ -240,4 +258,17 @@ fn read_only_is_the_owners_own_setting_in_the_add_and_edit_dialogs() {
     let member = SyncEditForm { read_only: true, read_only_line: Some(crate::read_only_text::read_only_line(false, false)), ..base };
     let w = sync_edit_window(member, host_windows_all(), host_features_all());
     assert!(!w.changed && w.read_only.is_some_and(|r| !r.on && !r.enabled), "a member's Save would switch it");
+}
+
+/// A folder added with "On all my devices" on reaches the user's devices by itself; the user shares it with others
+/// from its right-click menu (the user's choice, 2026-11-06). Fails when the Share dialog still opens by itself after
+/// such an add (every host follows `share_after_start`), or no longer opens after a plain add from this computer.
+#[test]
+fn the_share_dialog_does_not_open_by_itself_after_an_add_on_all_my_devices() {
+    let (core, _d) = mock();
+    let paired = crate::devices_text::follow_line_new(&["MacBook".into()], false);
+    let form = SyncAddForm { folder: "/tmp/seedwell-mock/Films".into(), follow: paired, ..core.sync_add_form(None) };
+    let after = |all_devices| core.sync_add_window(SyncAddForm { all_devices, ..form.clone() }, host_features_all()).share_after_start;
+    assert!(!after(true), "the Share dialog opens after an add on all my devices");
+    assert!(after(false), "a folder of this computer alone: sharing it is the next step");
 }

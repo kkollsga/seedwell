@@ -6,13 +6,13 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
 /// <summary>
 /// The library window's Folder Sync page (SPEC 7G.5, the Mac's SyncPage), drawn from the core's <c>sync_page_model</c>
-/// (trs-ffi sync_page.rs): the folders on the left with their context menus and Add Folder…, and the selected folder on
+/// (seedwell-ffi sync_page.rs): the folders on the left with their context menus and Add Folder…, and the selected folder on
 /// the right: its header and buttons, where it is, its status, the devices gone and Share Again, the Stop Syncing
 /// question, and its Members, Conflicts and Issues. What is there, every word and what each item does are the core's;
 /// this draws it, reads the members (every 2 s) and conflicts (every 10 s) off the UI thread, and runs the
@@ -38,6 +38,14 @@ sealed class FolderSyncPage
     SyncConflict[] conflicts = [];
     SyncPageModel? model;
     string drawn = "";
+    // The page's structure as drawn (the model's Structure): while it stays, a new model only changes values, which the
+    // setters below put into the elements drawn, instead of the page being built again.
+    string drawnStructure = "";
+    readonly List<Action<SyncPageModel>> values = [];
+    // The status line as drawn, and how often the page was built and updated in place (QA).
+    TextBlock? statusText;
+    internal int Draws { get; private set; }
+    internal int InPlace { get; private set; }
     // When the members and conflicts were last read (the page model's MembersRefreshMs / ConflictsRefreshMs pace them).
     DateTime membersRead = DateTime.MinValue;
     DateTime conflictsRead = DateTime.MinValue;
@@ -96,7 +104,7 @@ sealed class FolderSyncPage
         try
         {
             var input = new SyncPageInput(app.Core.SyncSnapshot(), selected, members, conflicts, app.Core.ChatChannels(), false, (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-            m = TrsFfiMethods.SyncPageModel(input, removal, new Clock(), App.HostWindows, App.HostFeatures);
+            m = SeedwellFfiMethods.SyncPageModel(input, removal, new Clock(), App.HostWindows, App.HostFeatures);
         }
         catch (Exception e)
         {
@@ -118,13 +126,41 @@ sealed class FolderSyncPage
             return;
         }
         drawn = m.Signature;
+        // Only values changed (about twice a second while a folder is added): into the elements drawn. Building the page
+        // anew each time made so many WinRT objects that every few draws a blocking full collection of 50-70 ms followed
+        // (the check interactive, win-100).
+        if (m.Structure == drawnStructure)
+        {
+            foreach (var v in values)
+            {
+                v(m);
+            }
+            InPlace++;
+            return;
+        }
+        drawnStructure = m.Structure;
         Draw(m);
     }
 
     void Redraw()
     {
         drawn = "";
+        drawnStructure = "";
         Update();
+    }
+
+    /// <summary>A setter of a text drawn: sets it only when it changed.</summary>
+    static Action<string> Texter(TextBlock t, string now)
+    {
+        var last = now;
+        return text =>
+        {
+            if (text != last)
+            {
+                last = text;
+                t.Text = text;
+            }
+        };
     }
 
     void LoadMembers()
@@ -246,6 +282,9 @@ sealed class FolderSyncPage
 
     void Draw(SyncPageModel m)
     {
+        Draws++;
+        values.Clear();
+        statusText = null;
         root.Children.Clear();
         root.ColumnDefinitions.Clear();
         if (m.Empty is SyncPageEmpty e)
@@ -283,9 +322,9 @@ sealed class FolderSyncPage
         g.RowDefinitions.Add(new RowDefinition());
         g.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         var list = new StackPanel { Padding = new Thickness(8, 10, 8, 10), Spacing = 2 };
-        foreach (var f in m.Folders)
+        for (int i = 0; i < m.Folders.Length; i++)
         {
-            list.Children.Add(FolderRow(f));
+            list.Children.Add(FolderRow(m.Folders[i], i));
         }
         g.Children.Add(new ScrollViewer { Content = list });
         if (m.Add is SyncMenuItem add)
@@ -305,7 +344,7 @@ sealed class FolderSyncPage
         return g;
     }
 
-    UIElement FolderRow(SyncPageFolderRow f)
+    UIElement FolderRow(SyncPageFolderRow f, int index)
     {
         var g = new Grid { ColumnSpacing = 9, Padding = new Thickness(8, 6, 8, 6), CornerRadius = new CornerRadius(6) };
         g.Background = f.Selected ? Res("SubtleFillColorSecondaryBrush") : new SolidColorBrush(Colors.Transparent);
@@ -315,11 +354,25 @@ sealed class FolderSyncPage
         FlyoutWindow.SetBadge(badge, f.Badge);
         g.Children.Add(badge);
         var text = new StackPanel { Spacing = 1 };
-        text.Children.Add(new TextBlock { Text = f.Title, FontSize = 13, TextTrimming = TextTrimming.CharacterEllipsis });
-        text.Children.Add(new TextBlock { Text = f.Subtitle, FontSize = 11.5, Foreground = Res("TextFillColorSecondaryBrush"), TextTrimming = TextTrimming.CharacterEllipsis });
+        var title = new TextBlock { Text = f.Title, FontSize = 13, TextTrimming = TextTrimming.CharacterEllipsis };
+        var subtitle = new TextBlock { Text = f.Subtitle, FontSize = 11.5, Foreground = Res("TextFillColorSecondaryBrush"), TextTrimming = TextTrimming.CharacterEllipsis };
+        text.Children.Add(title);
+        text.Children.Add(subtitle);
         Grid.SetColumn(text, 1);
         g.Children.Add(text);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(g, f.AccessibilityLabel);
+        var setTitle = Texter(title, f.Title);
+        var setSubtitle = Texter(subtitle, f.Subtitle);
+        var label = f.AccessibilityLabel;
+        var shown = f.Badge;
+        values.Add(n =>
+        {
+            var r = n.Folders[index];
+            setTitle(r.Title);
+            setSubtitle(r.Subtitle);
+            if (r.AccessibilityLabel != label) { label = r.AccessibilityLabel; Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(g, label); }
+            if (!Equals(r.Badge, shown)) { shown = r.Badge; FlyoutWindow.SetBadge(badge, shown); }
+        });
         var id = f.Id;
         g.Tapped += (_, _) => Choose(id);
         if (f.Menu.Length > 0)
@@ -346,7 +399,7 @@ sealed class FolderSyncPage
         {
             members.Children.Add(Faint(none, 13));
         }
-        Rows(members, p.Members.Rows.Select(m => MemberRow(m, p.FolderId)));
+        Rows(members, p.Members.Rows.Select((m, i) => MemberRow(m, p.FolderId, i)));
         if (p.Conflicts is SyncPageConflicts c)
         {
             var conflicts = Section(s, c.Title);
@@ -354,12 +407,12 @@ sealed class FolderSyncPage
             {
                 conflicts.Children.Add(Faint(noConflicts, 13));
             }
-            Rows(conflicts, c.Rows.Select(row => ConflictRow(row, p.FolderId)));
+            Rows(conflicts, c.Rows.Select((row, i) => ConflictRow(row, p.FolderId, i)));
         }
         if (p.Issues is SyncPageIssues issues)
         {
             var section = Section(s, issues.Title);
-            Rows(section, issues.Rows.Select(i =>
+            Rows(section, issues.Rows.Select((i, index) =>
             {
                 var line = new StackPanel { Spacing = 2, Padding = new Thickness(0, 6, 0, 6) };
                 // No path: the issue is the whole folder's (its reason alone).
@@ -367,7 +420,10 @@ sealed class FolderSyncPage
                 {
                     line.Children.Add(new TextBlock { Text = path, FontSize = 13, TextTrimming = TextTrimming.CharacterEllipsis });
                 }
-                line.Children.Add(Faint(i.Reason, 11.5));
+                var reason = Faint(i.Reason, 11.5);
+                line.Children.Add(reason);
+                var setReason = Texter(reason, i.Reason);
+                values.Add(n => setReason(n.Page!.Issues!.Rows[index].Reason));
                 return (UIElement)line;
             }));
         }
@@ -380,7 +436,8 @@ sealed class FolderSyncPage
         var top = new Grid { ColumnSpacing = 8 };
         top.ColumnDefinitions.Add(new ColumnDefinition());
         top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        top.Children.Add(new TextBlock { Text = p.Title, FontSize = 20, FontWeight = FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center });
+        var title = new TextBlock { Text = p.Title, FontSize = 20, FontWeight = FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
+        top.Children.Add(title);
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         foreach (var b in p.Buttons)
         {
@@ -392,7 +449,8 @@ sealed class FolderSyncPage
 
         // Where it is in the secondary colour, the magnifier beside it.
         var place = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
-        place.Children.Add(new TextBlock { Text = p.Place, FontSize = 12.5, Foreground = Res("TextFillColorSecondaryBrush"), TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center, IsTextSelectionEnabled = true });
+        var where = new TextBlock { Text = p.Place, FontSize = 12.5, Foreground = Res("TextFillColorSecondaryBrush"), TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center, IsTextSelectionEnabled = true };
+        place.Children.Add(where);
         var reveal = new Button { Content = new FontIcon { Glyph = "", FontSize = 12 }, Padding = new Thickness(4), Background = new SolidColorBrush(Colors.Transparent), BorderThickness = new Thickness(0), VerticalAlignment = VerticalAlignment.Center };
         Help(reveal, p.Reveal.Help.Length > 0 ? p.Reveal.Help : p.Reveal.Title);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(reveal, p.Reveal.AccessibilityLabel ?? p.Reveal.Title);
@@ -404,16 +462,37 @@ sealed class FolderSyncPage
         var badge = new Grid { Width = 14, Height = 14, VerticalAlignment = VerticalAlignment.Center };
         FlyoutWindow.SetBadge(badge, p.Badge);
         status.Children.Add(badge);
-        status.Children.Add(new TextBlock { Text = p.Status, FontSize = 12.5, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center });
+        statusText = new TextBlock { Text = p.Status, FontSize = 12.5, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
+        status.Children.Add(statusText);
         s.Children.Add(status);
+        // (Whether there is an error or a note is the page's structure; their texts are values.)
+        Action<string>? setError = null, setNote = null;
         if (p.Error is string error)
         {
-            s.Children.Add(new TextBlock { Text = error, FontSize = 12, Foreground = Res("SystemFillColorCriticalBrush"), TextWrapping = TextWrapping.Wrap });
+            var e = new TextBlock { Text = error, FontSize = 12, Foreground = Res("SystemFillColorCriticalBrush"), TextWrapping = TextWrapping.Wrap };
+            s.Children.Add(e);
+            setError = Texter(e, error);
         }
         if (p.Note is string note)
         {
-            s.Children.Add(Faint(note));
+            var n = Faint(note);
+            s.Children.Add(n);
+            setNote = Texter(n, note);
         }
+        var setTitle = Texter(title, p.Title);
+        var setPlace = Texter(where, p.Place);
+        var setStatus = Texter(statusText, p.Status);
+        var shown = p.Badge;
+        values.Add(n =>
+        {
+            var q = n.Page!;
+            setTitle(q.Title);
+            setPlace(q.Place);
+            setStatus(q.Status);
+            if (q.Error is string e) setError?.Invoke(e);
+            if (q.Note is string t) setNote?.Invoke(t);
+            if (!Equals(q.Badge, shown)) { shown = q.Badge; FlyoutWindow.SetBadge(badge, shown); }
+        });
         if (p.OnDemandOff is SyncPageNotice off)
         {
             var line = new Grid { ColumnSpacing = 8, Margin = new Thickness(0, 2, 0, 0) };
@@ -435,9 +514,14 @@ sealed class FolderSyncPage
     UIElement Away(SyncFolderPage p)
     {
         var s = new StackPanel { Spacing = 8 };
-        foreach (var g in p.Gone)
+        for (int i = 0; i < p.Gone.Length; i++)
         {
-            s.Children.Add(BoxLine("", g.Line, PageButton(g.Button, p.FolderId)));
+            var g = p.Gone[i];
+            var index = i;
+            var line = BoxLine("", g.Line, PageButton(g.Button, p.FolderId));
+            var setLine = Texter((TextBlock)line.Children[1], g.Line);
+            values.Add(n => setLine(n.Page!.Gone[index].Line));
+            s.Children.Add(line);
         }
         if (p.Reshare is SyncPageReshare r)
         {
@@ -476,7 +560,7 @@ sealed class FolderSyncPage
         return Box(g);
     }
 
-    static UIElement BoxLine(string glyph, string text, UIElement button)
+    static Grid BoxLine(string glyph, string text, UIElement button)
     {
         var g = new Grid { ColumnSpacing = 10 };
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -533,7 +617,7 @@ sealed class FolderSyncPage
         _ => "",
     };
 
-    UIElement MemberRow(SyncPageMember m, string folderId)
+    UIElement MemberRow(SyncPageMember m, string folderId, int index)
     {
         var g = new Grid { ColumnSpacing = 10, Padding = new Thickness(0, 6, 0, 6) };
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(18) });
@@ -542,35 +626,59 @@ sealed class FolderSyncPage
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         g.Children.Add(new FontIcon { Glyph = ReachGlyph(m.Reach), FontSize = 12, Foreground = Res("TextFillColorSecondaryBrush"), VerticalAlignment = VerticalAlignment.Center });
         var who = new StackPanel { Spacing = 1, VerticalAlignment = VerticalAlignment.Center };
-        who.Children.Add(new TextBlock { Text = m.Name, FontSize = 13, TextTrimming = TextTrimming.CharacterEllipsis });
-        if (m.Line.Length > 0)
-        {
-            who.Children.Add(Faint(m.Line, 11.5));
-        }
+        var name = new TextBlock { Text = m.Name, FontSize = 13, TextTrimming = TextTrimming.CharacterEllipsis };
+        who.Children.Add(name);
+        // The line is a value: always there, folded while it is empty (an empty one may fill in place).
+        var line = Faint(m.Line, 11.5);
+        line.Visibility = m.Line.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        who.Children.Add(line);
         Grid.SetColumn(who, 1);
         g.Children.Add(who);
+        Action<string>? setTransfer = null;
+        TextBlock? transferText = null;
         if (m.Transfer is string transfer)
         {
-            var t = new TextBlock { Text = transfer, FontSize = 12, Foreground = Res("TextFillColorSecondaryBrush"), VerticalAlignment = VerticalAlignment.Center };
-            Help(t, m.TransferHelp);
-            Grid.SetColumn(t, 2);
-            g.Children.Add(t);
+            transferText = new TextBlock { Text = transfer, FontSize = 12, Foreground = Res("TextFillColorSecondaryBrush"), VerticalAlignment = VerticalAlignment.Center };
+            Help(transferText, m.TransferHelp);
+            Grid.SetColumn(transferText, 2);
+            g.Children.Add(transferText);
+            setTransfer = Texter(transferText, transfer);
         }
         FrameworkElement role;
+        Action<SyncPageMember> setRole;
         if (m.RoleMenu is SyncPageMenu menu)
         {
-            role = MenuButton(menu, folderId);
+            var button = MenuButton(menu, folderId);
+            role = button;
+            var title = menu.Title;
+            setRole = r => { if (r.RoleMenu is SyncPageMenu now && now.Title != title) { title = now.Title; button.Content = title; } };
         }
         else
         {
-            role = new TextBlock { Text = m.Role, FontSize = 12, Foreground = Res("TextFillColorSecondaryBrush"), VerticalAlignment = VerticalAlignment.Center };
+            var text = new TextBlock { Text = m.Role, FontSize = 12, Foreground = Res("TextFillColorSecondaryBrush"), VerticalAlignment = VerticalAlignment.Center };
+            role = text;
+            var setText = Texter(text, m.Role);
+            setRole = r => setText(r.Role);
         }
         Grid.SetColumn(role, 3);
         g.Children.Add(role);
+        var setName = Texter(name, m.Name);
+        var setLine = Texter(line, m.Line);
+        var help = m.TransferHelp;
+        values.Add(n =>
+        {
+            var r = n.Page!.Members.Rows[index];
+            setName(r.Name);
+            setLine(r.Line);
+            line.Visibility = r.Line.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+            if (r.Transfer is string t) setTransfer?.Invoke(t);
+            if (transferText is not null && r.TransferHelp != help) { help = r.TransferHelp; ToolTipService.SetToolTip(transferText, help.Length > 0 ? help : null); }
+            setRole(r);
+        });
         return g;
     }
 
-    UIElement ConflictRow(SyncPageConflict c, string folderId)
+    UIElement ConflictRow(SyncPageConflict c, string folderId, int index)
     {
         var g = new Grid { ColumnSpacing = 10, Padding = new Thickness(0, 6, 0, 6) };
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(18) });
@@ -579,8 +687,18 @@ sealed class FolderSyncPage
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         g.Children.Add(new FontIcon { Glyph = "", FontSize = 12, Foreground = Res("SystemFillColorCautionBrush"), VerticalAlignment = VerticalAlignment.Center });
         var what = new StackPanel { Spacing = 1, VerticalAlignment = VerticalAlignment.Center };
-        what.Children.Add(new TextBlock { Text = c.Title, FontSize = 13, TextTrimming = TextTrimming.CharacterEllipsis });
-        what.Children.Add(Faint(c.Line, 11.5));
+        var title = new TextBlock { Text = c.Title, FontSize = 13, TextTrimming = TextTrimming.CharacterEllipsis };
+        var line = Faint(c.Line, 11.5);
+        what.Children.Add(title);
+        what.Children.Add(line);
+        var setTitle = Texter(title, c.Title);
+        var setLine = Texter(line, c.Line);
+        values.Add(n =>
+        {
+            var r = n.Page!.Conflicts!.Rows[index];
+            setTitle(r.Title);
+            setLine(r.Line);
+        });
         Grid.SetColumn(what, 1);
         g.Children.Add(what);
         var reveal = PageButton(c.Reveal, folderId);
@@ -696,7 +814,7 @@ sealed class FolderSyncPage
             case SyncPageCommand.Reveal:
                 if (f is null) break;
                 // The core decides: the folder selected in Explorer, or (missing) its page.
-                switch (TrsFfiMethods.SyncReveal(f, null))
+                switch (SeedwellFfiMethods.SyncReveal(f, null))
                 {
                     case SyncReveal.Show show: Explorer($"/select,\"{show.Path}\""); break;
                     default: Choose(f.Id); break;
@@ -732,7 +850,7 @@ sealed class FolderSyncPage
                 var trash = removal.Trash();
                 removal.Close();
                 Redraw();
-                Background(() => app.Core.SyncRemove(f.Id, trash), alert => alert, e => TrsFfiMethods.SyncRemoveFailed(f.Name, e));
+                Background(() => app.Core.SyncRemove(f.Id, trash), alert => alert, e => SeedwellFfiMethods.SyncRemoveFailed(f.Name, e));
                 break;
             case SyncPageCommand.AddFolder:
                 AddFolderDialog.Show(app, null);
@@ -743,12 +861,12 @@ sealed class FolderSyncPage
             case SyncPageCommand.SetRole sr:
                 if (f is null) break;
                 var who = members.FirstOrDefault(m => m.DeviceId == sr.DeviceId)?.Name ?? "";
-                Background(async () => { await app.Core.SyncSetRole(f.Id, sr.DeviceId, sr.Role); return null; }, _ => null, e => TrsFfiMethods.SyncSetRoleFailed(who, e), LoadMembers);
+                Background(async () => { await app.Core.SyncSetRole(f.Id, sr.DeviceId, sr.Role); return null; }, _ => null, e => SeedwellFfiMethods.SyncSetRoleFailed(who, e), LoadMembers);
                 break;
             case SyncPageCommand.RemoveDevice rd:
                 if (f is null) break;
                 var name = members.FirstOrDefault(m => m.DeviceId == rd.DeviceId)?.Name ?? f.Gone.FirstOrDefault(g => g.DeviceId == rd.DeviceId)?.Name ?? "";
-                Background(async () => { await app.Core.SyncRemoveDevice(f.Id, rd.DeviceId); return null; }, _ => null, e => TrsFfiMethods.SyncRemoveDeviceFailed(name, f.Name, e), LoadMembers);
+                Background(async () => { await app.Core.SyncRemoveDevice(f.Id, rd.DeviceId); return null; }, _ => null, e => SeedwellFfiMethods.SyncRemoveDeviceFailed(name, f.Name, e), LoadMembers);
                 break;
             case SyncPageCommand.Reshare:
                 if (f is null) break;
@@ -762,7 +880,7 @@ sealed class FolderSyncPage
                     }
                     else
                     {
-                        app.Alert(TrsFfiMethods.SyncReshareFailed(f.Name, Message(t.Exception)));
+                        app.Alert(SeedwellFfiMethods.SyncReshareFailed(f.Name, Message(t.Exception)));
                     }
                 }));
                 break;
@@ -772,7 +890,7 @@ sealed class FolderSyncPage
             case SyncPageCommand.Resolve rs:
                 if (f is null) break;
                 var original = conflicts.FirstOrDefault(c => c.Copy == rs.Copy)?.Original ?? rs.Copy;
-                Background(async () => { await app.Core.SyncResolveConflict(f.Id, rs.Copy, rs.Keep); return null; }, _ => null, e => TrsFfiMethods.SyncResolveFailed(original, e), LoadConflicts);
+                Background(async () => { await app.Core.SyncResolveConflict(f.Id, rs.Copy, rs.Keep); return null; }, _ => null, e => SeedwellFfiMethods.SyncResolveFailed(original, e), LoadConflicts);
                 break;
         }
     }
@@ -792,7 +910,7 @@ sealed class FolderSyncPage
         }));
     }
 
-    static string Message(AggregateException? e) => e?.InnerException is CoreException ce ? TrsFfiMethods.CoreErrorMessage(ce) : e?.InnerException?.Message ?? "";
+    static string Message(AggregateException? e) => e?.InnerException is CoreException ce ? SeedwellFfiMethods.CoreErrorMessage(ce) : e?.InnerException?.Message ?? "";
 
     static void Explorer(string args)
     {
@@ -801,7 +919,7 @@ sealed class FolderSyncPage
             AppLog.Write($"explorer {args}");
             return;
         }
-        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", args) { UseShellExecute = true });
+        Shell.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", args) { UseShellExecute = true });
     }
 
     // --------------------------------------------------------------------------------------------------- QA
@@ -862,6 +980,12 @@ sealed class FolderSyncPage
 
     /// <summary>QA: a line per part of the page as drawn.</summary>
     internal string QaDescribe()
+    {
+        if (model is null) return "no model";
+        return QaDescribeModel() + $", drawn {Draws}, in place {InPlace}, status drawn \"{statusText?.Text}\"";
+    }
+
+    string QaDescribeModel()
     {
         if (model is null) return "no model";
         if (model.Empty is SyncPageEmpty e) return $"empty \"{e.Text}\", add {(e.Add is null ? "none" : $"\"{e.Add.Title}\"")}";

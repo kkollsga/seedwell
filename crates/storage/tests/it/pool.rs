@@ -6,7 +6,7 @@ use crate::common;
 use std::time::{Duration, Instant};
 
 use common::*;
-use trs_storage::{BLOCK_SIZE, DiskConfig, DiskIo, Mode, PieceOutcome, TorrentConfig, WriteAck};
+use seedwell_storage::{BLOCK_SIZE, DiskConfig, DiskIo, Mode, PieceOutcome, TorrentConfig, WriteAck};
 
 fn disk(idle_exit: Duration) -> DiskIo {
     DiskIo::new(DiskConfig {
@@ -27,7 +27,7 @@ fn wait_for(what: &str, limit: Duration, mut ok: impl FnMut() -> bool) {
     }
 }
 
-fn download(io: &DiskIo, s: &Synth, dir: &std::path::Path) -> trs_storage::TorrentHandle {
+fn download(io: &DiskIo, s: &Synth, dir: &std::path::Path) -> seedwell_storage::TorrentHandle {
     let h = io.add_torrent(s.layout.clone(), TorrentConfig::download(dir));
     h.attach_hashes(s.hashes.clone()).unwrap();
     let mut pending = Vec::new();

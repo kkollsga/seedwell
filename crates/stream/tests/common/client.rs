@@ -124,7 +124,7 @@ pub fn path_of(url: &str) -> String {
 /// This process's resident memory in KiB (the working set on Windows). Panics when the system would not say: a memory
 /// check that read 0 could never fail.
 pub fn rss_kb() -> u64 {
-    let bytes = trs_platform::proc::resident_bytes().filter(|&b| b > 0);
+    let bytes = seedwell_platform::proc::resident_bytes().filter(|&b| b > 0);
     bytes.expect("this process's resident memory could not be read") / 1024
 }
 

@@ -3,7 +3,7 @@
 //! (modulo the extension chain, which we canonicalise to a single SACK).
 
 use libfuzzer_sys::fuzz_target;
-use trs_utp::packet::{self, Packet};
+use seedwell_utp::packet::{self, Packet};
 
 fuzz_target!(|data: &[u8]| {
     let _ = packet::looks_like_utp(data);

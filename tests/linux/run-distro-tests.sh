@@ -10,9 +10,9 @@ SRC="$(cd "$HERE/../.." && pwd)"; OUT="$HERE/results"
 while [[ "${1:-}" == --* ]]; do case "$1" in --src) SRC="$2"; shift 2;; --out) OUT="$2"; shift 2;; *) echo "unknown $1"; exit 2;; esac; done
 DISTROS=("$@"); [[ ${#DISTROS[@]} -eq 0 ]] && DISTROS=(debian ubuntu fedora arch alpine)
 mkdir -p "$OUT"
-docker volume create trs-registry >/dev/null   # crate sources, shared by all distros (downloaded once)
+docker volume create seedwell-registry >/dev/null   # crate sources, shared by all distros (downloaded once)
 for d in "${DISTROS[@]}"; do
-  img="trs-linux-$d"; vol_src="trs-src-$d"; vol_cache="trs-cache-$d"; vol_out="trs-out-$d"
+  img="seedwell-linux-$d"; vol_src="seedwell-src-$d"; vol_cache="seedwell-cache-$d"; vol_out="seedwell-out-$d"
   echo "##### $d: image"
   docker build --platform "${PLATFORM:-linux/arm64}" -q -t "$img" -f "$HERE/docker/Dockerfile.$d" "$HERE/docker" >/dev/null || { echo "image build FAILED for $d" | tee "$OUT/$d.txt"; continue; }
   docker volume rm -f "$vol_src" >/dev/null; docker volume create "$vol_src" >/dev/null; docker volume create "$vol_cache" >/dev/null; docker volume rm -f "$vol_out" >/dev/null; docker volume create "$vol_out" >/dev/null
@@ -22,7 +22,7 @@ for d in "${DISTROS[@]}"; do
   # (touch: tar keeps the sources' old mtimes, and cargo would treat a cached build from an OLDER snapshot as fresh)
   docker run --rm -i -v "$vol_src:/src" "$img" sh -c 'cat > /src/.test-crates.sh' < "$HERE/in-container/test-crates.sh"
   echo "##### $d: tests"
-  docker run --rm --cpus "${TEST_CPUS:-4}" -v "$vol_src:/src" -v "$vol_cache:/cache" -v "$vol_out:/out" -v trs-registry:/registry \
+  docker run --rm --cpus "${TEST_CPUS:-4}" -v "$vol_src:/src" -v "$vol_cache:/cache" -v "$vol_out:/out" -v seedwell-registry:/registry \
      -e CRATES -e TEST_ARGS -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" \
      "$img" sh /src/.test-crates.sh 2>&1 | tee "$OUT/$d.txt"
   # logs out of the VM (named volume, because bind mounts of arbitrary host paths are not shared with colima)

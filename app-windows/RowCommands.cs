@@ -1,6 +1,6 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
@@ -28,7 +28,7 @@ static class RowCommands
         // Play and Play With from the core's offer (its players, the row's videos); the chooser is here (Choose Files…).
         PlayOffer? play = null;
         if (rows.Length == 1) { try { play = core.PlayOffer(rows[0]); } catch (Exception e) { AppLog.Write($"play offer failed: {e.Message}"); } }
-        var list = TrsFfiMethods.RowCommands(rows, info, rules, play, inMenuBar, true, App.HostWindows);
+        var list = SeedwellFfiMethods.RowCommands(rows, info, rules, play, inMenuBar, true, App.HostWindows);
         var menu = new MenuFlyout();
         foreach (var item in Draw(core, list, rows, root, remove))
         {
@@ -43,7 +43,7 @@ static class RowCommands
     /// from the row's commands (StartNow while it counts down, ConfirmChoice while it waits for a choice; CancelHeld).
     /// </summary>
     public static CommandEntry.Item[] Held(TransferRow row) =>
-        TrsFfiMethods.RowCommands([row], null, [], null, false, true, App.HostWindows)
+        SeedwellFfiMethods.RowCommands([row], null, [], null, false, true, App.HostWindows)
             .OfType<CommandEntry.Item>()
             .Where(i => i.Command is RowCommand.CancelHeld or RowCommand.StartNow or RowCommand.ConfirmChoice)
             .OrderBy(i => i.Command is RowCommand.CancelHeld ? 1 : 0)
@@ -135,7 +135,7 @@ static class RowCommands
     /// <summary>The Remove question's dialog, not yet shown.</summary>
     internal static ContentDialog RemovalDialog(XamlRoot root, TransferRow[] rows, bool deleteFiles)
     {
-        var q = TrsFfiMethods.RemovalQuestion(rows, deleteFiles);
+        var q = SeedwellFfiMethods.RemovalQuestion(rows, deleteFiles);
         var d = new ContentDialog
         {
             XamlRoot = root,
@@ -150,7 +150,7 @@ static class RowCommands
         Destructive(d);
         d.Opened += (_, _) =>
         {
-            foreach (var b in Descendants(d.XamlRoot).OfType<Button>())
+            foreach (var b in DialogButtons(d))
             {
                 if (Equals(b.Content, q.ConfirmTitle)) ToolTipService.SetToolTip(b, q.ConfirmHelp);
                 else if (Equals(b.Content, q.CancelTitle)) ToolTipService.SetToolTip(b, q.CancelHelp);
@@ -194,6 +194,22 @@ static class RowCommands
     /// <summary>Everything in the open popups (a dialog lives in the popup layer, not under the window's content).</summary>
     internal static IEnumerable<DependencyObject> Descendants(XamlRoot root) =>
         Microsoft.UI.Xaml.Media.VisualTreeHelper.GetOpenPopupsForXamlRoot(root).SelectMany(p => Tree(p.Child));
+
+    /// <summary>
+    /// A dialog's own buttons, without a look at what it shows: they are outside its scrolled content, and each element a walk
+    /// looks at gets a wrapper with memory pressure of its own (full collections, see SettingsPage.Render).
+    /// </summary>
+    internal static IEnumerable<Button> DialogButtons(ContentDialog dialog)
+    {
+        var left = new Stack<DependencyObject>();
+        left.Push(dialog);
+        while (left.TryPop(out var at))
+        {
+            if (at is Button b) yield return b;
+            if (at is ScrollViewer) continue;
+            for (int i = 0; i < Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(at); i++) left.Push(Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(at, i));
+        }
+    }
 
     internal static IEnumerable<DependencyObject> Tree(DependencyObject? o)
     {
@@ -301,15 +317,15 @@ static class RowCommands
             {
                 AppLog.Write($"move refused: {reason}");
             }
-            if (TrsFfiMethods.MoveFailed(r) is SyncAlert alert)
+            if (SeedwellFfiMethods.MoveFailed(r) is SyncAlert alert)
             {
                 app.Alert(alert);
             }
         }
         catch (CoreException e)
         {
-            AppLog.Write($"move failed: {TrsFfiMethods.CoreErrorMessage(e)}");
-            app.Alert(TrsFfiMethods.MoveError(e));
+            AppLog.Write($"move failed: {SeedwellFfiMethods.CoreErrorMessage(e)}");
+            app.Alert(SeedwellFfiMethods.MoveError(e));
         }
         app.Refreshed();
     }

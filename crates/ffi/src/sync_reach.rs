@@ -1,9 +1,9 @@
 //! "Other devices can't reach this PC": whether other devices can dial this computer, and what the user is told and
 //! offered (SPEC §7G.3, *Can other devices reach this one*; the hosts' part: docs/build-76-firewall.md).
 //!
-//! Folder sync decides whether this device is blocked ([`trs_sync_net::Inbound`], from a dial back by a device it
+//! Folder sync decides whether this device is blocked ([`seedwell_sync_net::Inbound`], from a dial back by a device it
 //! reached). While it is, and the system's firewall has rules per program (Windows), the firewall's rule for this app is
-//! read off the UI thread ([`trs_platform::firewall::state`]) and kept for [`FIREWALL_EVERY`]. The notice names the
+//! read off the UI thread ([`seedwell_platform::firewall::state`]) and kept for [`FIREWALL_EVERY`]. The notice names the
 //! reason, and when the rule is missing or a rule blocks Seedwell it carries the one action that helps: the command the
 //! host runs with administrator rights. After it ran, the host calls [`SyncReach::recheck`]: the rule is read again,
 //! the devices dial back again, and the notice goes once either says so.
@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use trs_platform::firewall::{self, Rule, State};
-use trs_sync_net::{Inbound, Network};
+use seedwell_platform::firewall::{self, Rule, State};
+use seedwell_sync_net::{Inbound, Network};
 
 use crate::Core;
 
@@ -32,7 +32,7 @@ pub const FIREWALL_EVERY: Duration = Duration::from_secs(5 * 60);
 /// How long one reading may take (PowerShell starts in about a second; a busy PC takes longer).
 pub const FIREWALL_LIMIT: Duration = Duration::from_secs(20);
 /// After [`SyncReach::recheck`] the new reading of the rule and the devices' new answer are waited for this long at
-/// most (folder sync gives its check up after [`trs_sync_net::inbound::CHECK_LIMIT`]) before a notice says anything
+/// most (folder sync gives its check up after [`seedwell_sync_net::inbound::CHECK_LIMIT`]) before a notice says anything
 /// else.
 pub const RECHECK_LIMIT: Duration = Duration::from_secs(150);
 /// How often the host asks [`SyncReach::model`]; [`REFRESH_SOON_MS`] while something is being read.
@@ -83,7 +83,7 @@ pub(crate) struct Words {
 }
 
 /// This system's words.
-pub(crate) const HERE: Words = Words { computer: trs_platform::COMPUTER, firewall: firewall::NAME, hint: firewall::SETTINGS_HINT };
+pub(crate) const HERE: Words = Words { computer: seedwell_platform::COMPUTER, firewall: firewall::NAME, hint: firewall::SETTINGS_HINT };
 
 /// The notice for `inbound`, with `rule`, the firewall's rules as read (`None`: this system has none to read, or they
 /// are being read), for the program at `exe`. `None` unless this device is blocked. `waiting`: a check asked for after
@@ -297,7 +297,7 @@ impl SyncReach {
 
     /// The QA folder of an isolated run (`<state>/qa`), else `None`.
     fn qa_dir(&self) -> Option<PathBuf> {
-        trs_platform::dirs::in_temp_folder(&self.core.dir).then(|| self.core.dir.join("qa"))
+        seedwell_platform::dirs::in_temp_folder(&self.core.dir).then(|| self.core.dir.join("qa"))
     }
 }
 

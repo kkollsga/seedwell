@@ -6,13 +6,13 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use trs_sync::ondemand::ItemState;
-use trs_sync_net::SyncHandle;
-use trs_sync_net::chat::MessageKind;
-use trs_sync_net::devices::DevicesState;
-use trs_sync_proto::ids::{DeviceId, FolderId};
-use trs_sync_proto::members::{Body, FOLLOW_READ_ONLY, FOLLOW_REMOVED, MAX_FOLLOW_SERIAL, Role, Signer};
-use trs_sync_proto::msg::{FEATURE_DEVICES, FEATURES};
+use seedwell_sync::ondemand::ItemState;
+use seedwell_sync_net::SyncHandle;
+use seedwell_sync_net::chat::MessageKind;
+use seedwell_sync_net::devices::DevicesState;
+use seedwell_sync_proto::ids::{DeviceId, FolderId};
+use seedwell_sync_proto::members::{Body, FOLLOW_READ_ONLY, FOLLOW_REMOVED, MAX_FOLLOW_SERIAL, Role, Signer};
+use seedwell_sync_proto::msg::{FEATURE_DEVICES, FEATURES};
 
 use crate::chat::{at, start_at};
 use crate::utp::{read, until};
@@ -57,7 +57,7 @@ async fn start(state: &Path, name: &str, features: u64) -> SyncHandle {
     start_at(state, name, |o| {
         o.features = features;
         // An isolated run: joined folders go to the state folder, never under the home folder.
-        o.forbidden_root = trs_platform::dirs::home();
+        o.forbidden_root = seedwell_platform::dirs::home();
     })
     .await
 }
@@ -445,17 +445,17 @@ async fn two_removals_made_apart_settle_on_one_group_without_either_removed_devi
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn paired_devices_share_the_rendezvous_and_find_each_other_again_after_a_network_change() {
-    let rv = trs_rendezvous::testkit::fake_rendezvous().await;
+    let rv = seedwell_rendezvous::testkit::fake_rendezvous().await;
     let (a, b) = (Dev::new("Anna's Mac").await, Dev::new("MacBook").await);
     pair(&a, &b).await;
     // A sets one up: B, which has none, takes it and publishes there too.
     a.h.set_rendezvous(&rv.url()).await.unwrap();
     until(20, "B took A's rendezvous", || b.h.rendezvous_status().url == rv.url()).await;
-    let b_record = trs_sync_proto::rendezvous::record_id_hex(&b.id());
+    let b_record = seedwell_sync_proto::rendezvous::record_id_hex(&b.id());
     until(20, "B publishes there", || rv.count("PUT", &format!("/v1/r/{b_record}")) >= 1).await;
     // A pairing link made now says where its maker publishes.
     let (link, _) = a.h.devices_pair_link().await.unwrap();
-    let reach = trs_sync_proto::members::InviteLink::parse_devices(&link).unwrap().reach.unwrap();
+    let reach = seedwell_sync_proto::members::InviteLink::parse_devices(&link).unwrap().reach.unwrap();
     assert_eq!(reach.rendezvous.as_deref(), Some(rv.url().as_str()));
 
     // Off on B only: A keeps it, and B does not take it back by itself.
@@ -475,12 +475,12 @@ async fn paired_devices_share_the_rendezvous_and_find_each_other_again_after_a_n
     shutdown(&[&a, &b]).await;
 }
 
-fn snapshot_folder(d: &Dev, id: &FolderId) -> Option<trs_sync_net::status::FolderStatus> {
+fn snapshot_folder(d: &Dev, id: &FolderId) -> Option<seedwell_sync_net::status::FolderStatus> {
     d.h.snapshot().folders.into_iter().find(|f| f.id == id.to_string())
 }
 
 /// A folder on demand on the device that puts it on all devices comes on demand to a sibling: every file listed,
-/// nothing downloaded until asked for. A device that keeps no folders on demand (Windows today) joins it in full and
+/// nothing downloaded until asked for. A device that keeps no folders on demand (Linux today) joins it in full and
 /// says why. Its owner removing it removes it from Seedwell on every sibling, each keeping its files.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_on_demand_folder_follows_on_demand_and_its_owner_removing_it_removes_it_everywhere() {
@@ -488,14 +488,14 @@ async fn an_on_demand_folder_follows_on_demand_and_its_owner_removing_it_removes
     // B keeps folders on demand wherever the test runs (a Mac's default; not a PC's).
     let mac_state = tempfile::tempdir().unwrap();
     let mac = start_at(mac_state.path(), "MacBook", |o| {
-        o.forbidden_root = trs_platform::dirs::home();
+        o.forbidden_root = seedwell_platform::dirs::home();
         o.on_demand = true;
     })
     .await;
     let b = Dev { h: mac, state: mac_state, name: "MacBook", features: FEATURES };
     let full_state = tempfile::tempdir().unwrap();
     let pc = start_at(full_state.path(), "Studio PC", |o| {
-        o.forbidden_root = trs_platform::dirs::home();
+        o.forbidden_root = seedwell_platform::dirs::home();
         o.on_demand = false;
     })
     .await;
@@ -523,11 +523,11 @@ async fn an_on_demand_folder_follows_on_demand_and_its_owner_removing_it_removes
     let at = b.h.od_fetch(&f, "2026/beach.jpg", Duration::from_secs(30)).await.unwrap().path;
     assert_eq!(read(&at).as_deref(), Some(&b"beach"[..]));
 
-    // The PC keeps no folders on demand: in full, saying why.
+    // A device that keeps no folders on demand (Linux): in full, saying why.
     until(40, "the PC has every file", || read(&pc.sync_dir().join("Photos/big.bin")).is_some_and(|b| b.len() == 1_000_000)).await;
     let st = snapshot_folder(&pc, &f).unwrap();
     assert!(!st.on_demand);
-    assert!(st.issues.iter().any(|(p, why)| p.is_empty() && why == trs_sync_net::FULL_HERE), "{:?}", st.issues);
+    assert!(st.issues.iter().any(|(p, why)| p.is_empty() && why == seedwell_sync_net::FULL_HERE), "{:?}", st.issues);
     // A switch on demand on the owner later is the owner's only: a device that joined keeps its own.
     assert!(a.h.removes_everywhere(&f) && !b.h.removes_everywhere(&f), "only the owner's removal goes everywhere");
 
@@ -561,7 +561,7 @@ async fn files_on_demand_keeps_the_holders_files_in_place_and_a_sibling_gets_pla
     let before = (std::fs::metadata(&src).unwrap().ino(), stamp(&film));
     let c_state = tempfile::tempdir().unwrap();
     let c = start_at(c_state.path(), "Mac mini", |o| {
-        o.forbidden_root = trs_platform::dirs::home();
+        o.forbidden_root = seedwell_platform::dirs::home();
         o.on_demand = true;
     })
     .await;
@@ -630,6 +630,62 @@ async fn the_on_all_my_devices_statement_follows_every_mode_switch_and_every_hol
     until(30, "Anna's Mac has the sibling's statement", || a.h.follow_on_demand(&f) == Some(false)).await;
     assert!(snapshot_folder(&a, &f).is_some_and(|s| !s.on_demand && !s.on_demand_others), "shown from the statement, not this device's mark");
     shutdown(&[&a, &c]).await;
+}
+
+/// The failure: a Follow ("On all my devices") read the group ("is it on already?", the next serial) on one look and
+/// added its statement on another, with no lock across. The user's off, decided and not added yet when their on came,
+/// let the on see "on already" and say nothing: it stayed off after the later on (and two Follows made at once could
+/// share a serial, the device clock then deciding). Forced here: the off is held between its decision and its add
+/// while the on is made. Fails when the later choice does not count, or two of this device's Follows share a serial.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn of_two_on_all_my_devices_changes_at_once_the_later_one_counts() {
+    let (a, b) = (Dev::new("Anna's Mac").await, Dev::new("MacBook").await);
+    let c: FolderId = a.h.chat_new("Team", false).await.unwrap().id.parse().unwrap();
+    pair(&a, &b).await;
+    a.h.set_follow(&c, true).await.unwrap();
+    until(40, "B joined the channel", || b.h.channel_status(&c).is_some_and(|s| s.role == Some(Role::Admin))).await;
+    let g = a.h.test_group_id().unwrap();
+
+    let (decided_tx, decided_rx) = std::sync::mpsc::channel();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    seedwell_sync_net::roles::test_while_deciding(
+        &g,
+        Some(Box::new(move || {
+            decided_tx.send(()).unwrap();
+            let _ = go_rx.recv_timeout(Duration::from_secs(10));
+        })),
+    );
+    let off = tokio::spawn({
+        let h = a.h.clone();
+        async move { h.set_follow(&c, false).await }
+    });
+    let decided = tokio::task::spawn_blocking(move || decided_rx.recv_timeout(Duration::from_secs(10))).await.unwrap();
+    decided.expect("the off decided");
+    let on = tokio::spawn({
+        let h = a.h.clone();
+        async move { h.set_follow(&c, true).await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    go_tx.send(()).unwrap();
+    off.await.unwrap().unwrap();
+    on.await.unwrap().unwrap();
+    seedwell_sync_net::roles::test_while_deciding(&g, None);
+
+    assert!(a.h.follow_state(&c).unwrap().on, "the user's later on did not count");
+    let serials: Vec<u64> = a
+        .h
+        .test_group_statements()
+        .iter()
+        .filter_map(|st| match (&st.body, st.signer) {
+            (Body::Follow { target_pk, serial, .. }, Signer::Device(by)) if DeviceId::of_public_key(&by) == a.id() && FolderId::of_public_key(target_pk) == c => {
+                Some(*serial)
+            }
+            _ => None,
+        })
+        .collect();
+    let unique: std::collections::BTreeSet<u64> = serials.iter().copied().collect();
+    assert!(serials.len() >= 3 && unique.len() == serials.len(), "two Follows share a serial: {serials:?}");
+    shutdown(&[&a, &b]).await;
 }
 
 /// Removed on a sibling that is not its owner, a folder goes from that device only (its files stay there) and does

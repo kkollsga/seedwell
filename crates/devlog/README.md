@@ -1,4 +1,4 @@
-# trs-devlog
+# seedwell-devlog
 
 The developer-mode log of tracker communication (SPEC 8.7). `Settings > Advanced > Developer mode`, or
 `seedwell daemon --dev-mode`.
@@ -7,7 +7,7 @@ The developer-mode log of tracker communication (SPEC 8.7). `Settings > Advanced
 tracker task ──Entry (raw URL)──▶ DevLog::log ──mask──▶ JSON line ──bounded channel──▶ writer thread ──▶ trackers.log (+ .1, .2)
 ```
 
-* **Logging boundary.** `Entry` carries the raw tracker URL; `DevLog::log` masks it (`trs_state::url::mask_secrets_for_log`:
+* **Logging boundary.** `Entry` carries the raw tracker URL; `DevLog::log` masks it (`seedwell_state::url::mask_secrets_for_log`:
   passkey / authkey / torrent_pass / pid ... values, 20+ alphanumeric, 32+ hex and base64-looking path segments, userinfo),
   masks every free text (`mask_text`), masks the `key` field and every credential-named field (also under a
   prefix like `announce.key`), keeps `info_hash` and our `peer_id`, and only then formats the line. The writer and the

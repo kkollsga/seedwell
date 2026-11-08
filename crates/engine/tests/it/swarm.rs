@@ -2,7 +2,7 @@ use crate::common;
 use std::time::{Duration, Instant};
 
 use common::*;
-use trs_engine::*;
+use seedwell_engine::*;
 
 /// 1 seeder + 3 leechers on loopback with a mock tracker: every byte arrives intact.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

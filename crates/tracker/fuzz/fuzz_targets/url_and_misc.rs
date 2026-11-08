@@ -2,8 +2,8 @@
 //! Tracker URL parsing, announce URL building, scrape URL derivation and
 //! Retry-After parsing on arbitrary text.
 use libfuzzer_sys::fuzz_target;
-use trs_tracker::url::{TrackerUrl, build_announce_url};
-use trs_tracker::{AnnounceParams, retry_after, scrape};
+use seedwell_tracker::url::{TrackerUrl, build_announce_url};
+use seedwell_tracker::{AnnounceParams, retry_after, scrape};
 
 fuzz_target!(|data: &[u8]| {
     let Ok(s) = std::str::from_utf8(data) else {

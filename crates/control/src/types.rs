@@ -1029,6 +1029,53 @@ pub struct UpdateStatusDto {
     pub note: String,
 }
 
+/// `restart`: the app quits and opens again (SPEC 9A.10). The answer comes before it quits.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RestartDto {
+    /// What happens, and what the restart interrupts (downloads, a move), as a sentence.
+    pub note: String,
+    /// Where the restart writes what it does (the updater's log).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub log: String,
+    /// The process that quits.
+    #[serde(default)]
+    pub pid: u32,
+    /// When it started answering (Unix ms), as `hello` says: the new run answers with another `pid` or a later one.
+    #[serde(default)]
+    pub started_ms: u64,
+}
+
+/// The torrent proxy (`proxy.*`, SPEC §7H). Never the key: only whether one is installed.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProxyDto {
+    /// Torrents go through the proxy.
+    pub enabled: bool,
+    /// `nordvpn` or `custom`.
+    pub kind: String,
+    /// A custom proxy's host (empty for NordVPN).
+    #[serde(default)]
+    pub host: String,
+    /// A custom proxy's port (0 for NordVPN).
+    #[serde(default)]
+    pub port: u16,
+    /// Where the user is, for the server choice (ISO code; empty: no preference).
+    #[serde(default)]
+    pub country: String,
+    /// A key (username and password) is installed in the system's secret store.
+    pub has_key: bool,
+    /// The server in use (empty: none).
+    #[serde(default)]
+    pub server: String,
+    /// Settings › Network's line ("On · NordVPN · nl.socks.nordhold.net · 84 ms").
+    pub status: String,
+    /// What is wrong, in words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+    /// What the call did, as a sentence.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
 /// One request of an agent for access (`agents.request`, `agents.requests`; SPEC 9A.3 *Asking for access*).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AccessRequestDto {
@@ -1123,6 +1170,12 @@ pub struct HelloDto {
     pub methods: Vec<String>,
     /// Per-connection rate limit, calls per second.
     pub rate_limit_per_sec: u32,
+    /// The server's process id (`restart` waits for another process, or another start of this one, to answer).
+    #[serde(default)]
+    pub pid: u32,
+    /// When this server started answering (Unix ms): a restart's new run has a later one.
+    #[serde(default)]
+    pub started_ms: u64,
 }
 
 /// `settings_get` / `settings_set` result.
@@ -1245,7 +1298,7 @@ pub struct ProcessDto {
     /// Resident memory in bytes (the working set on Windows), when it could be read.
     #[serde(default)]
     pub rss_bytes: Option<u64>,
-    /// CPU percent of one core (trs_platform::proc::SelfStats says over which window on each system).
+    /// CPU percent of one core (seedwell_platform::proc::SelfStats says over which window on each system).
     #[serde(default)]
     pub cpu_percent: Option<f64>,
     /// Threads.
@@ -1494,6 +1547,10 @@ pub struct SyncFolderDto {
     pub need_bytes: u64,
     /// Bytes per second fetched.
     pub rate_in: u64,
+    /// While it syncs: seconds left to fetch what it needs, from a steady rate. Absent before the rate is measured,
+    /// while nothing arrives, under ten seconds left, and when it does not sync.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_secs: Option<u64>,
     /// Bytes per second served.
     pub rate_out: u64,
     /// Devices connected for this folder.
@@ -2013,6 +2070,40 @@ pub struct ChatTopicsDto {
     pub name: String,
     /// Newest activity first (General is not one).
     pub topics: Vec<ChatTopicDto>,
+}
+
+/// A channel in a group (`chat.groups`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ChatGroupChannelDto {
+    /// The channel id.
+    pub id: String,
+    /// Its name on this computer.
+    pub name: String,
+}
+
+/// A group of channels in this Mac's sidebar (`chat.groups`, `chat.group_new`, `chat.group_edit`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ChatGroupDto {
+    /// Its id.
+    pub id: String,
+    /// Its name.
+    pub name: String,
+    /// Its icon (one of `chat.groups`' `icons`).
+    pub icon: String,
+    /// Its place in the order, from 1.
+    pub position: u32,
+    /// The channels open to agents listed under it, by name (the others are not given).
+    #[serde(default)]
+    pub channels: Vec<ChatGroupChannelDto>,
+}
+
+/// `chat.groups` result.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ChatGroupsDto {
+    /// In the sidebar's order.
+    pub groups: Vec<ChatGroupDto>,
+    /// The icons a group can have.
+    pub icons: Vec<String>,
 }
 
 /// One private conversation (`chat.dm_list`).

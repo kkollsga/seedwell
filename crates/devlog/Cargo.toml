@@ -1,5 +1,5 @@
 [package]
-name = "trs-devlog"
+name = "seedwell-devlog"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,9 +8,9 @@ publish = false
 description = "Developer-mode log of tracker communication: masked JSON lines, bounded off-thread writer, rotation, readers"
 
 [dependencies]
-trs-platform = { path = "../platform" }
+seedwell-platform = { path = "../platform" }
 # The one masking implementation (`mask_secrets_for_log`, `mask_text`).
-trs-state = { path = "../state" }
+seedwell-state = { path = "../state" }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 
 [dev-dependencies]

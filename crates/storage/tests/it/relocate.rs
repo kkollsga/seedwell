@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use common::*;
-use trs_storage::{
+use seedwell_storage::{
     CancelToken, DiskConfig, DiskIo, FilePath, Location, Mode, PieceSet, RecoverState,
     RelocateMethod, RelocateOptions, StorageError, TorrentConfig, TorrentHandle, WriteAck,
 };
@@ -21,7 +21,7 @@ trait WaitFast<T> {
     fn wait_fast(self) -> Result<T, StorageError>;
 }
 
-impl<T> WaitFast<T> for trs_storage::Pending<T> {
+impl<T> WaitFast<T> for seedwell_storage::Pending<T> {
     fn wait_fast(self) -> Result<T, StorageError> {
         self.wait_timeout(Duration::from_secs(60))
             .expect("relocate reply never arrived (hung job)")
@@ -105,7 +105,7 @@ impl Fx {
         assert!(!self.base.join("lib").exists() || walk(&self.base.join("lib")).is_empty());
         let parts: Vec<_> = walk(&self.base)
             .into_iter()
-            .filter(|p| p.to_string_lossy().ends_with(".trs-part"))
+            .filter(|p| p.to_string_lossy().ends_with(".seedwell-part"))
             .collect();
         assert!(parts.is_empty(), "{parts:?}");
     }
@@ -122,7 +122,7 @@ impl Fx {
         assert!(!self.journal().exists());
         let parts: Vec<_> = walk(&self.base)
             .into_iter()
-            .filter(|p| p.to_string_lossy().ends_with(".trs-part"))
+            .filter(|p| p.to_string_lossy().ends_with(".seedwell-part"))
             .collect();
         assert!(parts.is_empty(), "{parts:?}");
     }
@@ -681,10 +681,10 @@ fn foreign_or_garbage_journal() {
     let f = fx();
     let io = disk();
     let h = f.handle(&io);
-    std::fs::write(f.journal(), b"TRSR\x01garbage-garbage-garbage").unwrap();
+    std::fs::write(f.journal(), b"SWRJ\x01garbage-garbage-garbage").unwrap();
     assert!(matches!(h.relocate_recover(&f.journal()), Err(StorageError::CorruptJournal)));
     // A header-only (torn at creation) journal means nothing happened.
-    std::fs::write(f.journal(), b"TRSR").unwrap();
+    std::fs::write(f.journal(), b"SWRJ").unwrap();
     assert_eq!(h.relocate_recover(&f.journal()).unwrap().state, RecoverState::Nothing);
     assert!(!f.journal().exists());
 }
@@ -857,7 +857,7 @@ impl Image {
         if cfg!(not(target_os = "macos")) {
             return None;
         }
-        let img = dir.join("trsreloc.dmg");
+        let img = dir.join("seedwellreloc.dmg");
         let mnt = dir.join("mnt");
         std::fs::create_dir_all(&mnt).ok()?;
         let run = |args: &[&str]| {
@@ -873,7 +873,7 @@ impl Image {
             "-fs",
             "APFS",
             "-volname",
-            "trsreloc",
+            "seedwellreloc",
             "-ov",
             img.to_str()?,
         ])
@@ -933,7 +933,7 @@ fn real_cross_device_relocation_onto_a_disk_image() {
     std::fs::remove_file(&probe).unwrap();
     let dst = img.mnt.join("Library").join("TV");
     assert!(
-        !trs_storage::same_volume(&f.src, &dst).unwrap(),
+        !seedwell_storage::same_volume(&f.src, &dst).unwrap(),
         "image must be a different volume"
     );
     let io = disk();
@@ -982,7 +982,7 @@ fn real_cross_device_relocation_onto_a_disk_image() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-#[ignore = "benchmark: cargo test --release -p trs-storage --test relocate -- --ignored --nocapture"]
+#[ignore = "benchmark: cargo test --release -p seedwell-storage --test relocate -- --ignored --nocapture"]
 fn bench_relocate() {
     // 1. Same-volume rename throughput.
     {
@@ -1337,4 +1337,60 @@ fn a_file_held_open_by_another_program_ends_the_move_as_locked() {
         assert_eq!(std::fs::read(&p).unwrap(), f.s.file_bytes(i), "{p:?} must be back");
     }
     assert!(!f.journal().exists());
+}
+
+/// What a version from before the 2026-11-07 rename of the internal names left on disk: the
+/// journal's magic and the partial copy's suffix.
+const PRE_RENAME_JOURNAL_MAGIC: &[u8; 4] = b"TRSR";
+const PRE_RENAME_PART_SUFFIX: &str = ".trs-part";
+
+/// Fails if a copying move cut off by a crash before the 2026-11-07 rename cannot be undone after the
+/// update: its journal has the old magic (refused as corrupt, the torrent stuck between two places) or
+/// its partial copies have the old suffix (left behind at the destination, or taken by the rollback as
+/// "already published" when they are not). Every crash point of the copy path, rolled back.
+#[test]
+fn move_cut_off_before_the_rename_is_rolled_back_after_the_update() {
+    let mut with_parts = 0;
+    for k in 0u32.. {
+        let f = fx();
+        let io = disk();
+        let h = f.handle(&io);
+        let mut o = opts(&f.s);
+        o.force_copy = true;
+        o.fault = Some(Arc::new(move |step| step < k));
+        match h.relocate_prepare(f.journal(), f.plan(&h), o).unwrap().wait_fast() {
+            Err(StorageError::Interrupted) => {}
+            Ok(_) => break,
+            Err(e) => panic!("step {k}: {e}"),
+        }
+        drop(h);
+        drop(io);
+        if let Ok(mut j) = std::fs::read(f.journal())
+            && j.len() >= 4
+        {
+            j[..4].copy_from_slice(PRE_RENAME_JOURNAL_MAGIC);
+            std::fs::write(f.journal(), j).unwrap();
+        }
+        let parts: Vec<PathBuf> =
+            walk(&f.base).into_iter().filter(|p| p.to_string_lossy().ends_with(".seedwell-part")).collect();
+        for p in &parts {
+            let old = PathBuf::from(p.to_string_lossy().replace(".seedwell-part", PRE_RENAME_PART_SUFFIX));
+            std::fs::rename(p, old).unwrap();
+        }
+        with_parts += usize::from(!parts.is_empty());
+
+        let io2 = disk();
+        let h2 = f.handle(&io2);
+        let rec = h2
+            .relocate_recover(&f.journal())
+            .unwrap_or_else(|e| panic!("step {k}: a journal from before the rename was refused: {e}"));
+        if rec.state != RecoverState::Nothing {
+            h2.relocate_rollback(f.journal()).unwrap().wait_fast().unwrap();
+        }
+        f.assert_original();
+        let old: Vec<PathBuf> =
+            walk(&f.base).into_iter().filter(|p| p.to_string_lossy().ends_with(PRE_RENAME_PART_SUFFIX)).collect();
+        assert!(old.is_empty(), "step {k}: partial copies from before the rename left behind: {old:?}");
+    }
+    assert!(with_parts > 0, "no crash point left a partial copy");
 }

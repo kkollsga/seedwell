@@ -10,10 +10,10 @@ use std::io::IsTerminal;
 use std::time::Duration;
 
 use serde_json::Value;
-use trs_control::client::Client;
-use trs_control::human;
-use trs_control::proto::*;
-use trs_control::types::*;
+use seedwell_control::client::Client;
+use seedwell_control::human;
+use seedwell_control::proto::*;
+use seedwell_control::types::*;
 
 use crate::args::{Opts, Usage};
 use crate::cmd::{LogArgs, parse_log_args};

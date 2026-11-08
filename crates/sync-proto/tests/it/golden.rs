@@ -9,18 +9,18 @@
 //! Then the rules for what later versions may send: appended fields, records that grew, kinds and values this
 //! version does not know, and a peer with a newer protocol and features.
 
-use trs_sync_proto::chat::{AuthorHave, ChatMessage, Draft, MessageKind};
-use trs_sync_proto::direct::{DirectBody, DirectDraft, DirectKey, DirectMessage, secret_of};
-use trs_sync_proto::codec::{DecodeError, Frame, Reader};
-use trs_sync_proto::device::DeviceKey;
-use trs_sync_proto::ids::{DeviceId, FolderId, ShortId};
-use trs_sync_proto::keys::{FolderSecret, KeyError, Proof};
-use trs_sync_proto::members::{
+use seedwell_sync_proto::chat::{AuthorHave, ChatMessage, Draft, MessageKind};
+use seedwell_sync_proto::direct::{DirectBody, DirectDraft, DirectKey, DirectMessage, secret_of};
+use seedwell_sync_proto::codec::{DecodeError, Frame, Reader};
+use seedwell_sync_proto::device::DeviceKey;
+use seedwell_sync_proto::ids::{DeviceId, FolderId, ShortId};
+use seedwell_sync_proto::keys::{FolderSecret, KeyError, Proof};
+use seedwell_sync_proto::members::{
     Body, CHANNEL_AGENTS, FOLLOW_ON_DEMAND, FOLLOW_REMOVED, FollowTarget, Invite, InviteLink, Membership, Role, Signer, Statement, check_redeem, new_invite, redeem_proof,
 };
-use trs_sync_proto::model::{ChunkRef, Counter, FileInfo, FileKind, IndexEntry, SignedFile, Version};
-use trs_sync_proto::msg::*;
-use trs_sync_proto::reach::LinkReach;
+use seedwell_sync_proto::model::{ChunkRef, Counter, FileInfo, FileKind, IndexEntry, SignedFile, Version};
+use seedwell_sync_proto::msg::*;
+use seedwell_sync_proto::reach::LinkReach;
 
 const T: u64 = 1_793_491_200; // 2026-11-01
 
@@ -519,7 +519,7 @@ fn records_that_grew_are_read_and_ones_with_unknown_values_skipped() {
     let e = |seq| entry(seq, "a.txt", FileKind::File, false);
     Message::Index(Index { folder_id: fid(), index_id: 1, full: false, entries: vec![e(1), e(2), e(3)], done: false }).encode_payload(&mut idx);
     let mut bare = Vec::new();
-    trs_sync_proto::msg::encode_entry(&mut bare, 2, false, &e(2).file);
+    seedwell_sync_proto::msg::encode_entry(&mut bare, 2, false, &e(2).file);
     let kind_at = 1 + 1 + 1 + "a.txt".len(); // sequence, flags, path length, path
     assert_eq!(bare[kind_at], 0, "the kind byte of a file");
     let at = idx.windows(bare.len()).position(|w| w == bare).unwrap();
@@ -687,13 +687,13 @@ fn a_bundled_channel_part_that_is_damaged_or_the_folder_itself_spoils_the_link()
 fn links_and_invitations_of_a_later_version_say_update() {
     let text = link().format();
     let body = text.strip_prefix("seedwell://sync/").unwrap().split('?').next().unwrap();
-    let mut bytes = trs_sync_proto::base32::decode(body).unwrap();
+    let mut bytes = seedwell_sync_proto::base32::decode(body).unwrap();
     bytes[0] = 2;
     // A good check over the new bytes, as a newer Seedwell would write it.
     let n = bytes.len() - 2;
     let d = ring::digest::digest(&ring::digest::SHA256, &[b"seedwell-sync/v2/link".as_slice(), &bytes[..n]].concat());
     bytes[n..].copy_from_slice(&d.as_ref()[..2]);
-    let newer = format!("seedwell://sync/{}", trs_sync_proto::base32::encode(&bytes));
+    let newer = format!("seedwell://sync/{}", seedwell_sync_proto::base32::encode(&bytes));
     assert_eq!(InviteLink::parse(&newer), Err(KeyError::Newer));
     assert!(KeyError::Newer.to_string().contains("newer Seedwell"));
     // An invitation of a later version inside a proof is not read.

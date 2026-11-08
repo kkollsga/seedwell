@@ -77,8 +77,8 @@ admins: the owner needs this build for Read only to apply.
 
 ## What to check on the PC
 
-- `app-windows\qa\run.ps1 all -Build -CoreProfile Debug` (the core's own tests cover the roles: `trs-sync-net`'s
-  `read_only_*` tests, the dialog words in `trs-ffi`).
+- `app-windows\qa\run.ps1 all -Build -CoreProfile Debug` (the core's own tests cover the roles: `seedwell-sync-net`'s
+  `read_only_*` tests, the dialog words in `seedwell-ffi`).
 - With the PC paired to the Mac: Edit Folder on a folder of the PC's, *On all my devices* on, *Read only* on, Save;
   the Mac's members list of that folder shows the Mac at Read only, and a file made on the Mac does not reach the PC.
   Read only off: the Mac is an admin again.

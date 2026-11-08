@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use trs_control::proto::*;
-use trs_control::types::*;
+use seedwell_control::proto::*;
+use seedwell_control::types::*;
 
 use crate::args::{Opts, Usage};
 use crate::chat::{agent_name, ch, computer, first_group, label, lost, mentions, person, project_topic, stdin_text, time_s};
@@ -91,7 +91,7 @@ pub fn sub_help(sub: &str) -> Option<String> {
         ),
         "tag" => ("tag <id> [TAG...] [--remove TAG]... [--clear]", "Your tags on a mail or any message of the channel: seen, actioned, backlog, needs-triage, or a word of your own. They are yours: everyone sees who tagged what (`mail inbox`, the app), and nobody else's change. Showing a mail in your inbox tags it seen for you, so its sender sees that. `mail inbox --tag backlog` lists what you tagged so. With no tags given: the tags on it, by owner.\n\nExample:\n  seedwell mail tag 0392ba7c backlog\n  seedwell mail tag 0392ba7c actioned --remove backlog"),
         "receive" => ("receive <id> --to DIR [--wait S] [--force]", "Takes the files a mail passed to you (send --pass): checks each sha256, copies them into DIR (any folder, made if missing; a different file of the same name is kept unless --force) and deletes them from the pass-through folder, which removes them on both computers (and keeps no archive copy). Not all there yet (still syncing): it says which, exit 6; --wait waits for them. The mail is tagged received for you, so its sender sees that."),
-        "passes" => ("passes [--clean [--older D]]", concat!("The passes still waiting in the Seedwell Pass-Through folders of this ", trs_platform::computer!(), "'s synced folders (to whom, from whom, how big, how old). --clean removes those older than a week (--older 1d: sooner, --older 0: all); a pass is a copy, its original stays with its sender.")),
+        "passes" => ("passes [--clean [--older D]]", concat!("The passes still waiting in the Seedwell Pass-Through folders of this ", seedwell_platform::computer!(), "'s synced folders (to whom, from whom, how big, how old). --clean removes those older than a week (--older 1d: sooner, --older 0: all); a pass is a copy, its original stays with its sender.")),
         "read" => ("read <id> [--full] [--save DIR]", "One mail in full, with its statuses and replies; attached files are listed (--full shows them). --save DIR writes the files and checks each sha256, and prints only that. Reading an answer or an update counts it as seen: it leaves your inbox and stays under `mail sent <your mail>`."),
         "reply" => (
             "reply <id> [--final | --done <status> | --type request|question] [--attach FILE]... [--pass FILE]... -|<text>",
@@ -275,7 +275,7 @@ fn none_left(o: Opts, usage: &str) -> Result<(), Usage> {
 
 // ----------------------------------------------------------------------------- the header
 
-pub use trs_control::mail::{Header, format_mail, parse_header};
+pub use seedwell_control::mail::{Header, format_mail, parse_header};
 
 /// One line for a mail that has no summary: its first heading or line, without Markdown marks, at most 200 characters.
 pub fn summary_of(body: &str) -> String {
@@ -291,7 +291,7 @@ fn clip(s: &str, n: usize) -> String {
 
 // ----------------------------------------------------------------------------- attachments
 
-/// The longest text message, in bytes (the channel's limit, `trs_sync_proto::chat::MAX_TEXT`).
+/// The longest text message, in bytes (the channel's limit, `seedwell_sync_proto::chat::MAX_TEXT`).
 pub const MAX_MAIL: usize = 16 * 1024;
 
 /// A file in a mail: a fenced block whose info string says `file=<name> sha256=<hex> bytes=<n>` (and
@@ -559,7 +559,7 @@ fn is_seen(m: &ChatMessageDto) -> bool {
 }
 
 /// Tags `item` (in `me`'s inbox) `seen` for `me`, unless it has the tag already: its sender's `sent` then says so.
-async fn mark_seen(c: &mut trs_control::client::Client, channel: &str, me: &str, item: &ChatMessageDto, msgs: &[ChatMessageDto]) {
+async fn mark_seen(c: &mut seedwell_control::client::Client, channel: &str, me: &str, item: &ChatMessageDto, msgs: &[ChatMessageDto]) {
     if by(item, me) || !in_thread(item, me) {
         return;
     }
@@ -868,7 +868,7 @@ fn tags_line(me: &str, id: &str, msgs: &[ChatMessageDto]) -> Option<String> {
 
 /// Passes `files` to `to` through the synced folder that goes with the channel (or `via`): the pass and the
 /// folder's name; `None` when there are none.
-async fn pass_files(c: &mut trs_control::client::Client, channel: &ChatChannelDto, to: &str, me: &str, files: &[String], via: Option<&str>) -> R<Option<(crate::pass::Pass, String)>> {
+async fn pass_files(c: &mut seedwell_control::client::Client, channel: &ChatChannelDto, to: &str, me: &str, files: &[String], via: Option<&str>) -> R<Option<(crate::pass::Pass, String)>> {
     if files.is_empty() {
         return Ok(None);
     }
@@ -892,7 +892,7 @@ fn pass_state(header: &str, m: &ChatMessageDto, folders: &[SyncFolderDto], all: 
     if crate::tags::of_agent(&m.id, &to, all).iter().any(|t| t == "received") {
         return format!("pass: received by {to}, and removed");
     }
-    let Some(f) = folders.iter().find(|f| f.id == p.folder) else { return concat!("pass: in a synced folder this ", trs_platform::computer!(), " no longer has").into() };
+    let Some(f) = folders.iter().find(|f| f.id == p.folder) else { return concat!("pass: in a synced folder this ", seedwell_platform::computer!(), " no longer has").into() };
     let dir = PathBuf::from(&f.path).join(&p.rel);
     if !dir.exists() {
         return format!("pass: removed from {} (taken, or cleaned up)", f.name);
@@ -904,7 +904,7 @@ fn pass_state(header: &str, m: &ChatMessageDto, folders: &[SyncFolderDto], all: 
 }
 
 /// Takes back a pass whose mail could not be sent.
-async fn unpass(c: &mut trs_control::client::Client, passed: &Option<(crate::pass::Pass, String)>) {
+async fn unpass(c: &mut seedwell_control::client::Client, passed: &Option<(crate::pass::Pass, String)>) {
     let Some((p, _)) = passed else { return };
     if let Ok((all, ..)) = crate::pass::folders(c).await
         && let Some(f) = all.iter().find(|f| f.id == p.folder)
@@ -919,7 +919,7 @@ async fn unpass(c: &mut trs_control::client::Client, passed: &Option<(crate::pas
 
 /// Whether `project` is around, in words: its last own activity, whether its computers are online, and whether its
 /// mail hook tells its next session ("last active 09:27 on Studio Mac (online); its mail hook tells its next session").
-async fn presence(c: &mut trs_control::client::Client, channel: &ChatChannelDto, project: &str, msgs: &[ChatMessageDto]) -> String {
+async fn presence(c: &mut seedwell_control::client::Client, channel: &ChatChannelDto, project: &str, msgs: &[ChatMessageDto]) -> String {
     let Ok((t, _)) = project_topic(c, &channel.id, project, None).await else { return String::new() };
     let known = known_projects(&t, msgs);
     let Some(k) = known.iter().find(|k| k.name.eq_ignore_ascii_case(project)) else { return format!("no project {project} has used {} yet", channel.name) };
@@ -960,7 +960,7 @@ pub async fn run(m: Mail, g: &Global) -> R {
             if matches!(action, Hook::Install | Hook::Uninstall) {
                 let on = action == Hook::Install;
                 let register = async {
-                    let mut c = tokio::time::timeout(Duration::from_secs(1), trs_control::client::Client::connect(&g.socket, &g.client)).await.ok()?.ok()?;
+                    let mut c = tokio::time::timeout(Duration::from_secs(1), seedwell_control::client::Client::connect(&g.socket, &g.client)).await.ok()?.ok()?;
                     let (_, l): (_, ChatListDto) = ask(&mut c, Request::ChatList(Empty {})).await.ok()?;
                     let channel = pick_channel(&l.channels, given.as_deref()).ok()?;
                     let topic = project_topic(&mut c, &channel.id, &me, Some(&me)).await.ok()?.1;
@@ -1192,7 +1192,7 @@ pub async fn run(m: Mail, g: &Global) -> R {
             }
             let (all, ..) = crate::pass::folders(&mut c).await?;
             let Some(f) = all.iter().find(|f| f.id == pass.folder) else {
-                return Err(CliError::plain(3, format!(concat!("the files are in a synced folder this ", trs_platform::computer!(), " does not have ({}); the user can join it here, then run this again"), first_group(&pass.folder))));
+                return Err(CliError::plain(3, format!(concat!("the files are in a synced folder this ", seedwell_platform::computer!(), " does not have ({}); the user can join it here, then run this again"), first_group(&pass.folder))));
             };
             let end = wait.map(|s| std::time::Instant::now() + Duration::from_secs(s));
             let got = loop {
@@ -1810,13 +1810,13 @@ pub fn export_md(m: &ChatMessageDto, all: &[ChatMessageDto]) -> String {
 
 /// How many messages in General this agent has not read, without moving its place there.
 /// `None`: it could not tell.
-async fn general_new(c: &mut trs_control::client::Client, channel: &str, me: &str) -> Option<usize> {
+async fn general_new(c: &mut seedwell_control::client::Client, channel: &str, me: &str) -> Option<usize> {
     let req = ChatReadParams { channel: channel.to_string(), topic: Some("general".into()), unread_for: Some(me.to_string()), last: Some(1000), peek: true, since: None };
     ask::<ChatMessagesDto>(c, Request::ChatRead(req)).await.ok().map(|(_, l)| l.messages.len())
 }
 
 /// The channel's messages (the newest 1000), oldest first.
-async fn read_all(c: &mut trs_control::client::Client, channel: &str) -> R<Vec<ChatMessageDto>> {
+async fn read_all(c: &mut seedwell_control::client::Client, channel: &str) -> R<Vec<ChatMessageDto>> {
     let (_, l): (_, ChatMessagesDto) = ask(c, Request::ChatRead(ChatReadParams { channel: channel.to_string(), last: Some(1000), ..Default::default() })).await?;
     Ok(l.messages)
 }
@@ -1836,7 +1836,7 @@ fn find<'a>(msgs: &'a [ChatMessageDto], id: &str) -> Result<&'a ChatMessageDto, 
 }
 
 /// Posts a status on `item` in `me`'s inbox (`done`: closes it); its short id.
-async fn close(c: &mut trs_control::client::Client, channel: &str, me: &str, item: &ChatMessageDto, status: &str, done: bool) -> R<String> {
+async fn close(c: &mut seedwell_control::client::Client, channel: &str, me: &str, item: &ChatMessageDto, status: &str, done: bool) -> R<String> {
     let to = item.agent.clone().unwrap_or_else(|| item.author_name.clone());
     let h = Header {
         to: Some(to).filter(|t| !t.is_empty()),
@@ -1865,21 +1865,21 @@ fn place(me: &str, what: &str) -> String {
 }
 
 /// The ids of what the project had not been shown yet (its `mail` place moves past them).
-async fn given_ids(c: &mut trs_control::client::Client, channel: &str, me: &str) -> R<HashSet<String>> {
+async fn given_ids(c: &mut seedwell_control::client::Client, channel: &str, me: &str) -> R<HashSet<String>> {
     let (_, l): (_, ChatMessagesDto) =
         ask(c, Request::ChatRead(ChatReadParams { channel: channel.to_string(), last: Some(1000), unread_for: Some(place(me, "mail")), ..Default::default() })).await?;
     Ok(l.messages.into_iter().map(|m| m.id).collect())
 }
 
 /// Counts what is pending at the project's place `what` as seen (moves the place past it).
-async fn seen(c: &mut trs_control::client::Client, channel: &str, me: &str, what: &str) {
+async fn seen(c: &mut seedwell_control::client::Client, channel: &str, me: &str, what: &str) {
     let req = ChatReadParams { channel: channel.to_string(), last: Some(1000), unread_for: Some(place(me, what)), ..Default::default() };
     let _ = ask::<ChatMessagesDto>(c, Request::ChatRead(req)).await;
 }
 
 /// What is new for the project since its place `what` (`mail` or `hook`), and the channel's messages.
 /// With `peek`, the place stays where it is.
-async fn new_mail(c: &mut trs_control::client::Client, channel: &str, me: &str, what: &str, peek: bool) -> R<(Vec<ChatMessageDto>, Vec<ChatMessageDto>)> {
+async fn new_mail(c: &mut seedwell_control::client::Client, channel: &str, me: &str, what: &str, peek: bool) -> R<(Vec<ChatMessageDto>, Vec<ChatMessageDto>)> {
     let (_, l): (_, ChatMessagesDto) =
         ask(c, Request::ChatRead(ChatReadParams { channel: channel.to_string(), last: Some(1000), unread_for: Some(place(me, what)), peek, ..Default::default() })).await?;
     if l.messages.is_empty() {
@@ -1894,7 +1894,7 @@ async fn new_mail(c: &mut trs_control::client::Client, channel: &str, me: &str, 
 
 /// Waits for new mail for the project (in its inbox, or a status or answer to what it sent), prints all of it and
 /// stops; exit 6 when `timeout` runs out. A lost connection is taken up again by itself.
-async fn watch(mut c: trs_control::client::Client, g: &Global, me: &str, channel: &ChatChannelDto, timeout: Option<Duration>, receipts: bool) -> R {
+async fn watch(mut c: seedwell_control::client::Client, g: &Global, me: &str, channel: &ChatChannelDto, timeout: Option<Duration>, receipts: bool) -> R {
     let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
     let timed_out = || CliError::plain(6, "timed out: no new mail came in time");
     // One watch of a project's mail at a time: a second would print the same mail and move the place under the first.
@@ -1951,7 +1951,7 @@ async fn watch(mut c: trs_control::client::Client, g: &Global, me: &str, channel
             if deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
                 return Err(timed_out());
             }
-            if let Ok(c) = trs_control::client::Client::connect(&g.socket, &g.client).await {
+            if let Ok(c) = seedwell_control::client::Client::connect(&g.socket, &g.client).await {
                 break c;
             }
         };
@@ -2036,7 +2036,7 @@ fn files_hint(m: &ChatMessageDto) {
 }
 
 /// Lets events come in for `window` (what arrives together is then handled together).
-async fn settle(c: &mut trs_control::client::Client, window: Duration) -> R {
+async fn settle(c: &mut seedwell_control::client::Client, window: Duration) -> R {
     let end = tokio::time::Instant::now() + window;
     while let Some(left) = end.checked_duration_since(tokio::time::Instant::now()).filter(|l| !l.is_zero()) {
         if c.next_event(left).await?.is_none() {
@@ -2048,7 +2048,7 @@ async fn settle(c: &mut trs_control::client::Client, window: Duration) -> R {
 
 /// Moves the project's place `what` past what is pending there, but only when all of it was `printed`: otherwise
 /// it stays, so nothing is hidden.
-async fn seen_if_shown(c: &mut trs_control::client::Client, channel: &str, me: &str, what: &str, printed: &HashSet<String>) -> R {
+async fn seen_if_shown(c: &mut seedwell_control::client::Client, channel: &str, me: &str, what: &str, printed: &HashSet<String>) -> R {
     let (pending, _) = new_mail(c, channel, me, what, true).await?;
     if pending.iter().all(|m| printed.contains(&m.id)) {
         seen(c, channel, me, what).await;
@@ -2088,7 +2088,7 @@ fn print_news(g: &Global, me: &str, m: &ChatMessageDto, all: &[ChatMessageDto]) 
 /// Waits until `id` (a mail of the channel) has an answer or a status (from `of` only, when given), then prints them
 /// (a moment more, so an answer and its status come together) and stops; exit 6 when `timeout` runs out.
 #[allow(clippy::too_many_arguments)]
-async fn watch_for(mut c: trs_control::client::Client, g: &Global, me: &str, channel: &ChatChannelDto, id: &str, of: Option<&str>, timeout: Option<Duration>, receipts: bool) -> R {
+async fn watch_for(mut c: seedwell_control::client::Client, g: &Global, me: &str, channel: &ChatChannelDto, id: &str, of: Option<&str>, timeout: Option<Duration>, receipts: bool) -> R {
     let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
     let first = read_all(&mut c, &channel.id).await?;
     let t = find(&first, id)?;
@@ -2147,7 +2147,7 @@ async fn watch_for(mut c: trs_control::client::Client, g: &Global, me: &str, cha
 /// `new_only`, only when something came since it last told.
 async fn check(g: &Global, me: &str, given: Option<&str>, new_only: bool) {
     let work = async {
-        let mut c = tokio::time::timeout(Duration::from_secs(1), trs_control::client::Client::connect(&g.socket, &g.client)).await.ok()?.ok()?;
+        let mut c = tokio::time::timeout(Duration::from_secs(1), seedwell_control::client::Client::connect(&g.socket, &g.client)).await.ok()?.ok()?;
         let (_, l): (_, ChatListDto) = ask(&mut c, Request::ChatList(Empty {})).await.ok()?;
         let channel = pick_channel(&l.channels, given).ok()?;
         let _ = project_topic(&mut c, &channel.id, me, Some(me)).await;
@@ -2782,8 +2782,8 @@ mod tests {
     fn a_folder_name_nobody_uses_is_not_taken_for_a_project() {
         let k = |n: &str| Known { name: n.into(), open: 0, computers: vec![], last_at: None, inbox: true, hooks: vec![] };
         let known = [k("kglite"), k("mcp-servers"), k("codingest")];
-        let why = identity_problem("TorrentRS", &known, "Koding").unwrap();
-        assert!(why.starts_with("You would post as TorrentRS (the folder ") && why.contains("no project of that name is known in Koding (known: kglite, mcp-servers, codingest). Pass --as NAME"), "{why}");
+        let why = identity_problem("Movies", &known, "Koding").unwrap();
+        assert!(why.starts_with("You would post as Movies (the folder ") && why.contains("no project of that name is known in Koding (known: kglite, mcp-servers, codingest). Pass --as NAME"), "{why}");
         assert!(identity_problem("KGLite", &known, "Koding").is_none(), "a known project, any case");
         assert!(identity_problem("anything", &[], "Koding").is_none(), "nobody known yet: the first project");
         assert!(identity_problem("kglit", &known, "Koding").unwrap().contains("Did you mean --as kglite?"));

@@ -26,10 +26,11 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, watch};
-use trs_sync_net::SyncHandle;
-use trs_sync_net::chat::{AgentAccess, ChannelStatus, MessageKind};
-use trs_sync_proto::members::Role;
-use trs_sync_proto::ids::FolderId;
+use seedwell_sync_net::SyncHandle;
+use seedwell_sync_net::chat::{AgentAccess, ChannelStatus, MessageKind};
+use seedwell_sync_net::chat_groups::ChatGroupStatus;
+use seedwell_sync_proto::members::Role;
+use seedwell_sync_proto::ids::FolderId;
 
 use super::{Conn, Ctx, Reply, reply};
 use crate::backend::Backend;
@@ -63,8 +64,8 @@ pub(super) fn message_visible(h: &SyncHandle, m: &Value) -> bool {
 }
 
 /// What `chat.send` and `chat.dm_send` attach: images given as bytes, and files on this computer by their full paths.
-fn attachments_of(uploads: &[crate::proto::ChatAttachmentUpload], files: &[String], json: bool) -> Result<Vec<trs_sync_net::chat::NewAttachment>, ApiError> {
-    use trs_sync_net::chat::{NewAttachment, NewImage};
+fn attachments_of(uploads: &[crate::proto::ChatAttachmentUpload], files: &[String], json: bool) -> Result<Vec<seedwell_sync_net::chat::NewAttachment>, ApiError> {
+    use seedwell_sync_net::chat::{NewAttachment, NewImage};
     if uploads.is_empty() && files.is_empty() {
         return Ok(Vec::new());
     }
@@ -73,8 +74,8 @@ fn attachments_of(uploads: &[crate::proto::ChatAttachmentUpload], files: &[Strin
     }
     let mut out = Vec::with_capacity(uploads.len() + files.len());
     for a in uploads {
-        let bytes = crate::b64::decode(&a.base64, trs_media::MAX_IMAGE)
-            .ok_or_else(|| ApiError::params(format!("`{}`: not valid base64, or larger than {}", clip(&a.name, 100), trs_media::size_text(trs_media::MAX_IMAGE as u64))))?;
+        let bytes = crate::b64::decode(&a.base64, seedwell_media::MAX_IMAGE)
+            .ok_or_else(|| ApiError::params(format!("`{}`: not valid base64, or larger than {}", clip(&a.name, 100), seedwell_media::size_text(seedwell_media::MAX_IMAGE as u64))))?;
         out.push(NewAttachment::Image(NewImage { name: a.name.clone(), bytes }));
     }
     for f in files {
@@ -88,29 +89,29 @@ fn attachments_of(uploads: &[crate::proto::ChatAttachmentUpload], files: &[Strin
 
 /// Where a call about a message's attachment goes: a channel open to agents, or (`device`) the private conversation
 /// with a device while the Mac lets agents read private messages. Its place, the channel's id, and its name.
-fn place_for(h: &SyncHandle, channel: &str, device: Option<&str>, what: &str) -> Result<(trs_sync_net::room::Place, Option<String>, String), ApiError> {
+fn place_for(h: &SyncHandle, channel: &str, device: Option<&str>, what: &str) -> Result<(seedwell_sync_net::room::Place, Option<String>, String), ApiError> {
     match device {
         Some(d) => {
             direct_allow(h, AgentAccess::Read, what)?;
             let dev = pick_device(h, d)?;
             let name = h.chat_directs().into_iter().find(|x| x.device == dev).map(|x| x.name).filter(|n| !n.is_empty()).unwrap_or_else(|| short(&dev.to_string()).to_string());
-            Ok((trs_sync_net::room::Place::Direct(dev), None, format!("the private conversation with {name}")))
+            Ok((seedwell_sync_net::room::Place::Direct(dev), None, format!("the private conversation with {name}")))
         }
         None => {
             let (c, id) = pick(h, channel)?;
-            Ok((trs_sync_net::room::Place::Channel(id), Some(c.id), format!("channel {}", c.name)))
+            Ok((seedwell_sync_net::room::Place::Channel(id), Some(c.id), format!("channel {}", c.name)))
         }
     }
 }
 
 /// What a file's state says, for people.
 fn file_note(a: &crate::types::ChatAttachmentDto, place: &str) -> String {
-    let size = trs_media::size_text(a.size);
+    let size = seedwell_media::size_text(a.size);
     // Not its name, nor where it is: the note goes into the activity log.
     let what = format!("file {} ({size}) of {}", short(&a.hash), clip(place, 80));
     match a.state.as_str() {
-        "downloading" => format!("{what}: downloading, {} of {size}", trs_media::size_text(a.done)),
-        "paused" => format!("{what}: paused, {} of {size}; it resumes when a device that has it is connected", trs_media::size_text(a.done)),
+        "downloading" => format!("{what}: downloading, {} of {size}", seedwell_media::size_text(a.done)),
+        "paused" => format!("{what}: paused, {} of {size}; it resumes when a device that has it is connected", seedwell_media::size_text(a.done)),
         "downloaded" => format!("{what}: downloaded (`path` says where)"),
         "shared" => format!("{what}: shared from this computer (`path` says where)"),
         "available" => format!("{what}: not downloaded (chat.download gets it)"),
@@ -119,7 +120,7 @@ fn file_note(a: &crate::types::ChatAttachmentDto, place: &str) -> String {
 }
 
 /// The answer to a file call: where the file stands.
-fn file_reply(place: trs_sync_net::room::Place, cid: Option<String>, name: &str, info: &trs_sync_net::chat::AttachmentInfo, direct: bool) -> Result<Reply, ApiError> {
+fn file_reply(place: seedwell_sync_net::room::Place, cid: Option<String>, name: &str, info: &seedwell_sync_net::chat::AttachmentInfo, direct: bool) -> Result<Reply, ApiError> {
     let d = ChatAttachmentDataDto { channel_id: place.to_string(), attachment: s::attachment_dto(info), ..Default::default() };
     let mut r = reply(&d)?;
     r.note = Some(file_note(&d.attachment, name));
@@ -137,11 +138,46 @@ pub(super) fn pick(h: &SyncHandle, q: &str) -> Result<(ChannelStatus, FolderId),
 }
 
 fn channel_reply(h: &SyncHandle, id: &FolderId, what: &str) -> Result<Reply, ApiError> {
-    let c = h.channel_status(id).filter(open).ok_or_else(|| ApiError::not_found(concat!("the channel is no longer on this ", trs_platform::computer!())))?;
+    let c = h.channel_status(id).filter(open).ok_or_else(|| ApiError::not_found(concat!("the channel is no longer on this ", seedwell_platform::computer!())))?;
     let d = channel_dto(&c);
     let mut r = reply(&d)?;
     r.note = Some(format!("{what} {} ({})", clip(&d.name, 80), short(&d.id)));
     r.channel = Some(d.id);
+    Ok(r)
+}
+
+/// A sidebar group (SPEC §7G.7 *Groups*) at place `i` of the order, with the channels open to agents in it.
+fn group_dto(g: &ChatGroupStatus, i: usize, visible: &[ChannelStatus]) -> ChatGroupDto {
+    let channels = visible.iter().filter(|c| c.group.as_deref() == Some(g.id.as_str())).map(|c| ChatGroupChannelDto { id: c.id.clone(), name: c.name.clone() }).collect();
+    ChatGroupDto { id: g.id.clone(), name: g.name.clone(), icon: g.icon.clone(), position: i as u32 + 1, channels }
+}
+
+/// The group `q` names: its id, a prefix of it (4 characters or more), or its name in any case.
+fn pick_group(h: &SyncHandle, q: &str) -> Result<ChatGroupStatus, ApiError> {
+    let q = q.trim();
+    if q.is_empty() || q.len() > 200 {
+        return Err(ApiError::params("`group` is a group's id, a prefix of it, or its name"));
+    }
+    let all = h.chat_groups();
+    let lower = q.to_lowercase();
+    if let Some(g) = all.iter().find(|g| g.id == lower || g.name.to_lowercase() == lower) {
+        return Ok(g.clone());
+    }
+    let hits: Vec<&ChatGroupStatus> = if lower.len() >= 4 { all.iter().filter(|g| g.id.starts_with(&lower)).collect() } else { Vec::new() };
+    match hits.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => Err(ApiError::not_found(format!("no group `{}` (see `seedwell chat group list`)", clip(q, 60)))),
+        many => Err(ApiError::new(ErrorCode::Ambiguous, format!("`{}` matches {} groups; use more of the id", clip(q, 60), many.len()))),
+    }
+}
+
+/// The answer to a change of group `id`: the group as it is now.
+fn group_reply(h: &SyncHandle, id: &str, what: &str) -> Result<Reply, ApiError> {
+    let groups = h.chat_groups();
+    let i = groups.iter().position(|g| g.id == id).ok_or_else(|| ApiError::not_found("the group is no longer here"))?;
+    let d = group_dto(&groups[i], i, &visible_channels(h));
+    let mut r = reply(&d)?;
+    r.note = Some(format!("{what} {} ({}, icon {}, at {})", clip(&d.name, 80), d.id, d.icon, d.position));
     Ok(r)
 }
 
@@ -169,14 +205,14 @@ fn closed_reply(id: &str, name: &str, what: &str) -> Result<Reply, ApiError> {
 }
 
 /// The name a channel joined with `l` gets on this Mac, as the service names it: the link's, else "Channel".
-fn link_name(l: &trs_sync_proto::members::InviteLink) -> String {
+fn link_name(l: &seedwell_sync_proto::members::InviteLink) -> String {
     let n: String = l.name.as_deref().unwrap_or_default().chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(100).collect();
     if n.is_empty() { "Channel".into() } else { n }
 }
 
 /// The label of what this connection posts when the call names none: its client name from `hello`.
 fn agent_of(conn: &Conn) -> String {
-    let agent = conn.client.as_deref().map(|n| n.chars().filter(|c| !c.is_control()).take(trs_sync_proto::chat::MAX_AGENT).collect::<String>());
+    let agent = conn.client.as_deref().map(|n| n.chars().filter(|c| !c.is_control()).take(seedwell_sync_proto::chat::MAX_AGENT).collect::<String>());
     agent.filter(|a| !a.trim().is_empty()).unwrap_or_else(|| "agent".into())
 }
 
@@ -186,8 +222,8 @@ fn agent_for(conn: &Conn, given: Option<&str>) -> Result<String, ApiError> {
     let name: String = given.chars().filter(|c| !c.is_control()).collect();
     let name = name.trim();
     let n = name.chars().count();
-    if n == 0 || n > trs_sync_proto::chat::MAX_AGENT {
-        return Err(ApiError::params(format!("`agent` is a name of 1 to {} characters", trs_sync_proto::chat::MAX_AGENT)));
+    if n == 0 || n > seedwell_sync_proto::chat::MAX_AGENT {
+        return Err(ApiError::params(format!("`agent` is a name of 1 to {} characters", seedwell_sync_proto::chat::MAX_AGENT)));
     }
     Ok(name.to_owned())
 }
@@ -202,7 +238,7 @@ fn direct_allow(h: &SyncHandle, need: AgentAccess, what: &str) -> Result<(), Api
     Err(ApiError::new(
         ErrorCode::PermissionDenied,
         format!(
-            concat!("agents on this ", trs_platform::computer!(), " may not {how} private messages yet; the user can allow it in Seedwell: Chats ▸ a private conversation ▸ ⋯ ▸ Agents on This ", trs_platform::computer!(), " ▸ {choice} (one switch for every private conversation; Settings › Agents does not open up chats). Ask the user with `seedwell agents request {ask} --why \"<what for>\"`"),
+            concat!("agents on this ", seedwell_platform::computer!(), " may not {how} private messages yet; the user can allow it in Seedwell: Chats ▸ a private conversation ▸ ⋯ ▸ Agents on This ", seedwell_platform::computer!(), " ▸ {choice} (one switch for every private conversation; Settings › Agents does not open up chats). Ask the user with `seedwell agents request {ask} --why \"<what for>\"`"),
             how = how,
             choice = choice,
             ask = ask
@@ -213,8 +249,8 @@ fn direct_allow(h: &SyncHandle, need: AgentAccess, what: &str) -> Result<(), Api
 
 /// A device named by a caller: its id, a prefix of it, or its name, among the members of the channels open to
 /// agents and, while private messages are open to them, the conversations.
-fn pick_device(h: &SyncHandle, q: &str) -> Result<trs_sync_proto::ids::DeviceId, ApiError> {
-    let mut members: Vec<trs_sync_net::MemberInfo> = Vec::new();
+fn pick_device(h: &SyncHandle, q: &str) -> Result<seedwell_sync_proto::ids::DeviceId, ApiError> {
+    let mut members: Vec<seedwell_sync_net::MemberInfo> = Vec::new();
     for c in visible_channels(h) {
         if let Ok(id) = c.id.parse() {
             members.extend(h.members(&id).unwrap_or_default().into_iter().filter(|m| !m.is_me));
@@ -223,7 +259,7 @@ fn pick_device(h: &SyncHandle, q: &str) -> Result<trs_sync_proto::ids::DeviceId,
     let directs = if directs_visible(h) { h.chat_directs() } else { Vec::new() };
     for d in directs {
         if !members.iter().any(|m| m.device == d.device) {
-            members.push(trs_sync_net::MemberInfo { device: d.device, name: d.name, user: d.user, role: trs_sync_proto::members::Role::ReadOnly, online: d.online, is_me: false, expires_s: None, removal: None });
+            members.push(seedwell_sync_net::MemberInfo { device: d.device, name: d.name, user: d.user, role: seedwell_sync_proto::members::Role::ReadOnly, online: d.online, is_me: false, expires_s: None, removal: None });
         }
     }
     let mut seen = std::collections::BTreeSet::new();
@@ -240,7 +276,7 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
             let hidden = all.iter().filter(|c| !open(c)).count() as u32;
             let hint = (hidden > 0).then(|| {
                 format!(
-                    concat!("{} on this ", trs_platform::computer!(), " {} closed to agents; {}"),
+                    concat!("{} on this ", seedwell_platform::computer!(), " {} closed to agents; {}"),
                     if hidden == 1 { "1 channel".to_owned() } else { format!("{hidden} channels") },
                     if hidden == 1 { "is" } else { "are" },
                     how_to_open("<channel>")
@@ -255,7 +291,7 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
             channel_reply(&h, &id, "made the channel")
         }
         Request::ChatJoin(p) => {
-            let link = trs_sync_proto::members::InviteLink::parse_chat(&p.link).ok();
+            let link = seedwell_sync_proto::members::InviteLink::parse_chat(&p.link).ok();
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
             // A channel already here but closed to agents: answered as the join of a closed one, so a link does not
             // tell an agent what the channel holds.
@@ -384,8 +420,8 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
             }
             if let Some(bytes) = bytes {
                 let kind = info.media_kind().ok_or_else(|| ApiError::invalid("an image of a kind this version cannot read"))?;
-                if p.png && kind == trs_media::Kind::Svg {
-                    let v = tokio::task::spawn_blocking(move || trs_media::render(kind, &bytes, 0)).await.map_err(|_| ApiError::internal("the drawing stopped"))?;
+                if p.png && kind == seedwell_media::Kind::Svg {
+                    let v = tokio::task::spawn_blocking(move || seedwell_media::render(kind, &bytes, 0)).await.map_err(|_| ApiError::internal("the drawing stopped"))?;
                     let v = v.map_err(|e| ApiError::invalid(e.to_string()))?;
                     (d.mime, d.base64, d.rendered) = (Some(v.mime.into()), Some(crate::b64::encode(&v.bytes)), true);
                 } else {
@@ -406,8 +442,8 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
             let to = match p.out.as_deref() {
                 None => None,
                 Some(o) if !std::path::Path::new(o).is_absolute() => return Err(ApiError::params("`out` must be a full path")),
-                Some(o) if std::path::Path::new(o).is_dir() => Some(trs_sync_net::files::DownloadTo::Folder(o.into())),
-                Some(o) => Some(trs_sync_net::files::DownloadTo::File(o.into())),
+                Some(o) if std::path::Path::new(o).is_dir() => Some(seedwell_sync_net::files::DownloadTo::Folder(o.into())),
+                Some(o) => Some(seedwell_sync_net::files::DownloadTo::File(o.into())),
             };
             let info = h.chat_file_download(place, &p.hash, to).map_err(chat_err)?;
             file_reply(place, cid, &name, &info, p.device.is_some())
@@ -442,9 +478,9 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
             hint: Some(
                 concat!(
                     "private messages are closed to agents on this ",
-                    trs_platform::computer!(),
+                    seedwell_platform::computer!(),
                     "; the user opens them in Seedwell: Chats ▸ a private conversation ▸ ⋯ ▸ Agents on This ",
-                    trs_platform::computer!(),
+                    seedwell_platform::computer!(),
                     " ▸ Read (or Read and post)"
                 )
                 .into(),
@@ -474,7 +510,7 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
             let m = if items.is_empty() {
                 h.chat_send_direct(&dev, kind, &p.body, p.reply_to.as_deref(), Some(&agent)).await.map_err(chat_err)?
             } else {
-                h.chat_send_attachments(trs_sync_net::room::Place::Direct(dev), None, &p.body, p.reply_to.as_deref(), Some(&agent), items).await.map_err(chat_err)?
+                h.chat_send_attachments(seedwell_sync_net::room::Place::Direct(dev), None, &p.body, p.reply_to.as_deref(), Some(&agent), items).await.map_err(chat_err)?
             };
             let mut r = reply(&message_dto(&m))?;
             r.note = Some(format!("wrote {} privately to {}", short(&m.id), short(&dev.to_string())));
@@ -488,7 +524,7 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
                 return Err(none());
             }
             h.chat_delete_direct(&dev).map_err(|e| match e {
-                trs_sync_net::SyncError::NotFound => none(),
+                seedwell_sync_net::SyncError::NotFound => none(),
                 e => chat_err(e),
             })?;
             let mut r = reply(&json!({ "deleted": true, "device_id": dev.to_string() }))?;
@@ -514,6 +550,50 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
             h.chat_set_muted(&id, p.muted).map_err(chat_err)?;
             channel_reply(&h, &id, if p.muted { "muted" } else { "unmuted" })
         }
+        Request::ChatGroups(_) => {
+            let visible = visible_channels(&h);
+            let groups = h.chat_groups().iter().enumerate().map(|(i, g)| group_dto(g, i, &visible)).collect();
+            reply(&ChatGroupsDto { groups, icons: seedwell_sync_net::chat_groups::GROUP_ICONS.iter().map(|i| (*i).to_owned()).collect() })
+        }
+        Request::ChatGroupNew(p) => {
+            let g = h.chat_group_new(&p.name, p.icon.as_deref().unwrap_or_default()).map_err(s::err)?;
+            group_reply(&h, &g.id, "made the group")
+        }
+        Request::ChatGroupEdit(p) => {
+            let g = pick_group(&h, &p.group)?;
+            if p.name.is_none() && p.icon.is_none() && p.position.is_none() {
+                return Err(ApiError::params("give `name`, `icon` or `position`"));
+            }
+            // Refused before anything changes: a bad position must not leave the name or icon half applied.
+            if p.position == Some(0) {
+                return Err(ApiError::params("`position` counts from 1"));
+            }
+            if p.name.is_some() || p.icon.is_some() {
+                h.chat_group_edit(&g.id, p.name.as_deref(), p.icon.as_deref()).map_err(s::err)?;
+            }
+            if let Some(at) = p.position {
+                h.chat_group_move(&g.id, at as usize - 1).map_err(s::err)?;
+            }
+            group_reply(&h, &g.id, "changed the group")
+        }
+        Request::ChatGroupDelete(p) => {
+            let g = pick_group(&h, &p.group)?;
+            h.chat_group_delete(&g.id).map_err(s::err)?;
+            let mut r = reply(&json!({ "deleted": true, "id": g.id, "name": g.name }))?;
+            r.note = Some(format!("deleted the group {} ({}); its channels are in the plain list", clip(&g.name, 80), g.id));
+            Ok(r)
+        }
+        Request::ChatSetGroup(p) => {
+            let (c, id) = pick(&h, &p.channel)?;
+            let g = p.group.as_deref().map(|q| pick_group(&h, q)).transpose()?;
+            h.chat_set_group(&id, g.as_ref().map(|g| g.id.as_str())).map_err(chat_err)?;
+            let mut r = channel_reply(&h, &id, "moved")?;
+            r.note = Some(match &g {
+                Some(g) => format!("channel {} ({}) is in the group {}", clip(&c.name, 80), short(&c.id), clip(&g.name, 80)),
+                None => format!("channel {} ({}) is in no group", clip(&c.name, 80), short(&c.id)),
+            });
+            Ok(r)
+        }
         Request::ChatSetWake(p) => {
             let (_, id) = pick(&h, &p.channel)?;
             h.chat_set_wake_command(&id, p.command.as_deref()).map_err(chat_err)?;
@@ -531,7 +611,7 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
     }
 }
 
-type ChatRx = broadcast::Receiver<trs_sync_net::chat::ChatEvent>;
+type ChatRx = broadcast::Receiver<seedwell_sync_net::chat::ChatEvent>;
 
 /// Hands the pump a receiver of the running sync service's messages, made now: what the service sends from here on
 /// reaches the event stream, though the pump looks for the service on its own only now and then. `events_subscribe`
@@ -624,14 +704,14 @@ pub(super) async fn pump<B: Backend>(ctx: Arc<Ctx<B>>, mut taps: tokio::sync::mp
 /// request here too. None while this device is not paired.
 fn paired_devices(h: &SyncHandle) -> Vec<String> {
     let d = h.devices_status();
-    if d.state != trs_sync_net::devices::DevicesState::Paired {
+    if d.state != seedwell_sync_net::devices::DevicesState::Paired {
         return Vec::new();
     }
     d.devices.iter().filter(|x| !x.is_me).map(|x| x.id.to_string()).collect()
 }
 
 /// What the desk reads of a message.
-fn facts(m: &trs_sync_net::chat::MessageInfo) -> crate::access::MessageFacts<'_> {
+fn facts(m: &seedwell_sync_net::chat::MessageInfo) -> crate::access::MessageFacts<'_> {
     crate::access::MessageFacts {
         channel: &m.channel_id,
         direct: m.direct,
@@ -661,7 +741,7 @@ pub(super) fn announce_place<B: Backend>(ctx: &Ctx<B>, channel: &str, topic: Opt
 
 /// The announcement's text: who asks what on which device, why (the agent's words, quoted), and how to answer.
 pub fn announcement_text(e: &crate::access::Entry, device: &str) -> String {
-    let device = if device.trim().is_empty() { concat!("this ", trs_platform::computer!()) } else { device.trim() };
+    let device = if device.trim().is_empty() { concat!("this ", seedwell_platform::computer!()) } else { device.trim() };
     let mut t = format!("**{} asks for {} on {device}.**\n", e.who(), e.want.text());
     if let Some(w) = &e.why {
         t.push_str(&format!("\n> {}\n", w.replace('\n', " ")));
@@ -703,7 +783,7 @@ impl<B: Backend> SyncApplier<B> {
 
 impl<B: Backend> crate::access::Applier for SyncApplier<B> {
     fn open_channel(&self, name: &str) -> Result<String, String> {
-        let (h, c) = self.channel(name).ok_or_else(|| format!("there is no channel “{}” on this {}", clip(name, 80), trs_platform::computer!()))?;
+        let (h, c) = self.channel(name).ok_or_else(|| format!("there is no channel “{}” on this {}", clip(name, 80), seedwell_platform::computer!()))?;
         if c.agents {
             return Ok(format!("the channel “{}” is open to agents already", c.name));
         }

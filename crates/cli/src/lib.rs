@@ -8,9 +8,11 @@ pub mod agents;
 pub mod args;
 pub mod awake;
 pub mod update;
+pub mod restart;
 pub mod chat;
 pub mod mail;
 pub mod pass;
+pub mod proxy;
 pub mod cmd;
 pub mod commands;
 #[cfg(feature = "daemon")]
@@ -90,7 +92,7 @@ pub async fn run(argv: Vec<String>) -> i32 {
     let g = Global {
         json,
         socket_given: socket.is_some(),
-        socket: socket.map_or_else(trs_control::default_socket_path, PathBuf::from),
+        socket: socket.map_or_else(seedwell_control::default_socket_path, PathBuf::from),
         client_given: client.is_some(),
         client: client.unwrap_or_else(|| "seedwell-cli".into()),
         launch,
@@ -144,7 +146,7 @@ async fn daemon_entry(_rest: Vec<String>, _g: &Global) -> i32 {
 /// The multi-thread runtime the daemon uses (the engine's own sizing).
 #[cfg(feature = "daemon")]
 pub fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
-    trs_engine::build_runtime()
+    seedwell_engine::build_runtime()
 }
 
 /// Without the daemon there is nothing multi-threaded to run.

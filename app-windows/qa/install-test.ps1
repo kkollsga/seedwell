@@ -67,7 +67,7 @@ function Installed {
     $u = Get-ItemProperty "$testKey\Uninstall\Seedwell" -ErrorAction SilentlyContinue
     $path = (Get-Item "$testKey\Environment" -ErrorAction SilentlyContinue).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
     $problems = @()
-    foreach ($f in 'Seedwell.exe', 'trs_ffi.dll', 'cli\seedwell.exe', 'install.ps1') { if (-not (Test-Path (Join-Path $dest $f))) { $problems += "no $f" } }
+    foreach ($f in 'Seedwell.exe', 'seedwell_ffi.dll', 'cli\seedwell.exe', 'install.ps1') { if (-not (Test-Path (Join-Path $dest $f))) { $problems += "no $f" } }
     if (Test-Path "$dest.new") { $problems += 'a .new folder was left' }
     if (Test-Path "$dest.old") { $problems += 'a .old folder was left' }
     if (-not (Test-Path (Join-Path $startMenu 'Seedwell.lnk'))) { $problems += 'no Start menu shortcut' }

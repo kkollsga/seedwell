@@ -6,12 +6,12 @@ use std::path::Path;
 use std::time::Instant;
 
 use proptest::prelude::*;
-use trs_sync::index::{Batch, IndexStore, LocalRecord, MemStore, NeedRecord, Op, PeerState, Stamp, TierMemo};
-use trs_sync::global::Need;
-use trs_sync::store_redb::{Durability, Migration, OpenOptions, RedbStore, Schema};
-use trs_sync_proto::ids::ShortId;
-use trs_sync_proto::model::{ChunkRef, Counter, FileInfo, FileKind, IndexEntry, SignedFile, Version};
-use trs_sync_proto::sign::Writer;
+use seedwell_sync::index::{Batch, IndexStore, LocalRecord, MemStore, NeedRecord, Op, PeerState, Stamp, TierMemo};
+use seedwell_sync::global::Need;
+use seedwell_sync::store_redb::{Durability, Migration, OpenOptions, RedbStore, Schema};
+use seedwell_sync_proto::ids::ShortId;
+use seedwell_sync_proto::model::{ChunkRef, Counter, FileInfo, FileKind, IndexEntry, SignedFile, Version};
+use seedwell_sync_proto::sign::Writer;
 
 const PATHS: &[&str] = &["a", "a-b", "a/c", "a/c/d", "a/e", "a0", "ab", "b", "b/a", "c/a/b"];
 const PREFIXES: &[&str] = &["", "a", "a/c", "a-b", "b", "c", "c/a", "zz", "a/", "a/c/d"];
@@ -462,7 +462,7 @@ fn a_damaged_record_names_its_table_and_key() {
     // A record under the wrong key.
     drop(db);
     let mut other = Vec::new();
-    trs_sync_proto::msg::encode_entry(&mut other, 1, false, &signed("b", false, &[], &[], 0, 0));
+    seedwell_sync_proto::msg::encode_entry(&mut other, 1, false, &signed("b", false, &[], &[], 0, 0));
     other.extend_from_slice(&[0, 0]);
     poke(&path, "local", "a", &other);
     let msg = RedbStore::open(&path, 3).unwrap().local("a").unwrap_err().to_string();
@@ -529,7 +529,7 @@ fn rss_mib() -> Option<f64> {
 }
 
 /// 200k local records and two peers with 200k entries each.
-/// `tools/sysguard/heavy.sh cargo test --release -p trs-sync --test it redb_scale -- --ignored --nocapture`
+/// `tools/sysguard/heavy.sh cargo test --release -p seedwell-sync --test it redb_scale -- --ignored --nocapture`
 #[test]
 #[ignore = "scale run, about a minute in release"]
 fn redb_scale() {

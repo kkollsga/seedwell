@@ -227,6 +227,12 @@ import SwiftUI
         refresh()
     }
 
+    /// Opens or closes a group of channels in the sidebar (its channels under it).
+    func setGroupOpen(_ id: String, _ open: Bool) {
+        library.setGroupOpen(groupId: id, open: open)
+        refresh()
+    }
+
     /// A private conversation was just started with this device (no message yet): its name until the core lists it.
     func noteDirectName(_ device: String, _ name: String) { library.noteDirectName(deviceId: device, name: name) }
 

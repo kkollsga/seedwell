@@ -1,7 +1,7 @@
 //! Where keys live: the device key and every folder's and channel's key.
 //!
 //! The Mac app passes a Keychain-backed [`SecretStore`] (implemented in Swift through the FFI). Without one,
-//! [`open`] picks the store: on a system with a sealer (`trs_platform::secrets`: DPAPI on Windows) a [`SealedFiles`]
+//! [`open`] picks the store: on a system with a sealer (`seedwell_platform::secrets`: DPAPI on Windows) a [`SealedFiles`]
 //! vault in the state folder, into which the plain file is moved once ([`migrate`]); elsewhere, and for the daemon
 //! and the tests, [`FileSecrets`], a 0600 file in the state directory. Secrets never go into `sync.toml`, the synced
 //! folder, or a log.
@@ -19,7 +19,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-pub use trs_platform::secrets::Sealer;
+pub use seedwell_platform::secrets::Sealer;
 
 /// A store of named secrets.
 pub trait SecretStore: Send + Sync {
@@ -70,7 +70,7 @@ impl FileSecrets {
         let tmp = self.path.with_extension("tmp");
         let mut o = std::fs::OpenOptions::new();
         o.write(true).create(true).truncate(true);
-        let mut f = trs_platform::fs::set_create_mode(&mut o, 0o600).open(&tmp)?;
+        let mut f = seedwell_platform::fs::set_create_mode(&mut o, 0o600).open(&tmp)?;
         for (k, v) in all {
             let hex: String = v.iter().map(|b| format!("{b:02x}")).collect();
             writeln!(f, "{k} = {hex}")?;
@@ -144,7 +144,7 @@ impl SecretStore for SealedFiles {
         let tmp = path.with_extension("tmp");
         let mut o = std::fs::OpenOptions::new();
         o.write(true).create(true).truncate(true);
-        let mut f = trs_platform::fs::set_create_mode(&mut o, 0o600).open(&tmp)?;
+        let mut f = seedwell_platform::fs::set_create_mode(&mut o, 0o600).open(&tmp)?;
         f.write_all(&sealed)?;
         f.sync_all()?;
         drop(f);
@@ -217,7 +217,7 @@ pub fn migrate(plain: &FileSecrets, vault: &dyn SecretStore, erase: bool) -> io:
 /// The store for the state folder's sync directory `dir` when the app passes none: see [`open_with`], with this
 /// system's sealer.
 pub fn open(dir: &Path, erase_plain: bool) -> (Arc<dyn SecretStore>, Option<String>) {
-    open_with(dir, trs_platform::secrets::system_sealer(), erase_plain)
+    open_with(dir, seedwell_platform::secrets::system_sealer(), erase_plain)
 }
 
 /// The store in `dir`: without a sealer the plain file `secrets`; with one, the vault `vault/` once the plain file is
@@ -289,12 +289,12 @@ mod tests {
         s.delete("a").unwrap();
         assert_eq!(s.get("a").unwrap(), None);
         assert_eq!(s.get("b").unwrap(), Some(b"xyz".to_vec()));
-        if let Some(mode) = trs_platform::fs::unix_mode(&std::fs::metadata(dir.path().join("secrets")).unwrap()) {
+        if let Some(mode) = seedwell_platform::fs::unix_mode(&std::fs::metadata(dir.path().join("secrets")).unwrap()) {
             assert_eq!(mode & 0o777, 0o600);
         }
     }
 
-    /// A stand-in for DPAPI (the real one is tested on Windows CI, in `trs_platform::secrets`): sealing reverses the
+    /// A stand-in for DPAPI (the real one is tested on Windows CI, in `seedwell_platform::secrets`): sealing reverses the
     /// bytes and adds a mark; it can be made to fail sealing, opening, or to open wrongly.
     #[derive(Default)]
     struct Fake {

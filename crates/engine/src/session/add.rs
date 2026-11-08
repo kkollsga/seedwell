@@ -7,9 +7,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use trs_classify::Category;
-use trs_metainfo::{Magnet, Metainfo};
-use trs_tracker::TrackerUrl;
+use seedwell_classify::Category;
+use seedwell_metainfo::{Magnet, Metainfo};
+use seedwell_tracker::TrackerUrl;
 
 use super::cold::*;
 use super::{Entry, Session, SessionMsg};
@@ -195,7 +195,7 @@ impl Session {
                 break;
             }
             let Ok(url) = TrackerUrl::parse(u) else { continue };
-            if have.contains(&key(u)) || parsed.iter().any(|x| trs_tracker::set::is_scheme_twin(x, &url)) {
+            if have.contains(&key(u)) || parsed.iter().any(|x| seedwell_tracker::set::is_scheme_twin(x, &url)) {
                 continue;
             }
             if let Some(pr) = profile_of(u) {

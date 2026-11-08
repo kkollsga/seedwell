@@ -3,7 +3,7 @@
 use crate::common;
 
 use common::*;
-use trs_utp::Config;
+use seedwell_utp::Config;
 
 const MB: usize = 1 << 20;
 

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use trs_utp::{Config, UtpSocket};
+use seedwell_utp::{Config, UtpSocket};
 
 const BLOCK: u32 = 16 * 1024;
 const PSTR: &[u8] = b"\x13BitTorrent protocol";
@@ -31,7 +31,7 @@ fn handshake(info_hash: &[u8; 20], id_tag: u8) -> Vec<u8> {
     h.extend_from_slice(PSTR);
     h.extend_from_slice(&[0u8; 8]);
     h.extend_from_slice(info_hash);
-    let mut pid = *b"-TRSUTP-interop-0000";
+    let mut pid = *b"-SWUTP0-interop-0000";
     pid[19] = b'0' + id_tag % 10;
     h.extend_from_slice(&pid);
     h
@@ -167,7 +167,7 @@ async fn download<S: AsyncRead + AsyncWrite + Unpin>(
     s
 }
 
-async fn serve_peer(mut s: trs_utp::UtpStream, ih: [u8; 20], data: Arc<Vec<u8>>, piece_len: u32) {
+async fn serve_peer(mut s: seedwell_utp::UtpStream, ih: [u8; 20], data: Arc<Vec<u8>>, piece_len: u32) {
     let mut hs = [0u8; 68];
     if s.read_exact(&mut hs).await.is_err() || &hs[..20] != PSTR || hs[28..48] != ih {
         println!("rejecting peer: bad handshake");

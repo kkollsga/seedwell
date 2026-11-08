@@ -1,5 +1,5 @@
 //! Folder sync and channels for the app (SPEC 7G): the records the Swift shell shows, the Keychain bridge for the
-//! keys ([`SecretVault`]), and [`SyncBackend`], which the real backend (a `trs_sync_net::SyncHandle` next
+//! keys ([`SecretVault`]), and [`SyncBackend`], which the real backend (a `seedwell_sync_net::SyncHandle` next
 //! to the engine) and the mock (a few fake folders and channels for design work) both implement. The membership
 //! calls (`sync_members`, `sync_set_role`, …) take a folder's or a channel's id.
 //!
@@ -11,17 +11,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
-use trs_control::sync::{SyncSlot, default_join_path, folder_path, start_sync_with};
-use trs_engine::EngineHandle;
-use trs_sync_net::chat::{AgentAccess, ChannelStatus, MessageInfo, MessageKind};
-use trs_sync_net::secrets::SecretStore;
-use trs_sync_net::status::{FolderState, FolderStatus};
-use trs_sync_net::{Keep, SyncError, SyncHandle};
-use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::keys::Access;
-use trs_sync_proto::members::{InviteLink, Role};
+use seedwell_control::sync::{SyncSlot, default_join_path, folder_path, start_sync_with};
+use seedwell_engine::EngineHandle;
+use seedwell_sync_net::chat::{AgentAccess, ChannelStatus, MessageInfo, MessageKind};
+use seedwell_sync_net::secrets::SecretStore;
+use seedwell_sync_net::status::{FolderState, FolderStatus};
+use seedwell_sync_net::{Keep, SyncError, SyncHandle};
+use seedwell_sync_proto::ids::FolderId;
+use seedwell_sync_proto::keys::Access;
+use seedwell_sync_proto::members::{InviteLink, Role};
 
 use crate::Core;
+use crate::chat_groups::{ChatGroupIcon, SyncChatGroup};
 use crate::types::CoreError;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -145,6 +146,12 @@ pub struct SyncFolder {
     /// `sync_folder_badge`): never a bare spinner (SPEC §7G.2).
     #[uniffi(default = None)]
     pub scan: Option<SyncScan>,
+    /// While it syncs: the time left to fetch what it needs, seconds, from a steady rate (the core's estimate). `None`
+    /// before the rate is measured, while nothing arrives, under ten seconds left, and when it does not sync. The
+    /// row's grey line says it ("Syncing · 42% · 12 MB/s · 4 min left", `sync_folder_subtitle`), as does the menu's
+    /// Folder Sync line (`sync_summary`): a host draws those and needs nothing more.
+    #[uniffi(default = None)]
+    pub eta_secs: Option<u64>,
 }
 
 /// What a scan does now.
@@ -171,11 +178,11 @@ pub struct SyncScan {
     pub checked_bytes: u64,
 }
 
-fn scan_of(p: &trs_sync::scan::ScanProgress) -> SyncScan {
+fn scan_of(p: &seedwell_sync::scan::ScanProgress) -> SyncScan {
     SyncScan {
         phase: match p.phase {
-            trs_sync::scan::ScanPhase::Listing => SyncScanPhase::Listing,
-            trs_sync::scan::ScanPhase::CheckingContents => SyncScanPhase::CheckingContents,
+            seedwell_sync::scan::ScanPhase::Listing => SyncScanPhase::Listing,
+            seedwell_sync::scan::ScanPhase::CheckingContents => SyncScanPhase::CheckingContents,
         },
         files: p.files,
         bytes: p.bytes,
@@ -328,6 +335,9 @@ pub struct SyncChannel {
     pub waiting: Option<String>,
     /// As an owner: members away for a day or more, each with *Remove…* (`sync_gone_prompt`).
     pub gone: Vec<SyncGoneDevice>,
+    /// The sidebar group it is listed under on this computer (`SyncChatGroup::id`; `None`: none).
+    #[uniffi(default = None)]
+    pub group: Option<String>,
 }
 
 /// One message of a channel. A message from another device is someone else's words: shown, never acted on.
@@ -529,7 +539,7 @@ impl SecretStore for VaultStore {
 }
 
 /// The store sync uses: the vault the app passed (the Mac's Keychain), else the state folder's own
-/// (`trs_sync_net::secrets::open`): on Windows a vault of DPAPI-sealed files in `sync/vault`, into which the 0600 file
+/// (`seedwell_sync_net::secrets::open`): on Windows a vault of DPAPI-sealed files in `sync/vault`, into which the 0600 file
 /// `sync/secrets` is moved once; elsewhere that file (tests, `--mock`, isolated QA runs, which must never touch the
 /// user's Keychain). Both live in the state folder, so a run with its own state folder never sees the user's keys.
 pub fn secret_store(vault: Option<Arc<dyn SecretVault>>, state_dir: &Path) -> Arc<dyn SecretStore> {
@@ -541,7 +551,7 @@ pub fn secret_store(vault: Option<Arc<dyn SecretVault>>, state_dir: &Path) -> Ar
 pub fn secret_store_checked(vault: Option<Arc<dyn SecretVault>>, state_dir: &Path) -> (Arc<dyn SecretStore>, Option<String>) {
     match vault {
         Some(v) => (Arc::new(VaultStore(v)), None),
-        None => trs_sync_net::secrets::open(&state_dir.join("sync"), started_here_before(state_dir)),
+        None => seedwell_sync_net::secrets::open(&state_dir.join("sync"), started_here_before(state_dir)),
     }
 }
 
@@ -590,7 +600,7 @@ pub trait SyncBackend: Send + Sync {
     fn set_role(&self, id: &str, device_id: &str, role: SyncRole) -> Result<(), CoreError>;
     fn remove_device(&self, id: &str, device_id: &str) -> Result<(), CoreError>;
     /// Folder `id`'s *Read only* as this computer has it (SPEC §7G.1; `None`: not a folder synced here).
-    fn read_only_state(&self, _id: &str) -> Option<trs_sync_net::status::ReadOnlyState> {
+    fn read_only_state(&self, _id: &str) -> Option<seedwell_sync_net::status::ReadOnlyState> {
         None
     }
     /// Turns folder `id`'s *Read only* on or off (an owner of the folder only).
@@ -645,6 +655,23 @@ pub trait SyncBackend: Send + Sync {
     fn default_location(&self) -> String;
     /// Every channel, by name. Cheap: called once a second.
     fn chat_channels(&self) -> Vec<SyncChannel>;
+    /// What the Share dialog shows of folder or channel `id` (`None`: not here). The hosts draw the dialog on their UI
+    /// thread, each time something in it changes: this reads that one folder or channel alone, never the status of
+    /// every folder ([`Self::snapshot`]). The default (the mock): from the snapshot and the channels.
+    fn share_target(&self, id: &str) -> Option<crate::sync_share::ShareTarget> {
+        if let Some(x) = self.snapshot().folders.into_iter().find(|x| x.id == id) {
+            return Some(crate::sync_share::ShareTarget { name: x.name, role: x.role, share_until_s: x.share_until_s, is_channel: false, channel_id: x.channel_id });
+        }
+        self.chat_channels()
+            .into_iter()
+            .find(|c| c.id == id)
+            .map(|c| crate::sync_share::ShareTarget { name: c.name, role: c.role, share_until_s: c.share_until_s, is_channel: true, channel_id: None })
+    }
+    /// The channels, by name, as the Share dialog offers them to a folder's link: their names and roles only, none of
+    /// their status (unread counts, members away). The default (the mock): from [`Self::chat_channels`].
+    fn share_channels(&self) -> Vec<crate::sync_share::ShareChannel> {
+        self.chat_channels().into_iter().map(|c| crate::sync_share::ShareChannel { id: c.id, name: c.name, role: c.role }).collect()
+    }
     fn chat_new(&self, name: &str, agents: bool) -> Result<SyncChannel, CoreError>;
     fn chat_join(&self, link: &str) -> Result<SyncChannel, CoreError>;
     /// `limit` messages before `before` (or the newest), oldest first. Cheap: called on scroll.
@@ -654,7 +681,7 @@ pub trait SyncBackend: Send + Sync {
     /// Newest activity first. Cheap.
     fn chat_topics(&self, id: &str) -> Vec<SyncTopic>;
     /// The rendezvous (SPEC 7G.3): its status while sync runs.
-    fn rendezvous_status(&self) -> Option<trs_sync_net::RendezvousStatus> {
+    fn rendezvous_status(&self) -> Option<seedwell_sync_net::RendezvousStatus> {
         None
     }
     /// The rendezvous section's last action.
@@ -671,7 +698,7 @@ pub trait SyncBackend: Send + Sync {
         Err(ondemand::not_on_demand().error)
     }
     /// *Files on demand* as the dialogs switch it: on a full folder it moves nothing (devices without the files get
-    /// placeholders); off on an on-demand folder it is full again ([`trs_sync_net::SyncHandle::set_files_on_demand`]).
+    /// placeholders); off on an on-demand folder it is full again ([`seedwell_sync_net::SyncHandle::set_files_on_demand`]).
     fn set_files_on_demand(&self, _id: &str, _on: bool, _path: Option<&str>) -> Result<SyncFolder, CoreError> {
         Err(ondemand::not_on_demand().error)
     }
@@ -689,7 +716,7 @@ pub trait SyncBackend: Send + Sync {
     }
     /// The file manager's host of on-demand folders (the app's File Provider server), asked to let go of a folder
     /// before it is removed or switched to full, whoever asks.
-    fn set_on_demand_host(&self, _host: Option<Arc<dyn trs_sync_net::OnDemandHost>>) {}
+    fn set_on_demand_host(&self, _host: Option<Arc<dyn seedwell_sync_net::OnDemandHost>>) {}
     /// The anchor for "now": changes from it report only what comes after (File Provider's current sync anchor).
     fn od_anchor(&self, _id: &str) -> Result<u64, ondemand::OdError> {
         Err(ondemand::not_on_demand())
@@ -713,7 +740,7 @@ pub trait SyncBackend: Send + Sync {
         Err(ondemand::not_on_demand())
     }
     /// A delete of what the host saw: `seen` is the folder's version then (`od_newest_below`).
-    fn od_delete(&self, _id: &str, _item: &str, _seen: Option<trs_sync_net::DeleteSeen>) -> Result<ondemand::SyncDeleted, ondemand::OdError> {
+    fn od_delete(&self, _id: &str, _item: &str, _seen: Option<seedwell_sync_net::DeleteSeen>) -> Result<ondemand::SyncDeleted, ondemand::OdError> {
         Err(ondemand::not_on_demand())
     }
     /// Whether an on-demand folder keeps its content in place (in the host's placeholders).
@@ -745,7 +772,7 @@ pub trait SyncBackend: Send + Sync {
         Err(ondemand::not_on_demand())
     }
     /// What a folder's announcements wait for now (a delete the host made a moment ago may be a save by replace).
-    fn od_replace_hold(&self, _id: &str) -> Option<trs_sync::ondemand::Hold> {
+    fn od_replace_hold(&self, _id: &str) -> Option<seedwell_sync::ondemand::Hold> {
         None
     }
     /// Adds a folder of this computer on demand, whole or not at all (the mock: added, then switched).
@@ -773,6 +800,30 @@ pub trait SyncBackend: Send + Sync {
     fn chat_set_wake_command(&self, id: &str, command: Option<&str>) -> Result<(), CoreError>;
     fn chat_leave(&self, id: &str) -> Result<(), CoreError>;
     fn chat_rename(&self, id: &str, name: &str) -> Result<(), CoreError>;
+    /// The sidebar's groups of channels (SPEC §7G.7 *Groups*), in the user's order. Cheap.
+    fn chat_groups(&self) -> Vec<SyncChatGroup> {
+        Vec::new()
+    }
+    /// A new group, last in the order (its name new, in any case).
+    fn chat_group_new(&self, _name: &str, _icon: ChatGroupIcon) -> Result<SyncChatGroup, CoreError> {
+        Err(failed("Channels are not available"))
+    }
+    /// A group's name and/or icon (`None`: as it is).
+    fn chat_group_edit(&self, _id: &str, _name: Option<&str>, _icon: Option<ChatGroupIcon>) -> Result<(), CoreError> {
+        Err(failed("Channels are not available"))
+    }
+    /// Moves a group to `index` in the order.
+    fn chat_group_move(&self, _id: &str, _index: u32) -> Result<(), CoreError> {
+        Err(failed("Channels are not available"))
+    }
+    /// Deletes a group; its channels go back to the plain list.
+    fn chat_group_delete(&self, _id: &str) -> Result<(), CoreError> {
+        Err(failed("Channels are not available"))
+    }
+    /// Lists a channel under a group (`None`: under none).
+    fn chat_set_group(&self, _channel_id: &str, _group_id: Option<&str>) -> Result<(), CoreError> {
+        Err(failed("Channels are not available"))
+    }
     /// The running service and its runtime, for the user's own devices (`devices_text`): `None` in the mock and while the
     /// service is not up.
     fn service(&self) -> Option<(SyncHandle, tokio::runtime::Handle)> {
@@ -791,7 +842,7 @@ pub trait SyncBackend: Send + Sync {
             .collect()
     }
     fn own_devices(&self) -> Vec<String> {
-        use trs_sync_net::devices::DevicesState;
+        use seedwell_sync_net::devices::DevicesState;
         self.service()
             .map(|(h, _)| h.devices_status())
             .filter(|s| matches!(s.state, DevicesState::Paired | DevicesState::Alone))
@@ -822,18 +873,18 @@ fn failed(msg: impl AsRef<str>) -> CoreError {
 }
 
 fn gone() -> CoreError {
-    CoreError::Failed { message: concat!("This folder is no longer synced on this ", trs_platform::computer!(), ".").into() }
+    CoreError::Failed { message: concat!("This folder is no longer synced on this ", seedwell_platform::computer!(), ".").into() }
 }
 
 fn sync_err(e: SyncError) -> CoreError {
     match e {
         SyncError::NotFound => gone(),
-        SyncError::Invalid(why) | SyncError::OnDemand(_, why) => failed(trs_control::redact::scrub_keys(&why)),
-        SyncError::Io(e) => failed(trs_control::redact::scrub_keys(&e.to_string())),
+        SyncError::Invalid(why) | SyncError::OnDemand(_, why) => failed(seedwell_control::redact::scrub_keys(&why)),
+        SyncError::Io(e) => failed(seedwell_control::redact::scrub_keys(&e.to_string())),
     }
 }
 
-fn api_err(e: trs_control::ApiError) -> CoreError {
+fn api_err(e: seedwell_control::ApiError) -> CoreError {
     failed(e.message)
 }
 
@@ -863,7 +914,7 @@ fn role_from(r: SyncRole) -> Role {
     }
 }
 
-fn invite_of(i: &trs_sync_net::InviteInfo) -> SyncInvite {
+fn invite_of(i: &seedwell_sync_net::InviteInfo) -> SyncInvite {
     SyncInvite {
         id: i.id.clone(),
         link: i.link.clone(),
@@ -912,23 +963,24 @@ fn folder_of(f: &FolderStatus) -> SyncFolder {
         conflicts: f.conflicts,
         lan_only: f.lan_only,
         issues: f.issues.iter().take(200).map(|(p, r)| SyncIssue { path: p.clone(), reason: r.clone() }).collect(),
-        error: f.error.as_deref().map(|e| readable(&trs_control::redact::scrub_keys(e))),
+        error: f.error.as_deref().map(|e| readable(&seedwell_control::redact::scrub_keys(e))),
         last_synced_s: f.last_synced_s,
         channel_id: f.channel_id.clone(),
         on_demand: f.on_demand,
         on_demand_others: f.on_demand_others,
         unavailable: f.unavailable,
         progress: f.progress.clone(),
-        problem: f.problem.as_deref().map(|e| readable(&trs_control::redact::scrub_keys(e))),
+        problem: f.problem.as_deref().map(|e| readable(&seedwell_control::redact::scrub_keys(e))),
         waiting: f.waiting.clone(),
         gone: f.gone.iter().map(gone_of).collect(),
         can_reshare: f.reshare,
         removes_everywhere: false,
         scan: f.scan.as_ref().map(scan_of),
+        eta_secs: f.eta_secs,
     }
 }
 
-fn gone_of(d: &trs_sync_net::status::GoneDevice) -> SyncGoneDevice {
+fn gone_of(d: &seedwell_sync_net::status::GoneDevice) -> SyncGoneDevice {
     SyncGoneDevice { device_id: d.id.clone(), name: d.name.clone(), last_seen_s: d.last_seen_s }
 }
 
@@ -987,10 +1039,15 @@ fn channel_of(c: &ChannelStatus) -> SyncChannel {
         agents: c.agents,
         wake_command: c.wake_command.clone(),
         progress: c.progress.clone(),
-        problem: c.problem.as_deref().map(|e| readable(&trs_control::redact::scrub_keys(e))),
+        problem: c.problem.as_deref().map(|e| readable(&seedwell_control::redact::scrub_keys(e))),
         waiting: c.waiting.clone(),
         gone: c.gone.iter().map(gone_of).collect(),
+        group: c.group.clone(),
     }
+}
+
+fn group_of(g: &seedwell_sync_net::chat_groups::ChatGroupStatus) -> SyncChatGroup {
+    SyncChatGroup { id: g.id.clone(), name: g.name.clone(), icon: ChatGroupIcon::from_name(&g.icon) }
 }
 
 pub(crate) fn message_of(m: &MessageInfo) -> SyncMessage {
@@ -1017,7 +1074,7 @@ pub(crate) fn message_of(m: &MessageInfo) -> SyncMessage {
     }
 }
 
-fn topic_of(t: &trs_sync_net::chat::TopicStatus) -> SyncTopic {
+fn topic_of(t: &seedwell_sync_net::chat::TopicStatus) -> SyncTopic {
     SyncTopic {
         id: t.id.clone(),
         channel_id: t.channel_id.clone(),
@@ -1030,7 +1087,7 @@ fn topic_of(t: &trs_sync_net::chat::TopicStatus) -> SyncTopic {
     }
 }
 
-fn direct_of(d: &trs_sync_net::direct::DirectStatus) -> SyncDirect {
+fn direct_of(d: &seedwell_sync_net::direct::DirectStatus) -> SyncDirect {
     SyncDirect { device_id: d.device.to_string(), name: d.name.clone(), user: d.user.clone(), online: d.online, unread: d.unread, last_message_s: d.last_message_s }
 }
 
@@ -1051,14 +1108,14 @@ pub fn parse_chat_link(text: &str) -> Option<SyncLinkInfo> {
 }
 
 fn conflict_of(root: &Path, copy: String, original: String) -> SyncConflict {
-    let name = trs_sync::conflict::parse_conflict(&copy);
+    let name = seedwell_sync::conflict::parse_conflict(&copy);
     SyncConflict {
         path: root.join(&copy).display().to_string(),
         copy,
         original,
         device: name.as_ref().map(|n| n.device.clone()).unwrap_or_default(),
         when: name.map(|n| match n.utc_s {
-            Some(t) => trs_sync::clock::local_stamp(t, trs_engine::util::local_utc_offset(t)),
+            Some(t) => seedwell_sync::clock::local_stamp(t, seedwell_engine::util::local_utc_offset(t)),
             None => n.stamp,
         })
         .unwrap_or_default(),
@@ -1081,7 +1138,7 @@ pub struct RealSync {
     problem: Arc<Mutex<Option<String>>>,
     default_name: String,
     /// The file manager's host of on-demand folders, kept across restarts of the service (`set_on_demand_host`).
-    od_host: trs_sync_net::OnDemandHostCell,
+    od_host: seedwell_sync_net::OnDemandHostCell,
     /// The rendezvous section's last action ([`crate::sync_rendezvous`]).
     rendezvous: crate::sync_rendezvous::Jobs,
     /// Why the keys are not in the vault ([`secret_store_checked`]).
@@ -1097,7 +1154,7 @@ impl RealSync {
     /// its vault is not used): on all interfaces, IPv4 and IPv6 (`::`), LAN discovery on,
     /// the engine's DHT and port mapping lent to it. Tests bind to loopback and stay off the LAN.
     /// `forbidden_root`: an isolated (test) run's real home: Folder Sync starts LAN only, keeps joined folders in the
-    /// run's state and refuses folders inside it (`trs_sync_net::service::Options::forbidden_root`). `builds`: where
+    /// run's state and refuses folders inside it (`seedwell_sync_net::service::Options::forbidden_root`). `builds`: where
     /// the app's updater is, once the host made one: it hears what the devices this one talks to run (a newer
     /// Seedwell starts a check, SPEC 12A).
     pub fn start(
@@ -1106,12 +1163,12 @@ impl RealSync {
         dir: &Path,
         secrets: (Arc<dyn SecretStore>, Option<String>),
         forbidden_root: Option<PathBuf>,
-        builds: trs_control::BuildsSlot,
+        builds: seedwell_control::BuildsSlot,
     ) -> Arc<Self> {
         let slot = SyncSlot::new();
         let problem = Arc::new(Mutex::new(None));
-        let default_name = trs_control::sync::default_device_name();
-        let od_host: trs_sync_net::OnDemandHostCell = Arc::new(Mutex::new(None));
+        let default_name = seedwell_control::sync::default_device_name();
+        let od_host: seedwell_sync_net::OnDemandHostCell = Arc::new(Mutex::new(None));
         let (secrets, secrets_problem) = secrets;
         if let Some(p) = &secrets_problem {
             eprintln!("seedwell: {p}");
@@ -1128,7 +1185,7 @@ impl RealSync {
         });
         let (engine, dir) = (engine.clone(), dir.to_path_buf());
         // The same start again when the port changes (`SyncSlot::move_port`).
-        let starter: trs_control::sync::Starter = Arc::new(move || {
+        let starter: seedwell_control::sync::Starter = Arc::new(move || {
             let (dir, secrets, engine, default_name, forbidden_root, od_host, builds) =
                 (dir.clone(), secrets.clone(), engine.clone(), default_name.clone(), forbidden_root.clone(), od_host.clone(), builds.clone());
             Box::pin(async move {
@@ -1233,7 +1290,7 @@ impl SyncBackend for RealSync {
     fn od_anchor(&self, id: &str) -> Result<u64, ondemand::OdError> {
         RealSync::od_anchor(self, id)
     }
-    fn set_on_demand_host(&self, host: Option<Arc<dyn trs_sync_net::OnDemandHost>>) {
+    fn set_on_demand_host(&self, host: Option<Arc<dyn seedwell_sync_net::OnDemandHost>>) {
         *lock(&self.od_host) = host;
     }
     fn add_folder_on_demand(&self, path: &str) -> Result<SyncFolder, CoreError> {
@@ -1264,7 +1321,7 @@ impl SyncBackend for RealSync {
     fn od_modify(&self, id: &str, item: &str, parent: Option<&str>, name: Option<&str>, contents: Option<&str>, base: Option<&str>) -> Result<ondemand::SyncItem, ondemand::OdError> {
         RealSync::od_modify(self, id, item, parent, name, contents, base)
     }
-    fn od_delete(&self, id: &str, item: &str, seen: Option<trs_sync_net::DeleteSeen>) -> Result<ondemand::SyncDeleted, ondemand::OdError> {
+    fn od_delete(&self, id: &str, item: &str, seen: Option<seedwell_sync_net::DeleteSeen>) -> Result<ondemand::SyncDeleted, ondemand::OdError> {
         RealSync::od_delete(self, id, item, seen)
     }
     fn od_in_place(&self, id: &str) -> Result<bool, ondemand::OdError> {
@@ -1288,13 +1345,32 @@ impl SyncBackend for RealSync {
     fn od_ignored(&self, id: &str, path: &str, dir: bool) -> Result<Option<ondemand::SyncIgnored>, ondemand::OdError> {
         RealSync::od_ignored(self, id, path, dir)
     }
-    fn od_replace_hold(&self, id: &str) -> Option<trs_sync::ondemand::Hold> {
+    fn od_replace_hold(&self, id: &str) -> Option<seedwell_sync::ondemand::Hold> {
         RealSync::od_replace_hold(self, id)
     }
 
 
     fn chat_channels(&self) -> Vec<SyncChannel> {
         self.slot.get().map(|h| h.chat_channels().iter().map(channel_of).collect()).unwrap_or_default()
+    }
+
+    fn share_target(&self, id: &str) -> Option<crate::sync_share::ShareTarget> {
+        let b = self.slot.get()?.share_brief(&folder_id(id).ok()?)?;
+        Some(crate::sync_share::ShareTarget {
+            name: b.name,
+            role: b.role.map_or(SyncRole::ReadOnly, role_of),
+            share_until_s: b.share_until,
+            is_channel: b.channel,
+            channel_id: b.channel_id,
+        })
+    }
+
+    fn share_channels(&self) -> Vec<crate::sync_share::ShareChannel> {
+        let Some(h) = self.slot.get() else { return Vec::new() };
+        h.channel_roles()
+            .into_iter()
+            .map(|(id, name, role)| crate::sync_share::ShareChannel { id: id.to_string(), name, role: role.map_or(SyncRole::ReadOnly, role_of) })
+            .collect()
     }
 
     fn chat_new(&self, name: &str, agents: bool) -> Result<SyncChannel, CoreError> {
@@ -1354,7 +1430,7 @@ impl SyncBackend for RealSync {
     }
 
     fn chat_direct_messages(&self, device_id: &str, before: Option<&str>, limit: u32) -> Vec<SyncMessage> {
-        let (Some(h), Ok(dev)) = (self.slot.get(), device_id.parse::<trs_sync_proto::ids::DeviceId>()) else { return Vec::new() };
+        let (Some(h), Ok(dev)) = (self.slot.get(), device_id.parse::<seedwell_sync_proto::ids::DeviceId>()) else { return Vec::new() };
         h.chat_direct_messages(&dev, before, limit.clamp(1, 1000) as usize).map(|v| v.iter().map(message_of).collect()).unwrap_or_default()
     }
 
@@ -1411,6 +1487,31 @@ impl SyncBackend for RealSync {
     fn chat_rename(&self, id: &str, name: &str) -> Result<(), CoreError> {
         let h = self.handle()?;
         h.chat_rename(&folder_id(id)?, name).map_err(sync_err)
+    }
+
+    fn chat_groups(&self) -> Vec<SyncChatGroup> {
+        self.slot.get().map(|h| h.chat_groups().iter().map(group_of).collect()).unwrap_or_default()
+    }
+
+    fn chat_group_new(&self, name: &str, icon: ChatGroupIcon) -> Result<SyncChatGroup, CoreError> {
+        self.handle()?.chat_group_new(name, icon.name()).map(|g| group_of(&g)).map_err(sync_err)
+    }
+
+    fn chat_group_edit(&self, id: &str, name: Option<&str>, icon: Option<ChatGroupIcon>) -> Result<(), CoreError> {
+        self.handle()?.chat_group_edit(id, name, icon.map(ChatGroupIcon::name)).map(|_| ()).map_err(sync_err)
+    }
+
+    fn chat_group_move(&self, id: &str, index: u32) -> Result<(), CoreError> {
+        self.handle()?.chat_group_move(id, index as usize).map_err(sync_err)
+    }
+
+    fn chat_group_delete(&self, id: &str) -> Result<(), CoreError> {
+        self.handle()?.chat_group_delete(id).map_err(sync_err)
+    }
+
+    fn chat_set_group(&self, channel_id: &str, group_id: Option<&str>) -> Result<(), CoreError> {
+        let h = self.handle()?;
+        h.chat_set_group(&folder_id(channel_id)?, group_id).map_err(sync_err)
     }
 
     fn snapshot(&self) -> SyncSnapshot {
@@ -1504,7 +1605,7 @@ impl SyncBackend for RealSync {
                 online: m.online,
                 is_me: m.is_me,
                 expires_s: m.expires_s,
-                removal_waiting: m.removal == Some(trs_sync_net::removals::Asked::Waiting),
+                removal_waiting: m.removal == Some(seedwell_sync_net::removals::Asked::Waiting),
                 removal: m.removal.as_ref().map(crate::sync_text::removal_line),
             })
             .collect()
@@ -1522,7 +1623,7 @@ impl SyncBackend for RealSync {
         h.remove_device(&folder_id(id)?, &device).map_err(sync_err)
     }
 
-    fn read_only_state(&self, id: &str) -> Option<trs_sync_net::status::ReadOnlyState> {
+    fn read_only_state(&self, id: &str) -> Option<seedwell_sync_net::status::ReadOnlyState> {
         self.handle().ok()?.read_only_state(&folder_id(id).ok()?)
     }
 
@@ -1692,7 +1793,7 @@ impl SyncBackend for RealSync {
     }
 
     fn set_port(&self, port: u16) -> Result<(), CoreError> {
-        use trs_control::sync::PortChange;
+        use seedwell_control::sync::PortChange;
         if port < 1024 {
             return Err(failed(PortChange::Invalid.to_string()));
         }
@@ -1700,7 +1801,7 @@ impl SyncBackend for RealSync {
         if h.port() == port {
             return Ok(());
         }
-        if !trs_control::sync::port_free(port) {
+        if !seedwell_control::sync::port_free(port) {
             return Err(failed(PortChange::InUse(port).to_string()));
         }
         let (slot, problem) = (self.slot.clone(), self.problem.clone());
@@ -1713,7 +1814,7 @@ impl SyncBackend for RealSync {
         Ok(())
     }
 
-    fn rendezvous_status(&self) -> Option<trs_sync_net::RendezvousStatus> {
+    fn rendezvous_status(&self) -> Option<seedwell_sync_net::RendezvousStatus> {
         self.slot.get().map(|h| h.rendezvous_status())
     }
 
@@ -1727,7 +1828,7 @@ impl SyncBackend for RealSync {
 
     fn port_reachability(&self) -> Option<crate::types::ReachabilityInfo> {
         let h = self.slot.get()?;
-        let r = trs_control::sync_reachability_dto(&self.engine.reachability(), h.port());
+        let r = seedwell_control::sync_reachability_dto(&self.engine.reachability(), h.port());
         Some(crate::types::ReachabilityInfo { state: r.state, summary: r.summary })
     }
 
@@ -1914,6 +2015,8 @@ struct MockChat {
     /// Agents: Yes.
     agents: bool,
     wake: Option<String>,
+    /// Its sidebar group's id.
+    group: Option<String>,
 }
 
 /// The ids of the first `n` messages: read.
@@ -1939,6 +2042,8 @@ struct MockState {
     next: u32,
     /// The folders made Read only (by id).
     read_only: std::collections::BTreeSet<String>,
+    /// The sidebar's groups of channels, in order.
+    groups: Vec<SyncChatGroup>,
 }
 
 /// A few fake folders in every state the UI draws, for design work and the snapshot renderer. Nothing on
@@ -1957,12 +2062,12 @@ fn mock_id(n: u32) -> String {
 
 /// A real invitation link to mock folder (or channel) `n` (nothing listens for it).
 fn mock_invite(n: u32, k: u32, name: &str, role: SyncRole, max_uses: u32, valid_days: u32, chat: bool) -> SyncInvite {
-    let secret = trs_sync_proto::keys::FolderSecret::from_bytes([n as u8 + 1; 32]);
+    let secret = seedwell_sync_proto::keys::FolderSecret::from_bytes([n as u8 + 1; 32]);
     let now = now_s();
     let expires_s = if valid_days == 0 { 0 } else { now + u64::from(valid_days) * 86_400 };
     let id = [k as u8 + 1; 16];
     let seed = [(n * 16 + k) as u8; 32];
-    let invite = trs_sync_proto::members::new_invite(
+    let invite = seedwell_sync_proto::members::new_invite(
         *secret.public_key(),
         id,
         seed,
@@ -1970,13 +2075,13 @@ fn mock_invite(n: u32, k: u32, name: &str, role: SyncRole, max_uses: u32, valid_
         max_uses,
         expires_s,
         now,
-        trs_sync_proto::members::Signer::Folder,
+        seedwell_sync_proto::members::Signer::Folder,
         &|m| secret.sign(m),
     );
     let l = InviteLink { invite, token_seed: seed, name: Some(name.to_owned()), agents: false, reach: None };
     let link = if chat { l.format_chat() } else { l.format() };
     SyncInvite {
-        id: trs_sync_proto::members::hex(&id),
+        id: seedwell_sync_proto::members::hex(&id),
         link,
         role,
         max_uses,
@@ -2067,6 +2172,7 @@ impl MockSync {
             can_reshare: false,
             removes_everywhere: false,
             scan: None,
+            eta_secs: None,
         };
         let mut photos = mk(1, "Photos", SyncAccess::ReadWrite, SyncState::UpToDate, 4, 3);
         photos.role = SyncRole::Owner;
@@ -2158,7 +2264,7 @@ impl MockSync {
             ],
             read: 2,
         }];
-        let state = MockState { folders, channels, directs, direct_agents: SyncAgentAccess::Off, settings: Self::default_settings(), next: 20, read_only: Default::default() };
+        let state = MockState { folders, channels, directs, direct_agents: SyncAgentAccess::Off, settings: Self::default_settings(), next: 20, read_only: Default::default(), groups: Vec::new() };
         Arc::new(MockSync { state: Mutex::new(state), started: Instant::now(), od: Mutex::new(std::collections::BTreeMap::new()) })
     }
 
@@ -2236,7 +2342,7 @@ impl MockSync {
             f: family,
             members,
             invites: vec![mock_invite(11, 1, "Family", SyncRole::ReadWrite, 1, 7, true)],
-            chat: Some(MockChat { read: first_read(&messages, 4), messages, topics, muted: false, agents: false, wake: None }),
+            chat: Some(MockChat { read: first_read(&messages, 4), messages, topics, muted: false, agents: false, wake: None, group: None }),
         });
         let mut build = mk(12, "Release notes", SyncAccess::ReadWrite, SyncState::UpToDate, 2, 2);
         build.role = SyncRole::Admin;
@@ -2276,6 +2382,7 @@ impl MockSync {
                 muted: false,
                 agents: true,
                 wake: Some("~/bin/wake-claude".into()),
+                group: None,
             }),
         });
         let mut ola = mk(13, "Ola & Kristian", SyncAccess::ReadWrite, SyncState::UpToDate, 2, 0);
@@ -2288,7 +2395,7 @@ impl MockSync {
             f: ola,
             members: mock_members(SyncRole::ReadWrite, &[("Ola's MacBook Air", SyncRole::Owner, false)], Some(now + 5 * 86_400)),
             invites: Vec::new(),
-            chat: Some(MockChat { read: first_read(&messages, 0), messages, topics: Vec::new(), muted: true, agents: false, wake: None }),
+            chat: Some(MockChat { read: first_read(&messages, 0), messages, topics: Vec::new(), muted: true, agents: false, wake: None, group: None }),
         });
         out
     }
@@ -2333,12 +2440,13 @@ impl MockSync {
             problem: None,
             waiting: None,
             gone: m.f.gone.clone(),
+            group: c.group.clone(),
         })
     }
 
     fn with_chat<T>(&self, id: &str, f: impl FnOnce(&mut MockFolder) -> T) -> Result<T, CoreError> {
         let mut s = lock(&self.state);
-        s.channels.iter_mut().find(|m| m.f.id == id).map(f).ok_or_else(|| failed(concat!("This channel is no longer on this ", trs_platform::computer!())))
+        s.channels.iter_mut().find(|m| m.f.id == id).map(f).ok_or_else(|| failed(concat!("This channel is no longer on this ", seedwell_platform::computer!())))
     }
 
     fn add(&self, name: String, path: String, role: SyncRole, joining: bool) -> SyncFolder {
@@ -2378,6 +2486,7 @@ impl MockSync {
             can_reshare: false,
             removes_everywhere: false,
             scan: None,
+            eta_secs: None,
         };
         let members = mock_members(if joining { SyncRole::ReadOnly } else { role }, &[], None);
         s.folders.push(MockFolder { n, f: f.clone(), members, invites: Vec::new(), chat: None });
@@ -2446,7 +2555,7 @@ impl SyncBackend for MockSync {
     fn od_modify(&self, id: &str, item: &str, parent: Option<&str>, name: Option<&str>, _contents: Option<&str>, _base: Option<&str>) -> Result<ondemand::SyncItem, ondemand::OdError> {
         self.od_rename(id, item, parent, name)
     }
-    fn od_delete(&self, id: &str, item: &str, _seen: Option<trs_sync_net::DeleteSeen>) -> Result<ondemand::SyncDeleted, ondemand::OdError> {
+    fn od_delete(&self, id: &str, item: &str, _seen: Option<seedwell_sync_net::DeleteSeen>) -> Result<ondemand::SyncDeleted, ondemand::OdError> {
         MockSync::od_delete(self, id, item)
     }
     fn od_in_place(&self, id: &str) -> Result<bool, ondemand::OdError> {
@@ -2496,7 +2605,7 @@ impl SyncBackend for MockSync {
             f,
             members: mock_members(SyncRole::Owner, &[], None),
             invites: Vec::new(),
-            chat: Some(MockChat { messages: Vec::new(), read: Default::default(), topics: Vec::new(), muted: false, agents, wake: None }),
+            chat: Some(MockChat { messages: Vec::new(), read: Default::default(), topics: Vec::new(), muted: false, agents, wake: None, group: None }),
         };
         let c = Self::channel_of(&m).ok_or_else(gone)?;
         s.channels.push(m);
@@ -2507,7 +2616,7 @@ impl SyncBackend for MockSync {
         InviteLink::parse_chat(link).map_err(|e| failed(e.to_string()))?;
         let info = parse_chat_link(link).ok_or_else(|| failed("Not a channel link"))?;
         if lock(&self.state).channels.iter().any(|m| m.f.id == info.folder_id) {
-            return Err(failed(concat!("This channel is already on this ", trs_platform::computer!())));
+            return Err(failed(concat!("This channel is already on this ", seedwell_platform::computer!())));
         }
         // The link says whether the channel is open to agents.
         let agents = InviteLink::parse_chat(link).is_ok_and(|l| l.agents);
@@ -2613,7 +2722,7 @@ impl SyncBackend for MockSync {
             .flat_map(|c| c.members.iter())
             .find(|m| m.device_id == device_id && !m.is_me)
             .map(|m| m.name.clone())
-            .ok_or_else(|| failed(concat!("This ", trs_platform::computer!(), " shares no channel with that device")))?;
+            .ok_or_else(|| failed(concat!("This ", seedwell_platform::computer!(), " shares no channel with that device")))?;
         let msg = SyncMessage {
             id: format!("{:032x}", now_s() as u128 * 1000 + 7),
             channel_id: String::new(),
@@ -2650,7 +2759,7 @@ impl SyncBackend for MockSync {
         let mut s = lock(&self.state);
         let before = s.directs.len();
         s.directs.retain(|d| d.device_id != device_id);
-        if s.directs.len() == before { Err(failed(concat!("There is no conversation with that device on this ", trs_platform::computer!()))) } else { Ok(()) }
+        if s.directs.len() == before { Err(failed(concat!("There is no conversation with that device on this ", seedwell_platform::computer!()))) } else { Ok(()) }
     }
 
     fn chat_direct_agents(&self) -> SyncAgentAccess {
@@ -2742,7 +2851,70 @@ impl SyncBackend for MockSync {
         let mut s = lock(&self.state);
         let before = s.channels.len();
         s.channels.retain(|m| m.f.id != id);
-        if s.channels.len() == before { Err(failed(concat!("This channel is no longer on this ", trs_platform::computer!()))) } else { Ok(()) }
+        if s.channels.len() == before { Err(failed(concat!("This channel is no longer on this ", seedwell_platform::computer!()))) } else { Ok(()) }
+    }
+
+    fn chat_groups(&self) -> Vec<SyncChatGroup> {
+        lock(&self.state).groups.clone()
+    }
+
+    fn chat_group_new(&self, name: &str, icon: ChatGroupIcon) -> Result<SyncChatGroup, CoreError> {
+        let name: String = name.trim().chars().take(seedwell_sync_net::chat_groups::GROUP_NAME_MAX).collect();
+        let mut s = lock(&self.state);
+        if name.is_empty() || s.groups.iter().any(|g| g.name.to_lowercase() == name.to_lowercase()) {
+            return Err(failed(if name.is_empty() { "a group needs a name".to_owned() } else { format!("there is already a group named “{name}”") }));
+        }
+        s.next += 1;
+        let g = SyncChatGroup { id: format!("{:012x}", s.next), name, icon };
+        s.groups.push(g.clone());
+        Ok(g)
+    }
+
+    fn chat_group_edit(&self, id: &str, name: Option<&str>, icon: Option<ChatGroupIcon>) -> Result<(), CoreError> {
+        let mut s = lock(&self.state);
+        let g = s.groups.iter_mut().find(|g| g.id == id).ok_or_else(|| failed("no such group"))?;
+        if let Some(n) = name.map(str::trim).filter(|n| !n.is_empty()) {
+            g.name = n.to_owned();
+        }
+        if let Some(i) = icon {
+            g.icon = i;
+        }
+        Ok(())
+    }
+
+    fn chat_group_move(&self, id: &str, index: u32) -> Result<(), CoreError> {
+        let mut s = lock(&self.state);
+        let from = s.groups.iter().position(|g| g.id == id).ok_or_else(|| failed("no such group"))?;
+        let g = s.groups.remove(from);
+        let to = (index as usize).min(s.groups.len());
+        s.groups.insert(to, g);
+        Ok(())
+    }
+
+    fn chat_group_delete(&self, id: &str) -> Result<(), CoreError> {
+        let mut s = lock(&self.state);
+        let before = s.groups.len();
+        s.groups.retain(|g| g.id != id);
+        if s.groups.len() == before {
+            return Err(failed("no such group"));
+        }
+        for c in s.channels.iter_mut().filter_map(|m| m.chat.as_mut()) {
+            if c.group.as_deref() == Some(id) {
+                c.group = None;
+            }
+        }
+        Ok(())
+    }
+
+    fn chat_set_group(&self, channel_id: &str, group_id: Option<&str>) -> Result<(), CoreError> {
+        if group_id.is_some_and(|g| !lock(&self.state).groups.iter().any(|x| x.id == g)) {
+            return Err(failed("no such group"));
+        }
+        self.with_chat(channel_id, |m| {
+            if let Some(c) = m.chat.as_mut() {
+                c.group = group_id.map(str::to_owned);
+            }
+        })
     }
 
     fn snapshot(&self) -> SyncSnapshot {
@@ -2759,6 +2931,8 @@ impl SyncBackend for MockSync {
                     f.need_bytes = f.bytes * (100 - done) / 100;
                     f.need_files = f.need_files * (100 - done) / 58;
                     f.rate_in = if done < 100 { 12_000_000 + (t % 5) * 400_000 } else { 0 };
+                    // The core's steady estimate: what is left over the mean rate.
+                    f.eta_secs = (done < 100).then_some(f.need_bytes / 12_800_000).filter(|&e| e >= 10);
                     if done >= 100 {
                         f.state = SyncState::UpToDate;
                     }
@@ -2853,7 +3027,7 @@ impl SyncBackend for MockSync {
         if let Some(c) = channel_id
             && !lock(&self.state).channels.iter().any(|m| m.f.id == c)
         {
-            return Err(failed(concat!("No such channel on this ", trs_platform::computer!())));
+            return Err(failed(concat!("No such channel on this ", seedwell_platform::computer!())));
         }
         self.with(id, |m| m.f.channel_id = channel_id.map(str::to_string))
     }
@@ -2861,7 +3035,7 @@ impl SyncBackend for MockSync {
     fn join_path(&self, key_or_link: &str) -> Option<String> {
         let (info, _) = parse_link(key_or_link)?;
         let name = info.name.unwrap_or_else(|| info.folder_id.split('-').next().unwrap_or("Folder").to_owned());
-        let name = trs_platform::fs::clean_name(&name);
+        let name = seedwell_platform::fs::clean_name(&name);
         Some(std::path::Path::new(&self.default_location()).join(name.trim().trim_start_matches('.')).display().to_string())
     }
 
@@ -2881,12 +3055,12 @@ impl SyncBackend for MockSync {
         })?
     }
 
-    fn read_only_state(&self, id: &str) -> Option<trs_sync_net::status::ReadOnlyState> {
+    fn read_only_state(&self, id: &str) -> Option<seedwell_sync_net::status::ReadOnlyState> {
         let s = lock(&self.state);
         let f = s.folders.iter().find(|m| m.f.id == id)?;
         let (on, owner) = (s.read_only.contains(id), f.f.role == SyncRole::Owner);
         let held = on && !owner && f.f.role != SyncRole::ReadOnly;
-        Some(trs_sync_net::status::ReadOnlyState { on, owner, held })
+        Some(seedwell_sync_net::status::ReadOnlyState { on, owner, held })
     }
 
     fn set_read_only(&self, id: &str, on: bool) -> Result<(), CoreError> {
@@ -2908,7 +3082,7 @@ impl SyncBackend for MockSync {
             // An owner removes anyone; an admin asks the owners to remove a user (Read & write, Read only).
             let user = m.members.iter().any(|d| d.device_id == device_id && matches!(d.role, SyncRole::ReadWrite | SyncRole::ReadOnly));
             if m.f.role == SyncRole::Admin && user {
-                let asked = trs_sync_net::removals::Asked::Waiting;
+                let asked = seedwell_sync_net::removals::Asked::Waiting;
                 for d in m.members.iter_mut().filter(|d| d.device_id == device_id) {
                     (d.removal, d.removal_waiting) = (Some(crate::sync_text::removal_line(&asked)), true);
                 }
@@ -2918,7 +3092,7 @@ impl SyncBackend for MockSync {
                 return Err(failed("Only the folder's owner can remove a device, or an admin a member at Read & write or Read only"));
             }
             if m.members.iter().any(|d| d.device_id == device_id && d.is_me) {
-                return Err(failed(concat!("To stop syncing on this ", trs_platform::computer!(), ", remove the folder instead")));
+                return Err(failed(concat!("To stop syncing on this ", seedwell_platform::computer!(), ", remove the folder instead")));
             }
             m.members.retain(|d| d.device_id != device_id);
             m.f.gone.retain(|d| d.device_id != device_id);
@@ -2929,7 +3103,7 @@ impl SyncBackend for MockSync {
     fn reshare(&self, id: &str) -> Result<SyncFolder, CoreError> {
         self.with(id, |m| {
             if !m.f.can_reshare {
-                return Err(failed(concat!("An owner or admin of this folder can still let devices in: ask it to share the folder, or to make this ", trs_platform::computer!(), " an admin")));
+                return Err(failed(concat!("An owner or admin of this folder can still let devices in: ask it to share the folder, or to make this ", seedwell_platform::computer!(), " an admin")));
             }
             m.f.id = mock_id(m.n + 100);
             m.f.role = SyncRole::Owner;
@@ -2969,8 +3143,8 @@ impl SyncBackend for MockSync {
         let chat = match channel_id {
             None => None,
             Some(c) => {
-                let ch = s.channels.iter_mut().find(|m| m.f.id == c).ok_or_else(|| failed(concat!("No such channel on this ", trs_platform::computer!())))?;
-                may(ch, "channel").map_err(|e| failed(format!(concat!("This ", trs_platform::computer!(), " may not share the channel {} at that role ({e})"), ch.f.name, e = e)))?;
+                let ch = s.channels.iter_mut().find(|m| m.f.id == c).ok_or_else(|| failed(concat!("No such channel on this ", seedwell_platform::computer!())))?;
+                may(ch, "channel").map_err(|e| failed(format!(concat!("This ", seedwell_platform::computer!(), " may not share the channel {} at that role ({e})"), ch.f.name, e = e)))?;
                 let i = mock_invite(ch.n, ch.invites.len() as u32 + 3, &ch.f.name, role, max_uses, valid_days, true);
                 ch.invites.insert(0, i.clone());
                 Some((i, ch.f.id.clone(), ch.f.name.clone()))
@@ -3002,7 +3176,7 @@ impl SyncBackend for MockSync {
         let bundled = self.with(id, |m| {
             let i = m.invites.iter_mut().find(|i| i.id == invite_id).ok_or_else(|| failed("No such link"))?;
             i.revoked = true;
-            let half = InviteLink::parse_bundle(&i.link).ok().and_then(|(_, c)| c).map(|c| trs_sync_proto::members::hex(&c.invite.id));
+            let half = InviteLink::parse_bundle(&i.link).ok().and_then(|(_, c)| c).map(|c| seedwell_sync_proto::members::hex(&c.invite.id));
             Ok::<_, CoreError>(i.channel_id.clone().zip(half))
         })??;
         // A link for both: the channel's invitation goes too.
@@ -3089,14 +3263,14 @@ impl SyncBackend for MockSync {
 
     fn set_port(&self, port: u16) -> Result<(), CoreError> {
         if port < 1024 {
-            return Err(failed(trs_control::sync::PortChange::Invalid.to_string()));
+            return Err(failed(seedwell_control::sync::PortChange::Invalid.to_string()));
         }
         lock(&self.state).settings.port = port;
         Ok(())
     }
 
     fn port_reachability(&self) -> Option<crate::types::ReachabilityInfo> {
-        Some(crate::types::ReachabilityInfo { state: "mapped".into(), summary: concat!("Opened on the router with UPnP: your devices can reach this ", trs_platform::computer!()).into() })
+        Some(crate::types::ReachabilityInfo { state: "mapped".into(), summary: concat!("Opened on the router with UPnP: your devices can reach this ", seedwell_platform::computer!()).into() })
     }
 
     fn default_location(&self) -> String {
@@ -3382,7 +3556,9 @@ impl Core {
         self.backend.sync().chat_set_direct_agents(access)
     }
 
-    /// Where a joined folder goes by default: `<default location>/<name>`, numbered when taken.
+    /// Where a joined folder goes by default: `<default location>/<name>`, numbered when taken. Looks at the disk (the
+    /// numbering, and whether the default location is a folder that may be used): never on a host's UI thread (the Add
+    /// dialog reads it with `sync_add_places`).
     pub fn sync_join_path(&self, key_or_link: String) -> Option<String> {
         self.backend.sync().join_path(&key_or_link)
     }
@@ -3425,7 +3601,7 @@ mod tests {
     fn a_conflict_named_in_utc_is_shown_in_local_time() {
         let at = 1_792_938_720; // 2026-10-25 14:32 UTC
         let c = conflict_of(Path::new("/d"), "a (conflict, iMac, 2026-10-25 14.32z).txt".into(), "a.txt".into());
-        let local = trs_sync::clock::local_stamp(at, trs_engine::util::local_utc_offset(at));
+        let local = seedwell_sync::clock::local_stamp(at, seedwell_engine::util::local_utc_offset(at));
         assert_eq!((c.device.as_str(), c.when.as_str()), ("iMac", local.as_str()));
         let old = conflict_of(Path::new("/d"), "a (conflict, iMac, 2026-10-25 15.32).txt".into(), "a.txt".into());
         assert_eq!(old.when, "2026-10-25 15.32", "named before 0.1.9: local time already");
@@ -3686,7 +3862,7 @@ mod tests {
         assert_eq!(core.sync_remove(f.id.clone(), true).unwrap(), None, "not on disk: nothing to move");
         assert_eq!(core.sync_snapshot().folders.len(), n + 1, "the joined one stays");
         let e = core.sync_remove(f.id.clone(), false).unwrap_err();
-        assert_eq!(e.to_string(), concat!("This folder is no longer synced on this ", trs_platform::computer!(), "."));
+        assert_eq!(e.to_string(), concat!("This folder is no longer synced on this ", seedwell_platform::computer!(), "."));
         let mut st = core.sync_settings();
         assert!(st.lan_discovery && st.relay_own_devices && !st.relay_everyone && st.port > 0);
         st.device_name = "Desk".into();

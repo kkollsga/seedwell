@@ -1,6 +1,6 @@
 //! `structure()` on realistic fixtures: season packs, collections, discographies, software.
 
-use trs_classify::{
+use seedwell_classify::{
     Cpu, FileEntry, GroupKind, Input, Os, PkgKind, Place, Structure, StructureKind, classify,
     structure,
 };
@@ -24,7 +24,7 @@ impl Fx {
         self.files.push((path.into(), size));
         self
     }
-    fn run(&self) -> (trs_classify::Classification, Structure) {
+    fn run(&self) -> (seedwell_classify::Classification, Structure) {
         let entries: Vec<FileEntry> = self
             .files
             .iter()
@@ -101,7 +101,7 @@ fn five_season_pack_groups_by_season_and_episode() {
     let fx = five_season_pack();
     assert_eq!(fx.files.len(), 48 + 2 + 3 + 1 + 2 + 2 + 1 + 1);
     let (c, s) = fx.run();
-    assert_eq!(c.category, trs_classify::Category::Tv);
+    assert_eq!(c.category, seedwell_classify::Category::Tv);
     assert_eq!(s.kind, StructureKind::Tv);
     assert!(s.multi);
     assert_eq!(s.seasons(), vec![1, 2, 3, 4, 5]);
@@ -227,7 +227,7 @@ fn daily_show_by_date() {
     fx.add("Late.Night.Show.2026.10.06.1080p.WEB.h264-GRP.mkv", 2 * GB);
     fx.add("Late.Night.Show.2026.10.07.1080p.WEB.h264-GRP.mkv", 2 * GB);
     let (c, st) = fx.run();
-    assert_eq!(c.category, trs_classify::Category::Tv);
+    assert_eq!(c.category, seedwell_classify::Category::Tv);
     assert_eq!(st.item_count(), 3);
     assert_eq!(st.groups[0].label, "2026");
     assert_eq!(st.groups[0].items[0].label, "2026-10-05");
@@ -249,7 +249,7 @@ fn anime_absolute_numbers_are_season_one() {
         );
     }
     let (c, st) = fx.run();
-    assert_eq!(c.category, trs_classify::Category::Tv);
+    assert_eq!(c.category, seedwell_classify::Category::Tv);
     assert_eq!(st.item_count(), 12);
     assert_eq!(st.seasons(), vec![1]);
     assert_eq!(st.groups[0].items[6].identity, "tv:some-anime:s01e07");
@@ -294,7 +294,7 @@ fn movie_collection_with_subtitles_and_stacks() {
         2_000,
     );
     let (c, st) = fx.run();
-    assert_eq!(c.category, trs_classify::Category::Movie);
+    assert_eq!(c.category, seedwell_classify::Category::Movie);
     assert_eq!(st.kind, StructureKind::MovieCollection);
     assert!(st.multi);
     assert_eq!(st.item_count(), 3);
@@ -414,7 +414,7 @@ fn discography_with_discs() {
     }
     fx.add("The Velvet Echoes/2012 - Last Call/folder.jpg", 400_000);
     let (c, st) = fx.run();
-    assert_eq!(c.category, trs_classify::Category::Music);
+    assert_eq!(c.category, seedwell_classify::Category::Music);
     assert_eq!(st.kind, StructureKind::Music);
     assert!(st.multi);
     assert_eq!(st.item_count(), 3, "{:#?}", labels(&st));
@@ -475,7 +475,7 @@ fn book_bundle() {
         fx.add(format!("{a}/{t}/cover.jpg"), 100_000);
     }
     let (c, st) = fx.run();
-    assert_eq!(c.category, trs_classify::Category::Book);
+    assert_eq!(c.category, seedwell_classify::Category::Book);
     assert_eq!(st.kind, StructureKind::Books);
     assert_eq!(st.item_count(), 4);
     assert!(st.multi);
@@ -524,7 +524,7 @@ fn audiobook_bundle() {
     fx.add("Author Three - Third Tale.m4b", 300 * MB);
     let (c, st) = fx.run();
     assert!(
-        matches!(c.category, trs_classify::Category::Audiobook),
+        matches!(c.category, seedwell_classify::Category::Audiobook),
         "{:?}",
         c.category
     );
@@ -552,7 +552,7 @@ fn software_multi_platform() {
     fx.add("Linux/cool-app-2.4.1.x86_64.rpm", 150 * MB);
     fx.add("README.txt", 2_000);
     let (c, st) = fx.run();
-    assert_eq!(c.category, trs_classify::Category::Software);
+    assert_eq!(c.category, seedwell_classify::Category::Software);
     assert_eq!(st.kind, StructureKind::Software);
     assert!(!st.multi, "platform variants are their own trigger");
     assert!(st.has_platform_variants());
@@ -627,7 +627,7 @@ fn empty_input() {
 
 #[test]
 fn library_identities_match_items() {
-    use trs_classify::{Category, library_identities};
+    use seedwell_classify::{Category, library_identities};
     let ids = library_identities(
         Category::Tv,
         Some("Fallen Kingdom"),
@@ -697,7 +697,7 @@ fn big_torrent_is_fast_and_capped() {
 
 #[test]
 fn twenty_thousand_files_per_kind() {
-    use trs_classify::Category;
+    use seedwell_classify::Category;
     let mk = |f: &dyn Fn(usize) -> String| -> Vec<String> { (0..20_000).map(f).collect() };
     let sets: Vec<(Category, Vec<String>)> = vec![
         (
@@ -761,7 +761,7 @@ fn episodes_read_as_movies_get_distinct_rows() {
     let paths: Vec<String> = (1..=3).map(|e| format!("{t}/Fallen.Kingdom.S01E{e:02}.1080p.mkv")).collect();
     let entries: Vec<FileEntry> = paths.iter().map(|p| FileEntry { path: p, size: 300 * MB }).collect();
     let mut c = classify(&Input::new(t, &entries));
-    c.category = trs_classify::Category::Movie;
+    c.category = seedwell_classify::Category::Movie;
     let s = structure(&c, &entries);
     let got: Vec<&str> = s.items().map(|(_, i)| i.label.as_str()).collect();
     assert_eq!(got, ["Fallen Kingdom — S01E01", "Fallen Kingdom — S01E02", "Fallen Kingdom — S01E03"]);
@@ -777,7 +777,7 @@ fn same_film_twice_is_told_apart_by_quality() {
     let b = FileEntry { path: "Blaze.1995.720p.WEB.mkv", size: 3 * GB };
     let entries = [a, b];
     let mut c = classify(&Input::new("Blaze.1995.Pack", &entries));
-    c.category = trs_classify::Category::Movie;
+    c.category = seedwell_classify::Category::Movie;
     let s = structure(&c, &entries);
     let labels: Vec<&str> = s.items().map(|(_, i)| i.label.as_str()).collect();
     assert_eq!(labels.len(), 2);

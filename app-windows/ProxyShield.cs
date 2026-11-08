@@ -7,7 +7,7 @@ using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Markup;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 using Windows.UI;
 
 namespace Seedwell;

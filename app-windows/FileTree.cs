@@ -3,7 +3,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
@@ -334,7 +334,7 @@ sealed class FileTree
         switch (command)
         {
             case FileCommand.Reveal r when r.Path is string path:
-                if (!Quiet.On) System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"/select,\"{path}\"") { UseShellExecute = true });
+                if (!Quiet.On) Shell.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"/select,\"{path}\"") { UseShellExecute = true });
                 break;
             case FileCommand.Reveal:
                 if (app.LibraryWindowIfCreated?.Content?.XamlRoot is XamlRoot root) RowCommands.Run(app.Core, new RowCommand.Reveal(), [row], root);

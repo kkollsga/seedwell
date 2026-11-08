@@ -1,8 +1,8 @@
 //! Storage benchmarks (harness = false): SHA-1/SHA-256 throughput, verified sequential piece
 //! writes, and random 16 KiB block reads served from the page cache.
 //!
-//! Run: `cargo bench -p trs-storage --bench storage_bench`
-//! Env: `TRS_BENCH_MB` (write test size, default 2048), `TRS_BENCH_DIRS` (':'-separated dirs;
+//! Run: `cargo bench -p seedwell-storage --bench storage_bench`
+//! Env: `SEEDWELL_BENCH_MB` (write test size, default 2048), `SEEDWELL_BENCH_DIRS` (':'-separated dirs;
 //! default = `<repo>/bench/downloads/storage-bench` and `$TMPDIR`). Bench files are deleted after use.
 
 use std::collections::VecDeque;
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use trs_storage::{
+use seedwell_storage::{
     BLOCK_SIZE, DiskConfig, DiskIo, FilePath, FileSpec, Layout, Mode, PieceOutcome, StorageError,
     TorrentConfig, TorrentHandle, WriteAck, hash,
 };
@@ -90,7 +90,7 @@ fn bench_hashing() {
     println!(
         "cpu feature (SHA instructions) detected: {}  | perf cores: {}",
         hash::sha1_hw_accelerated(),
-        trs_storage::perf_core_count()
+        seedwell_storage::perf_core_count()
     );
     let mut rng = Rng(0x1234_5678_9abc_def1);
     let mut buf = vec![0u8; 4 << 20];
@@ -132,7 +132,7 @@ fn bench_hashing() {
     );
     println!("SHA-256 (sha2 crate, 1 thread)               : {s256:6.2} GB/s");
     // Aggregate over perf cores.
-    let threads = trs_storage::perf_core_count();
+    let threads = seedwell_storage::perf_core_count();
     let per = 256;
     let t = Instant::now();
     std::thread::scope(|s| {
@@ -207,7 +207,7 @@ fn bench_write(dir: &Path, total_mb: u64) {
         h.attach_hashes(hashes.clone()).unwrap();
 
         let t = Instant::now();
-        let mut inflight: VecDeque<trs_storage::Pending<PieceOutcome>> = VecDeque::new();
+        let mut inflight: VecDeque<seedwell_storage::Pending<PieceOutcome>> = VecDeque::new();
         let mut done = 0u64;
         for p in 0..pieces as u32 {
             let data = &contents[(p % 4) as usize];
@@ -269,7 +269,7 @@ fn bench_reads(dir: &Path) {
             for c in chunk.chunks_mut(8) {
                 c.copy_from_slice(&rng.next().to_le_bytes());
             }
-            trs_platform::fs::write_all_at(&f, &chunk, i << 20).unwrap();
+            seedwell_platform::fs::write_all_at(&f, &chunk, i << 20).unwrap();
         }
     }
     let blocks = file_len / u64::from(BLOCK_SIZE);
@@ -285,11 +285,11 @@ fn bench_reads(dir: &Path) {
     let f = std::fs::File::open(&path).unwrap();
     let mut buf = vec![0u8; BLOCK_SIZE as usize];
     for &o in offsets.iter().take(20_000) {
-        trs_platform::fs::read_exact_at(&f, &mut buf, o).unwrap(); // warm
+        seedwell_platform::fs::read_exact_at(&f, &mut buf, o).unwrap(); // warm
     }
     let t = Instant::now();
     for &o in &offsets {
-        trs_platform::fs::read_exact_at(&f, &mut buf, o).unwrap();
+        seedwell_platform::fs::read_exact_at(&f, &mut buf, o).unwrap();
     }
     let e = t.elapsed().as_secs_f64();
     println!(
@@ -352,7 +352,7 @@ fn run_reads(h: &TorrentHandle, offsets: &[u64], window: usize, piece_len: u32) 
         );
         loop {
             if inflight.len() >= window {
-                let f: trs_storage::Pending<Vec<u8>> = inflight.pop_front().unwrap();
+                let f: seedwell_storage::Pending<Vec<u8>> = inflight.pop_front().unwrap();
                 spare.push(f.wait().unwrap());
             }
             let buf = spare.pop().unwrap_or_default();
@@ -377,14 +377,14 @@ fn run_reads(h: &TorrentHandle, offsets: &[u64], window: usize, piece_len: u32) 
 }
 
 fn bench_dirs() -> Vec<PathBuf> {
-    if let Ok(v) = std::env::var("TRS_BENCH_DIRS") {
+    if let Ok(v) = std::env::var("SEEDWELL_BENCH_DIRS") {
         return v.split(':').map(PathBuf::from).collect();
     }
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/downloads/storage-bench");
     let tmp = std::env::var_os("TMPDIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| "/tmp".into())
-        .join("trs-storage-bench");
+        .join("seedwell-storage-bench");
     vec![repo, tmp]
 }
 
@@ -393,7 +393,7 @@ fn main() {
         println!("storage_bench: bench");
         return;
     }
-    let total_mb: u64 = std::env::var("TRS_BENCH_MB")
+    let total_mb: u64 = std::env::var("SEEDWELL_BENCH_MB")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(2048);

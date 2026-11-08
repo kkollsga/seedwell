@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use common::net::*;
 use common::*;
-use trs_portmap::driver::spawn;
-use trs_portmap::{Event, Method, Protocol};
+use seedwell_portmap::driver::spawn;
+use seedwell_portmap::{Event, Method, Protocol};
 
 #[tokio::test]
 async fn pcp_maps_renews_and_deletes() {

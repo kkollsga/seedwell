@@ -408,9 +408,9 @@ fn sim_host_ends_with_its_daemon() {
     let mut d = sim_daemon(root.path(), "o");
     assert_eq!(sim(root.path(), &d, &["sim", "add", "single", "--size", "100KB"]).code, 0);
     let host_sock = std::fs::read_dir(root.path().join("tmp").join("seedwell-sim")).unwrap().next().unwrap().unwrap().path().join("host.sock");
-    assert!(trs_platform::ipc::is_served(&host_sock));
+    assert!(seedwell_platform::ipc::is_served(&host_sock));
     d.terminate();
-    wait_until(30, "the sim host to follow the daemon", || (!trs_platform::ipc::is_served(&host_sock)).then_some(()));
+    wait_until(30, "the sim host to follow the daemon", || (!seedwell_platform::ipc::is_served(&host_sock)).then_some(()));
 }
 
 fn tree_files(dir: &Path) -> Vec<String> {

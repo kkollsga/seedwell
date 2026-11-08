@@ -1,6 +1,6 @@
 //! The native backend (FSEvents on macOS, inotify on Linux, ReadDirectoryChangesW on Windows).
 
-use trs_fswatch::{ActiveBackend, Backend, RawEvent, watch};
+use seedwell_fswatch::{ActiveBackend, Backend, RawEvent, watch};
 
 use crate::common::*;
 
@@ -47,10 +47,10 @@ fn stop_is_clean_under_a_burst() {
     #[cfg(target_os = "macos")]
     {
         let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while trs_fswatch::debug::live_streams() != 0 && std::time::Instant::now() < until {
+        while seedwell_fswatch::debug::live_streams() != 0 && std::time::Instant::now() < until {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert_eq!(trs_fswatch::debug::live_streams(), 0, "the stream still holds its state after stop");
+        assert_eq!(seedwell_fswatch::debug::live_streams(), 0, "the stream still holds its state after stop");
     }
 }
 

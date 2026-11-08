@@ -12,7 +12,7 @@ use std::io;
 
 use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use ring::rand::{SecureRandom, SystemRandom};
-use trs_sync_proto::ids::FolderId;
+use seedwell_sync_proto::ids::FolderId;
 
 use crate::secrets::SecretStore;
 

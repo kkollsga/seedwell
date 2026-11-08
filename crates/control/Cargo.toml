@@ -1,5 +1,5 @@
 [package]
-name = "trs-control"
+name = "seedwell-control"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,28 +9,28 @@ description = "Seedwell agent interface: versioned JSON-lines control protocol a
 
 [features]
 default = ["engine", "sync"]
-# The adapter from `trs_engine::EngineHandle` to the protocol (`serve`, `start_for_app`). Without
+# The adapter from `seedwell_engine::EngineHandle` to the protocol (`serve`, `start_for_app`). Without
 # it the crate is protocol, client and server generic over a `Backend`; the CLI client needs no engine.
-engine = ["dep:trs-engine"]
-# Folder sync (SPEC 7G): the `sync.*` methods over a `trs_sync_net::SyncHandle`, and the glue that lends
+engine = ["dep:seedwell-engine"]
+# Folder sync (SPEC 7G): the `sync.*` methods over a `seedwell_sync_net::SyncHandle`, and the glue that lends
 # it the engine's DHT and port mapping. Wherever the engine is, sync is too.
-sync = ["engine", "dep:trs-sync-net", "dep:trs-sync", "dep:trs-sync-proto", "dep:trs-dht", "dep:trs-media"]
+sync = ["engine", "dep:seedwell-sync-net", "dep:seedwell-sync", "dep:seedwell-sync-proto", "dep:seedwell-dht", "dep:seedwell-media"]
 
 [dependencies]
-trs-platform = { path = "../platform" }
-trs-state = { path = "../state" }
-trs-classify = { path = "../classify" }
+seedwell-platform = { path = "../platform" }
+seedwell-state = { path = "../state" }
+seedwell-classify = { path = "../classify" }
 # `tracker_log`: reads the developer-mode log (masked JSON lines).
-trs-devlog = { path = "../devlog" }
-trs-engine = { path = "../engine", optional = true }
-trs-sync-net = { path = "../sync-net", optional = true }
-trs-sync = { path = "../sync", optional = true }
+seedwell-devlog = { path = "../devlog" }
+seedwell-engine = { path = "../engine", optional = true }
+seedwell-sync-net = { path = "../sync-net", optional = true }
+seedwell-sync = { path = "../sync", optional = true }
 # Images in chat: the caps, and an SVG drawn as PNG for `chat.attachment` with `png`.
-trs-media = { path = "../media", optional = true }
+seedwell-media = { path = "../media", optional = true }
 # Folder ids and keys (parsing a link's name hint for the default place of a joined folder).
-trs-sync-proto = { path = "../sync-proto", optional = true }
+seedwell-sync-proto = { path = "../sync-proto", optional = true }
 # `PublicInfoHash` and the lookup stream, for the DHT the engine lends to sync.
-trs-dht = { path = "../dht", optional = true }
+seedwell-dht = { path = "../dht", optional = true }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 # `net` for the Unix socket (and `peer_cred`) or the named pipe, `fs` for reading .torrent paths and socket files.
@@ -40,5 +40,5 @@ getrandom = { version = "0.4", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
-trs-socks = { path = "../socks", features = ["testkit"] }
+seedwell-socks = { path = "../socks", features = ["testkit"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "test-util"] }

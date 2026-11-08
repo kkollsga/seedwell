@@ -8,7 +8,7 @@ use common::fake::FakeSource;
 use common::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use trs_stream::FileRange;
+use seedwell_stream::FileRange;
 
 fn file(name: &str, offset: u64, len: u64) -> FileRange {
 

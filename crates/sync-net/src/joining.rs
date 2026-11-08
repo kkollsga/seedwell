@@ -38,7 +38,7 @@ pub(crate) fn progress(noun: &str, maker: Option<&str>, maker_addrs: &[SocketAdd
         return if maker.is_some_and(|m| !m.is_empty()) && maker_addrs.contains(&a) { format!("Trying {who} at {a}…") } else { format!("Trying {a}…") };
     }
     if let Some(name) = &trail.reached {
-        return format!(concat!("Found {name}, which cannot admit this ", trs_platform::computer!(), "; waiting for an owner or admin of this {noun}"), name = name, noun = noun);
+        return format!(concat!("Found {name}, which cannot admit this ", seedwell_platform::computer!(), "; waiting for an owner or admin of this {noun}"), name = name, noun = noun);
     }
     let mut places: Vec<&str> = Vec::new();
     if ways.link {
@@ -51,7 +51,7 @@ pub(crate) fn progress(noun: &str, maker: Option<&str>, maker_addrs: &[SocketAdd
         places.push("on the Internet");
     }
     match places.as_slice() {
-        [] => format!("Waiting for {who}: this {} looks on neither the local network nor the Internet (Settings), so add its address", trs_platform::computer!()),
+        [] => format!("Waiting for {who}: this {} looks on neither the local network nor the Internet (Settings), so add its address", seedwell_platform::computer!()),
         [one] => format!("Looking for {who} {one}…"),
         [first @ .., last] => format!("Looking for {who} {} and {last}…", first.join(", ")),
     }
@@ -69,7 +69,7 @@ pub(crate) fn dial_problem(maker: Option<&str>, addr: SocketAddr, e: &io::Error)
         io::ErrorKind::TimedOut => format!("{at}: no answer"),
         io::ErrorKind::PermissionDenied => format!("{at}: another device answers there now"),
         io::ErrorKind::HostUnreachable | io::ErrorKind::NetworkUnreachable | io::ErrorKind::AddrNotAvailable => {
-            format!(concat!("{at}: not reachable from this ", trs_platform::computer!(), "'s network"), at = at)
+            format!(concat!("{at}: not reachable from this ", seedwell_platform::computer!(), "'s network"), at = at)
         }
         _ => format!("{at}: {e}"),
     }
@@ -80,7 +80,7 @@ pub(crate) fn not_admitted(name: &str, noun: &str) -> String {
     format!(
         concat!(
             "{name} answered but does not admit this ",
-            trs_platform::computer!(),
+            seedwell_platform::computer!(),
             ": it is not an owner or admin of this {noun}, or the {noun} is paused or shared only on its local network there"
         ),
         name = name,
@@ -92,7 +92,7 @@ pub(crate) fn not_admitted(name: &str, noun: &str) -> String {
 /// to be admitted (0.1.13).
 pub(crate) fn from_your_devices(name: &str, by: Option<&str>) -> String {
     let by = by.filter(|b| !b.is_empty()).map(|b| format!(" ({b})")).unwrap_or_default();
-    format!(concat!("Waiting for one of your devices that can admit this ", trs_platform::computer!(), " to “{name}”{by}…"), name = name, by = by)
+    format!(concat!("Waiting for one of your devices that can admit this ", seedwell_platform::computer!(), " to “{name}”{by}…"), name = name, by = by)
 }
 
 /// A device that has no channels (its Seedwell is older than 0.1.6's chat bit) was met while joining a channel.

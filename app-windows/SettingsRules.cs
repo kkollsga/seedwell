@@ -2,12 +2,12 @@ using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
 /// <summary>
-/// Settings › Rules (the Mac's RulesTab), drawn from the core's rules editor (<c>rules_editor_model</c>, trs-ffi
+/// Settings › Rules (the Mac's RulesTab), drawn from the core's rules editor (<c>rules_editor_model</c>, seedwell-ffi
 /// settings_rules.rs): Rules or Trackers, the list on the left (numbered rules that drag into another order, the Default
 /// rule apart, trackers, + and −), the editor on the right (the same rows and controls as Settings, compact; their
 /// changes go to <c>rules_editor_apply</c>, not to settings_apply), a tracker's folder editor (shared with its Info
@@ -16,7 +16,7 @@ namespace Seedwell;
 /// </summary>
 sealed partial class SettingsPage
 {
-    RulesEditorState rulesState = TrsFfiMethods.RulesEditorState();
+    RulesEditorState rulesState = SeedwellFfiMethods.RulesEditorState();
     readonly List<string> rulesProblems = [];
     ProfileRecord[]? profiles;
     RuleCount[]? ruleCounts;
@@ -29,7 +29,7 @@ sealed partial class SettingsPage
     {
         profiles ??= app.Core.ProfilesLoad();
         var rules = state.Rules;
-        var q = TrsFfiMethods.RulesEditorPreviewQuery(rulesState, rules);
+        var q = SeedwellFfiMethods.RulesEditorPreviewQuery(rulesState, rules);
         RulePreview preview;
         try { preview = app.Core.RulePreview(q.Rules, q.RuleId); }
         catch (Exception e) { AppLog.Write($"rule preview failed: {e.Message}"); preview = new RulePreview(0, 0, ""); }
@@ -47,7 +47,7 @@ sealed partial class SettingsPage
     internal void RulesApply(RulesChange change, bool redraw = true)
     {
         RulesApplied r;
-        try { r = TrsFfiMethods.RulesEditorApply(RulesInput(), change); }
+        try { r = SeedwellFfiMethods.RulesEditorApply(RulesInput(), change); }
         catch (Exception e) { AppLog.Write($"rules editor failed: {e.Message}"); return; }
         rulesState = r.State;
         AppLog.Write($"rules editor: {change.GetType().Name}{(r.Effect is null ? "" : $" -> {r.Effect.GetType().Name}")}");
@@ -90,7 +90,7 @@ sealed partial class SettingsPage
     UIElement RulesEditor()
     {
         RulesEditorModel m;
-        try { m = TrsFfiMethods.RulesEditorModel(RulesInput()); }
+        try { m = SeedwellFfiMethods.RulesEditorModel(RulesInput()); }
         catch (Exception e) { AppLog.Write($"rules editor model failed: {e.Message}"); return new TextBlock(); }
         RulesModel = m;
         var s = new StackPanel { Spacing = 10 };

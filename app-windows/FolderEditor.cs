@@ -2,7 +2,7 @@ using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using uniffi.trs_ffi;
+using uniffi.seedwell_ffi;
 
 namespace Seedwell;
 
@@ -19,7 +19,7 @@ static class FolderEditor
     internal static UIElement Draw(App app, ProfileRecord record, VolumeWarning[] warnings, Action<ProfileRecord> changed, bool? typesOpen, Action<bool> typesToggled)
     {
         var s = new StackPanel { Spacing = 7 };
-        var v = TrsFfiMethods.TrackerFoldersView(record, warnings);
+        var v = SeedwellFfiMethods.TrackerFoldersView(record, warnings);
         foreach (var r in v.Rows) s.Children.Add(Row(app, record, r, changed));
         if (v.Warning is string w) s.Children.Add(new TextBlock { Text = w, FontSize = Theme.Caption, Foreground = Res("SystemFillColorCautionBrush"), TextWrapping = TextWrapping.Wrap });
         s.Children.Add(new TextBlock { Text = v.Note, FontSize = Theme.Caption, Foreground = Res("TextFillColorTertiaryBrush"), TextWrapping = TextWrapping.Wrap });
@@ -55,7 +55,7 @@ static class FolderEditor
     /// <summary>A folder: its label, the path (empty: the placeholder, the default), Choose… and its clear button.</summary>
     static FrameworkElement Row(App app, ProfileRecord record, TrackerFolderRow r, Action<ProfileRecord> changed)
     {
-        void Set(string? path) => changed(TrsFfiMethods.TrackerFoldersSet(record, r.Category, r.Field, path));
+        void Set(string? path) => changed(SeedwellFfiMethods.TrackerFoldersSet(record, r.Category, r.Field, path));
         var line = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         var box = new TextBox { Text = r.Path ?? "", PlaceholderText = r.Placeholder, Width = 240, MinHeight = 0 };
         ToolTipService.SetToolTip(box, r.Help);

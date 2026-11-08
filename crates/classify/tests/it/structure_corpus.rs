@@ -5,7 +5,7 @@
 //!
 //! The row format is the one of `tests/corpus.rs`.
 
-use trs_classify::{Category, FileEntry, Input, Structure, StructureKind, classify, structure};
+use seedwell_classify::{Category, FileEntry, Input, Structure, StructureKind, classify, structure};
 
 struct Row {
     line: usize,

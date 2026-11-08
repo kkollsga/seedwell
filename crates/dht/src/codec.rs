@@ -1,7 +1,7 @@
 //! KRPC (BEP 5) wire codec: a purpose-built, allocation-free bencode reader and a
 //! canonical (sorted-key) writer.
 //!
-//! Why not `trs-bencode`: KRPC messages are tiny, flat and must be parsed from
+//! Why not `seedwell-bencode`: KRPC messages are tiny, flat and must be parsed from
 //! hostile UDP with zero allocation, tolerant of unknown keys and unsorted dicts.
 //! A 300-line streaming reader gives us that without coupling the DHT's hot path
 //! to a general-purpose tree decoder.

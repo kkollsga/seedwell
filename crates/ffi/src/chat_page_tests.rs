@@ -4,7 +4,7 @@ use super::*;
 use crate::chat_files::ChatFileCard;
 use crate::chat_markdown::{ChatRun, ChatTableCell};
 use crate::chat_text::tests::{channel, topic};
-use crate::host::host_windows_all;
+use crate::host::{host_windows_all, HostWindow};
 use crate::library::tests::{mock, Clock};
 use crate::mail::chat_tag_note;
 use crate::sync::SyncGoneDevice;
@@ -47,7 +47,7 @@ fn input(c: SyncChannel, messages: Vec<SyncMessage>) -> ChatPageInput {
         channel: Some(c),
         topic: None,
         direct: None,
-        read: ChatPageRead { messages, pending: Vec::new(), follow: None, direct_agents: SyncAgentAccess::Off, own_devices: vec!["D0".into()], joined: Vec::new() },
+        read: ChatPageRead { messages, pending: Vec::new(), follow: None, direct_agents: SyncAgentAccess::Off, own_devices: vec!["D0".into()], joined: Vec::new(), groups: Vec::new() },
         members: Vec::new(),
         now_unix_s: NOW,
     }
@@ -60,7 +60,7 @@ fn direct(online: Option<bool>, messages: Vec<SyncMessage>) -> ChatPageInput {
         channel: None,
         topic: None,
         direct: online.map(|online| SyncDirect { device_id: "D2".into(), name: "Kari's iPhone".into(), user: String::new(), online, unread: 0, last_message_s: None }),
-        read: ChatPageRead { messages, pending: Vec::new(), follow: None, direct_agents: SyncAgentAccess::Read, own_devices: Vec::new(), joined: Vec::new() },
+        read: ChatPageRead { messages, pending: Vec::new(), follow: None, direct_agents: SyncAgentAccess::Read, own_devices: Vec::new(), joined: Vec::new(), groups: Vec::new() },
         members: Vec::new(),
         now_unix_s: NOW,
     }
@@ -321,6 +321,7 @@ fn the_channel_menu_with_every_window_and_with_the_windows_set() {
             "-".into(),
             "New Topic…".into(),
             "Rename…".into(),
+            "Move to Group[New Group…]".into(),
             "-".into(),
             "Leave Channel…".into()
         ]
@@ -331,10 +332,13 @@ fn the_channel_menu_with_every_window_and_with_the_windows_set() {
     assert_eq!((command, *toggle, help.as_str()), (&ChatPageCommand::SetFollow { on: true }, true, follow.line.as_str()));
     let ChatPageMenuEntry::Item { dialog, .. } = find(&t.menu.entries, "Mute") else { panic!() };
     assert!(dialog.is_none(), "Mute needs no question");
-    // The Windows app (no Share dialog yet): Share… goes; the dialogs stay. Without the dialogs, their items go too.
+    // The Windows app (no Share dialog, no groups yet): Share… and Move to Group ▸ go; the dialogs stay. Without the
+    // dialogs, their items go too.
     let w = page(i.clone(), &WINDOWS);
     assert!(w.toolbar.share.is_none());
-    assert_eq!(titles(&w.toolbar.menu.entries), titles(&t.menu.entries));
+    let mut no_groups = titles(&t.menu.entries);
+    no_groups.retain(|x| !x.starts_with("Move to Group"));
+    assert_eq!(titles(&w.toolbar.menu.entries), no_groups);
     let bare = page(i, &[]);
     assert_eq!(&titles(&bare.toolbar.menu.entries)[2..], std::slice::from_ref(&follow.menu_title), "no separator left at the end");
     // A reader: no Share…, New Topic… disabled, Agents shown but not changeable, the wake command off while closed.
@@ -351,6 +355,7 @@ fn the_channel_menu_with_every_window_and_with_the_windows_set() {
             "-",
             "(New Topic…)",
             "Rename…",
+            "Move to Group[New Group…]",
             "-",
             "Leave Channel…"
         ]
@@ -359,12 +364,44 @@ fn the_channel_menu_with_every_window_and_with_the_windows_set() {
     assert!(!p.composer.can_post && !p.composer.attach);
 }
 
+/// Catches the page's Move to Group ▸ not checking the channel's group, offering Remove from Group for a channel in
+/// none, or New Group… without its dialog (the host would have no name to make it with).
+#[test]
+fn the_channel_menu_moves_it_between_the_sidebars_groups() {
+    use crate::chat_groups::{chat_new_group_dialog, ChatGroupIcon, SyncChatGroup};
+    let mut c = channel("Bridge", 3, 2, 0, false);
+    c.group = Some("g2".into());
+    let mut i = input(c, Vec::new());
+    i.read.groups = vec![
+        SyncChatGroup { id: "g1".into(), name: "Home".into(), icon: ChatGroupIcon::House },
+        SyncChatGroup { id: "g2".into(), name: "Agents".into(), icon: ChatGroupIcon::Sparkles },
+    ];
+    let p = page(i.clone(), &host_windows_all());
+    let sub = |m: &ChatPageMenu| m.entries.iter().find_map(|e| match e {
+        ChatPageMenuEntry::Submenu { title, entries } if title == "Move to Group" => Some(entries.clone()),
+        _ => None,
+    });
+    let entries = sub(&p.toolbar.menu).expect("a submenu");
+    let entries = &entries;
+    assert_eq!(titles(entries), ["Home", "✓Agents", "-", "New Group…", "Remove from Group"]);
+    let ChatPageMenuEntry::Item { command, dialog, .. } = find(entries, "New Group…") else { panic!() };
+    assert_eq!((command, dialog.as_ref()), (&ChatPageCommand::NewGroup, Some(&chat_new_group_dialog())));
+    let ChatPageMenuEntry::Item { command, .. } = find(entries, "Remove from Group") else { panic!() };
+    assert_eq!(command, &ChatPageCommand::MoveToGroup { group_id: None });
+    // Without the chat dialogs: the groups only.
+    let bare = page(i.clone(), &[HostWindow::ChatGroups]);
+    assert_eq!(titles(&sub(&bare.toolbar.menu).expect("a submenu")), ["Home", "✓Agents", "-", "Remove from Group"]);
+    // A host that cannot draw groups (Windows until it does) is offered no Move to Group ▸ it could not run.
+    let no_groups: Vec<HostWindow> = host_windows_all().into_iter().filter(|w| *w != HostWindow::ChatGroups).collect();
+    assert!(sub(&page(i, &no_groups).toolbar.menu).is_none());
+}
+
 /// An admin's removal of a channel member waits for the owner's device (SPEC §7G.1), or came back refused: the member's
 /// row in the panel says so, as the folder page's row does. Fails when the panel shows only a disabled Remove from
 /// Channel with no line saying why (the gap the Windows agent found), or drops the owner's reason for refusing.
 #[test]
 fn a_members_pending_or_refused_removal_is_its_rows_line() {
-    use trs_sync_net::removals::Asked;
+    use seedwell_sync_net::removals::Asked;
     let mut c = channel("Team", 3, 1, 0, false);
     c.role = SyncRole::Admin;
     let mut i = input(c, Vec::new());
@@ -428,7 +465,7 @@ fn the_composer_says_when_it_may_post_and_send() {
     let c = &p.composer;
     assert!(c.can_post && c.attach && c.cannot_post.is_none());
     assert_eq!((c.placeholder.as_str(), c.send_title.as_str(), c.reply_cancel_help.as_str()), ("Message Family", "Send", "Cancel Reply (Esc)"));
-    assert!(c.send_help.starts_with("Send (") && c.send_help.contains(trs_platform::return_key!()));
+    assert!(c.send_help.starts_with("Send (") && c.send_help.contains(seedwell_platform::return_key!()));
     assert_eq!(p.empty.as_deref(), Some("No messages yet"));
     // A topic's page is named by the topic.
     let mut i = input(channel("Family", 2, 1, 0, false), Vec::new());

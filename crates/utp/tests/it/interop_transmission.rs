@@ -1,7 +1,7 @@
 //! Interop against a real Transmission (libutp) on loopback. Needs `transmission-daemon`,
 //! `transmission-create` and `transmission-remote` from Homebrew, and takes about 40 s (Transmission
 //! only re-evaluates chokes every 10 s). Run with:
-//! `cargo test -p trs-utp --test interop_transmission -- --ignored --nocapture`
+//! `cargo test -p seedwell-utp --test interop_transmission -- --ignored --nocapture`
 
 #[test]
 #[ignore = "needs Transmission 4.x installed; spawns daemons on ports 9291-9293 and 51890-51892"]

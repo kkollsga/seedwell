@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use tokio::net::{TcpListener, UdpSocket};
-use trs_engine::config::PortmapConfig;
-use trs_engine::*;
+use seedwell_engine::config::PortmapConfig;
+use seedwell_engine::*;
 
 /// A UDP socket that swallows everything: a DHT node that never answers.
 async fn blackhole() -> std::net::SocketAddrV4 {

@@ -60,6 +60,8 @@ pub struct PeerState {
     pub remote_ut_metadata: u8,
     /// Peer's `ut_pex` id (0 = unsupported).
     pub remote_ut_pex: u8,
+    /// Peer's id for libtorrent's `upload_only` message (0 = unsupported).
+    pub remote_upload_only: u8,
     /// Peer's `reqq` (0 = unknown).
     pub remote_reqq: u16,
     /// Peer's advertised listen port (0 = unknown).
@@ -81,6 +83,7 @@ impl PeerState {
             remote_reserved,
             remote_ut_metadata: 0,
             remote_ut_pex: 0,
+            remote_upload_only: 0,
             remote_reqq: 0,
             remote_listen_port: 0,
             remote_metadata_size: 0,
@@ -114,6 +117,7 @@ impl PeerState {
     pub fn apply_extended_handshake(&mut self, h: &ExtendedHandshake<'_>) {
         self.remote_ut_metadata = h.ut_metadata.unwrap_or(0);
         self.remote_ut_pex = h.ut_pex.unwrap_or(0);
+        self.remote_upload_only = h.lt_upload_only.unwrap_or(0);
         self.remote_reqq = h.reqq.map_or(0, |r| r.min(u32::from(u16::MAX)) as u16);
         self.remote_listen_port = h.listen_port.unwrap_or(0);
         self.remote_metadata_size = h.metadata_size.unwrap_or(0);
@@ -154,11 +158,12 @@ mod tests {
 
     #[test]
     fn apply_handshake() {
-        let payload = b"d1:md11:ut_metadatai3e6:ut_pexi4ee13:metadata_sizei999e1:pi6881e4:reqqi70000e1:v40:LongClientNameThatIsDefinitelyMoreThan32e";
+        let payload = b"d1:md11:upload_onlyi5e11:ut_metadatai3e6:ut_pexi4ee13:metadata_sizei999e1:pi6881e4:reqqi70000e1:v40:LongClientNameThatIsDefinitelyMoreThan32e";
         let h = ExtendedHandshake::parse(payload).unwrap();
         let mut s = PeerState::new(Reserved::none());
         s.apply_extended_handshake(&h);
         assert_eq!((s.remote_ut_metadata, s.remote_ut_pex), (3, 4));
+        assert_eq!(s.remote_upload_only, 5);
         assert_eq!(s.remote_reqq, u16::MAX);
         assert_eq!(s.remote_listen_port, 6881);
         assert_eq!(s.remote_metadata_size, 999);

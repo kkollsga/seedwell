@@ -11,8 +11,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use trs_control::display;
-use trs_platform::file_manager;
+use seedwell_control::display;
+use seedwell_platform::file_manager;
 
 use crate::backend::Backend;
 use crate::library::{clock_at, LocalClock};
@@ -370,7 +370,7 @@ fn general(c: &CardInputs, i: &TorrentInfo) -> InfoCardSection {
     rows.push(line("Ratio", display::ratio(i.ratio) + &goal));
     rows.push(line("Uploaded", display::bytes(i.uploaded_total)));
     rows.push(line("Downloaded", display::bytes(i.downloaded_total)));
-    let mut location = styled(line("Location", trs_platform::dirs::shown(std::path::Path::new(&i.save_path))), InfoValueStyle::Long);
+    let mut location = styled(line("Location", seedwell_platform::dirs::shown(std::path::Path::new(&i.save_path))), InfoValueStyle::Long);
     location.button = Some(InfoButton { symbol_only: true, ..button(REVEAL, REVEAL, InfoCommand::Reveal) });
     rows.push(location);
     let skipped = if i.skipped_note.is_empty() { String::new() } else { format!(" · {}", i.skipped_note) };

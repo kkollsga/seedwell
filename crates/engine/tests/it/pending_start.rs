@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use tokio::net::TcpListener;
-use trs_engine::config::{AfterAdd, AskMode, SmartAddConfig, WatchConfig, WatchMode};
-use trs_engine::*;
+use seedwell_engine::config::{AfterAdd, AskMode, SmartAddConfig, WatchConfig, WatchMode};
+use seedwell_engine::*;
 
 const DELAY: u32 = 3;
 
@@ -80,7 +80,7 @@ async fn a_pending_torrent_is_silent_for_the_whole_wait_and_starts_at_the_deadli
     assert!(!added.needs_choice);
     let p = added.pending.expect("the add reports the grace period");
     assert!(!p.paused && p.remaining_ms > 2000 && p.remaining_ms <= 3000, "{p:?}");
-    let now_ms = trs_engine::util::unix_ms();
+    let now_ms = seedwell_engine::util::unix_ms();
     assert!(p.deadline_ms >= now_ms && p.deadline_ms <= now_ms + 3100, "{p:?} vs {now_ms}");
 
     // The seeder is told about us and dials; nobody answers, nothing is announced, no lookup.
@@ -309,7 +309,7 @@ async fn a_torrent_that_needs_a_choice_is_not_given_a_countdown() {
     });
     let n = node(|c| {
         grace(DELAY)(c);
-        c.detect = Some(trs_engine::config::DetectionConfig::default());
+        c.detect = Some(seedwell_engine::config::DetectionConfig::default());
         c.smart_add = SmartAddConfig { mode: AskMode::Smart, ..SmartAddConfig::default() };
     })
     .await;

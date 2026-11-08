@@ -19,11 +19,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use trs_platform::fs::Trashed;
-use trs_sync::ondemand::Deleted;
-use trs_sync_net::{Keep, SyncHandle};
-use trs_sync_net::status::FolderStatus;
-use trs_sync_proto::members::Role;
+use seedwell_platform::fs::Trashed;
+use seedwell_sync::ondemand::Deleted;
+use seedwell_sync_net::{Keep, SyncHandle};
+use seedwell_sync_net::status::FolderStatus;
+use seedwell_sync_proto::members::Role;
 
 use super::{Conn, Ctx, Reply, blocking, denied, reply};
 use crate::backend::Backend;
@@ -65,7 +65,7 @@ fn folder_out(h: &SyncHandle, f: &FolderStatus) -> SyncFolderDto {
 
 /// `sync.list` for an agent: no channel closed to agents, and no device this Mac is connected to only for such a
 /// channel or for private messages while those are closed (one that shares a folder with it stays).
-fn list_out(h: &SyncHandle, snap: &trs_sync_net::status::Snapshot, external: Option<u16>) -> SyncListDto {
+fn list_out(h: &SyncHandle, snap: &seedwell_sync_net::status::Snapshot, external: Option<u16>) -> SyncListDto {
     let mut l = s::list_dto(snap, external);
     l.folders = snap.folders.iter().map(|f| folder_out(h, f)).collect();
     let mut known: BTreeSet<String> = BTreeSet::new();
@@ -180,7 +180,7 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
             let invites = h.invites(&folder_id(&f)?).map_err(s::err)?;
             let d = folder_dto(&f);
             // A link that also carries a channel closed to agents is left out: it would hand over that channel.
-            let open = |i: &&trs_sync_net::InviteInfo| i.channel_id.as_deref().is_none_or(|c| super::chat_methods::channel_visible(&h, c));
+            let open = |i: &&seedwell_sync_net::InviteInfo| i.channel_id.as_deref().is_none_or(|c| super::chat_methods::channel_visible(&h, c));
             let invites = invites.iter().filter(open).take(1000).map(s::invite_dto).collect();
             let mut r = reply(&SyncInvitesDto { id: d.id.clone(), name: d.name.clone(), invites })?;
             r.note = Some(format!("the links of {} ({}) shown", clip(&d.name, 80), short(&d.id)));
@@ -222,7 +222,7 @@ pub(super) async fn call<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, req: Reques
             let f = pick(&h, &p.folder)?;
             let new = h.reshare(&folder_id(&f)?).await.map_err(s::err)?;
             let mut r = folder_reply(&h, &new, "shared again from this computer:")?;
-            r.note = Some(format!("{} shared again from this {} as a new folder ({}; was {})", clip(&f.name, 80), trs_platform::computer!(), short(&new.id), short(&f.id)));
+            r.note = Some(format!("{} shared again from this {} as a new folder ({}; was {})", clip(&f.name, 80), seedwell_platform::computer!(), short(&new.id), short(&f.id)));
             Ok(r)
         }
         Request::SyncSetShareUntil(p) => {
@@ -422,16 +422,16 @@ async fn remove_plan<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, h: &SyncHandle,
     let others = s::others_after_removal(only_here);
     let summary = match &trash_to {
         Some(t) => format!(
-            concat!("Will stop syncing `{}` on this ", trs_platform::computer!(), " AND MOVE THE FOLDER {} TO THE {}{}. {others} Confirmation is valid for {ttl} s."),
+            concat!("Will stop syncing `{}` on this ", seedwell_platform::computer!(), " AND MOVE THE FOLDER {} TO THE {}{}. {others} Confirmation is valid for {ttl} s."),
             d.name,
             d.path,
-            trs_platform::TRASH.to_uppercase(),
+            seedwell_platform::TRASH.to_uppercase(),
             s::trash_shown(t),
             others = others,
             ttl = ttl
         ),
         None => format!(
-            concat!("Will stop syncing `{}` on this ", trs_platform::computer!(), "; its files stay in {}. {others} Confirmation is valid for {ttl} s."),
+            concat!("Will stop syncing `{}` on this ", seedwell_platform::computer!(), "; its files stay in {}. {others} Confirmation is valid for {ttl} s."),
             d.name,
             d.path,
             others = others,
@@ -496,7 +496,7 @@ async fn remove_confirm<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, h: &SyncHand
             ApiError::new(
                 ErrorCode::Engine,
                 format!(
-                    concat!("the folder no longer syncs, but moving it to the ", trs_platform::trash!(), " failed ({}); its files are still in {}"),
+                    concat!("the folder no longer syncs, but moving it to the ", seedwell_platform::trash!(), " failed ({}); its files are still in {}"),
                     e,
                     at.display()
                 ),
@@ -512,7 +512,7 @@ async fn remove_confirm<B: Backend>(ctx: &Arc<Ctx<B>>, conn: &Conn, h: &SyncHand
         "removed {} ({}){}",
         clip(&d.name, 80),
         short(&d.id),
-        if out.files == "trashed" { concat!(" and moved it to the ", trs_platform::trash!()) } else { " (files kept)" }
+        if out.files == "trashed" { concat!(" and moved it to the ", seedwell_platform::trash!()) } else { " (files kept)" }
     ));
     Ok(r)
 }
@@ -590,7 +590,7 @@ fn set_settings(h: &SyncHandle, p: SyncSettingsParams) -> Result<Reply, ApiError
         note.push("LAN discovery follows at the next start".to_owned());
     }
     let kib = |b: u64, what: &str| -> Result<u32, ApiError> {
-        if b > trs_state::config::MAX_RATE {
+        if b > seedwell_state::config::MAX_RATE {
             return Err(ApiError::params(format!("`{what}` is above 1 TiB/s")));
         }
         Ok(u32::try_from(b.div_ceil(1024)).unwrap_or(u32::MAX))
@@ -617,16 +617,16 @@ fn set_settings(h: &SyncHandle, p: SyncSettingsParams) -> Result<Reply, ApiError
 
 // ------------------------------------------------------------------ on demand (SPEC 7G.11)
 
-fn kind_name(k: trs_sync_proto::model::FileKind) -> &'static str {
+fn kind_name(k: seedwell_sync_proto::model::FileKind) -> &'static str {
     match k {
-        trs_sync_proto::model::FileKind::File => "file",
-        trs_sync_proto::model::FileKind::Dir => "dir",
-        trs_sync_proto::model::FileKind::Symlink => "symlink",
+        seedwell_sync_proto::model::FileKind::File => "file",
+        seedwell_sync_proto::model::FileKind::Dir => "dir",
+        seedwell_sync_proto::model::FileKind::Symlink => "symlink",
     }
 }
 
-fn item_state_name(s: trs_sync::ondemand::ItemState) -> &'static str {
-    use trs_sync::ondemand::ItemState;
+fn item_state_name(s: seedwell_sync::ondemand::ItemState) -> &'static str {
+    use seedwell_sync::ondemand::ItemState;
     match s {
         ItemState::OnlineOnly => "online_only",
         ItemState::Downloading => "downloading",
@@ -637,7 +637,7 @@ fn item_state_name(s: trs_sync::ondemand::ItemState) -> &'static str {
 }
 
 /// An item in protocol form.
-pub(super) fn item_dto(i: &trs_sync::ondemand::Item) -> SyncItemDto {
+pub(super) fn item_dto(i: &seedwell_sync::ondemand::Item) -> SyncItemDto {
     SyncItemDto {
         id: i.id.clone(),
         parent_id: i.parent_id.clone(),
@@ -657,7 +657,7 @@ pub(super) fn item_dto(i: &trs_sync::ondemand::Item) -> SyncItemDto {
 }
 
 /// The path of the item named by `item` (an identifier) or `path`; neither: the folder itself.
-fn item_path(h: &SyncHandle, folder: &trs_sync_proto::ids::FolderId, item: &Option<String>, path: &Option<String>) -> Result<String, ApiError> {
+fn item_path(h: &SyncHandle, folder: &seedwell_sync_proto::ids::FolderId, item: &Option<String>, path: &Option<String>) -> Result<String, ApiError> {
     match (path, item) {
         (Some(p), _) => Ok(p.trim_matches('/').to_string()),
         (None, Some(id)) => h
@@ -669,7 +669,7 @@ fn item_path(h: &SyncHandle, folder: &trs_sync_proto::ids::FolderId, item: &Opti
     }
 }
 
-fn item_at(h: &SyncHandle, folder: &trs_sync_proto::ids::FolderId, path: &str) -> Result<SyncItemDto, ApiError> {
+fn item_at(h: &SyncHandle, folder: &seedwell_sync_proto::ids::FolderId, path: &str) -> Result<SyncItemDto, ApiError> {
     h.od_item_at(folder, path)
         .map_err(s::err)?
         .map(|i| item_dto(&i))
@@ -709,9 +709,9 @@ async fn on_demand_call(h: &SyncHandle, r: Request) -> Result<Reply, ApiError> {
             } else {
                 // Given up (no device that has it is connected, or none of it came for a while): an error.
                 match h.od_fetch_wait(&fid, &path, std::time::Duration::from_secs(wait)).await.map_err(s::err)? {
-                    trs_sync_net::service::FetchWait::Here(done) => unavailable = done.unavailable,
+                    seedwell_sync_net::service::FetchWait::Here(done) => unavailable = done.unavailable,
                     // Still on its way: the answer says how far.
-                    trs_sync_net::service::FetchWait::Coming { unavailable: u, .. } => unavailable = u,
+                    seedwell_sync_net::service::FetchWait::Coming { unavailable: u, .. } => unavailable = u,
                 }
             }
             let item = item_at(h, &fid, &path)?;
@@ -786,12 +786,12 @@ fn failed_dto(failed: Vec<(String, String)>) -> Vec<SyncFailedDto> {
     failed.into_iter().map(|(path, error)| SyncFailedDto { path, error }).collect()
 }
 
-fn evict_dto(e: trs_sync::ondemand::Evicted) -> SyncEvictDto {
+fn evict_dto(e: seedwell_sync::ondemand::Evicted) -> SyncEvictDto {
     SyncEvictDto { files: e.files, bytes: e.bytes, kept: e.kept, kept_why: failed_dto(e.kept_why), failed: failed_dto(e.failed) }
 }
 
 /// The folder and the path of the item `p` names.
-fn target(h: &SyncHandle, p: &SyncItemParams) -> Result<(FolderStatus, trs_sync_proto::ids::FolderId, String), ApiError> {
+fn target(h: &SyncHandle, p: &SyncItemParams) -> Result<(FolderStatus, seedwell_sync_proto::ids::FolderId, String), ApiError> {
     let f = pick(h, &p.folder)?;
     let fid = folder_id(&f)?;
     let path = item_path(h, &fid, &p.item, &p.path)?;
@@ -810,5 +810,5 @@ async fn pin(h: &SyncHandle, p: &SyncItemParams, on: bool) -> Result<Reply, ApiE
     h.od_pin(&fid, &path, on).await.map_err(s::err)?;
     let what = if on { "kept on this " } else { "no longer kept on this " };
     let shown = if path.is_empty() { "the whole folder".to_string() } else { clip(&path, 200) };
-    noted(&SyncHostDto { item: Some(item_at(h, &fid, &path)?), count: 1, ..Default::default() }, &format!("{shown} {what}{}", trs_platform::computer!()), &f)
+    noted(&SyncHostDto { item: Some(item_at(h, &fid, &path)?), count: 1, ..Default::default() }, &format!("{shown} {what}{}", seedwell_platform::computer!()), &f)
 }

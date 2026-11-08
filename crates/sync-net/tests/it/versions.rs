@@ -2,10 +2,10 @@
 //! does not know) still syncs at the version both speak; one that no longer speaks this build's is refused, and
 //! the joining side says which needs an update.
 
-use trs_sync_net::status::FolderState;
-use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::members::Role;
-use trs_sync_proto::msg::{MIN_PROTOCOL, PROTOCOL};
+use seedwell_sync_net::status::FolderState;
+use seedwell_sync_proto::ids::FolderId;
+use seedwell_sync_proto::members::Role;
+use seedwell_sync_proto::msg::{MIN_PROTOCOL, PROTOCOL};
 
 use crate::utp::{Device, addr, device_with, read, until};
 
@@ -79,26 +79,26 @@ async fn devices_of_0_1_18_and_0_1_19_are_refused_and_told_to_update() {
 }
 
 /// A service on a state folder that outlives it (to start it again, as another version).
-async fn start_at(state: &std::path::Path, name: &str, protocol: (u32, u32)) -> trs_sync_net::SyncHandle {
-    let secrets = std::sync::Arc::new(trs_sync_net::secrets::FileSecrets::new(state.join("secrets")));
-    let mut opts = trs_sync_net::Options::new(state.to_path_buf(), "Seedwell test".into(), secrets);
+async fn start_at(state: &std::path::Path, name: &str, protocol: (u32, u32)) -> seedwell_sync_net::SyncHandle {
+    let secrets = std::sync::Arc::new(seedwell_sync_net::secrets::FileSecrets::new(state.join("secrets")));
+    let mut opts = seedwell_sync_net::Options::new(state.to_path_buf(), "Seedwell test".into(), secrets);
     opts.default_device_name = name.into();
     opts.bind = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
     opts.lan_discovery = false;
     opts.protocol = protocol;
-    trs_sync_net::SyncHandle::start(opts).await.unwrap()
+    seedwell_sync_net::SyncHandle::start(opts).await.unwrap()
 }
 
 /// Stops `h` and starts its state folder again in this process, as `protocol`: its `folders` open at once
 /// (`shutdown` returns once they are closed).
-async fn restart(h: trs_sync_net::SyncHandle, state: &std::path::Path, name: &str, protocol: (u32, u32), folders: usize) -> trs_sync_net::SyncHandle {
+async fn restart(h: seedwell_sync_net::SyncHandle, state: &std::path::Path, name: &str, protocol: (u32, u32), folders: usize) -> seedwell_sync_net::SyncHandle {
     h.shutdown().await;
     let h = start_at(state, name, protocol).await;
     assert_eq!(h.snapshot().folders.len(), folders, "{name}'s folders open again right after shutdown");
     h
 }
 
-fn issues(h: &trs_sync_net::SyncHandle, id: &FolderId) -> Vec<String> {
+fn issues(h: &seedwell_sync_net::SyncHandle, id: &FolderId) -> Vec<String> {
     h.snapshot().folders.into_iter().find(|f| f.id == id.to_string()).map(|f| f.issues.into_iter().map(|(_, r)| r).collect()).unwrap_or_default()
 }
 
@@ -120,7 +120,7 @@ async fn a_member_that_cannot_talk_any_more_is_listed_with_the_folders_issues_un
     let b = restart(b, dirs[1].path(), "Beta", (PROTOCOL + 1, PROTOCOL + 1), 1).await;
     b.add_address(&id, std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), a.port())).unwrap();
     until(30, "B's folder lists the owner", || issues(&b, &id).iter().any(|i| i == "Owner runs Seedwell test, an older Seedwell that cannot sync with this one: update it")).await;
-    until(30, "the owner's folder lists B", || issues(&a, &id).iter().any(|i| i == concat!("Beta runs Seedwell test, a newer Seedwell that this one cannot sync with: update this ", trs_platform::computer!()))).await;
+    until(30, "the owner's folder lists B", || issues(&a, &id).iter().any(|i| i == concat!("Beta runs Seedwell test, a newer Seedwell that this one cannot sync with: update this ", seedwell_platform::computer!()))).await;
 
     // Back to a version both speak: the issues go.
     let b = restart(b, dirs[1].path(), "Beta", now, 1).await;
@@ -149,8 +149,8 @@ async fn folders_of_the_test_builds_are_forgotten_at_start_and_keep_their_files(
     drop(h);
     // One with a membership file of the earlier format, one with a link of the earlier format (no version byte).
     std::fs::write(state.path().join("sync").join(format!("{}.members", ids[0])), b"SWM2").unwrap();
-    use trs_sync_net::secrets::SecretStore as _;
-    let secrets = trs_sync_net::secrets::FileSecrets::new(state.path().join("secrets"));
+    use seedwell_sync_net::secrets::SecretStore as _;
+    let secrets = seedwell_sync_net::secrets::FileSecrets::new(state.path().join("secrets"));
     secrets.put(&format!("links-{}", ids[1]), b"seedwell://sync/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
 
     let h = start_at(state.path(), "Mac", now).await;
@@ -175,17 +175,17 @@ async fn the_updater_hears_what_members_run_and_not_what_a_stranger_claims() {
     let now = (MIN_PROTOCOL, PROTOCOL);
     let told = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let heard = told.clone();
-    let start = |state: std::path::PathBuf, name: &'static str, client: &'static str, protocol: (u32, u32), hook: Option<trs_sync_net::PeerClientHook>| async move {
-        let secrets = std::sync::Arc::new(trs_sync_net::secrets::FileSecrets::new(state.join("secrets")));
-        let mut opts = trs_sync_net::Options::new(state.clone(), client.into(), secrets);
+    let start = |state: std::path::PathBuf, name: &'static str, client: &'static str, protocol: (u32, u32), hook: Option<seedwell_sync_net::PeerClientHook>| async move {
+        let secrets = std::sync::Arc::new(seedwell_sync_net::secrets::FileSecrets::new(state.join("secrets")));
+        let mut opts = seedwell_sync_net::Options::new(state.clone(), client.into(), secrets);
         opts.default_device_name = name.into();
         opts.bind = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
         opts.lan_discovery = false;
         opts.protocol = protocol;
         opts.peer_client = hook;
-        trs_sync_net::SyncHandle::start(opts).await.unwrap()
+        seedwell_sync_net::SyncHandle::start(opts).await.unwrap()
     };
-    let hook: trs_sync_net::PeerClientHook = std::sync::Arc::new(move |c: &str| heard.lock().unwrap().push(c.to_owned()));
+    let hook: seedwell_sync_net::PeerClientHook = std::sync::Arc::new(move |c: &str| heard.lock().unwrap().push(c.to_owned()));
     let a = start(dirs[0].path().to_path_buf(), "Owner", "Seedwell 0.1.0", now, Some(hook)).await;
     let folder = dirs[3].path().join("A");
     std::fs::create_dir_all(&folder).unwrap();

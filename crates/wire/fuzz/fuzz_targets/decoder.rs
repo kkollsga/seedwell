@@ -6,7 +6,7 @@
 
 use bytes::BytesMut;
 use libfuzzer_sys::fuzz_target;
-use trs_wire::{Decoder, Handshake, Limits};
+use seedwell_wire::{Decoder, Handshake, Limits};
 
 fuzz_target!(|data: &[u8]| {
     let _ = Handshake::decode(data);

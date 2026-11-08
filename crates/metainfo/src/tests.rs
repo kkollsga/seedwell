@@ -4,7 +4,7 @@
 use super::*;
 use proptest::prelude::*;
 use sha1::{Digest as _, Sha1};
-use trs_bencode as bc;
+use seedwell_bencode as bc;
 
 // ------------------------------------------------------------ tiny DSL
 

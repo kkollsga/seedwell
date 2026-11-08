@@ -7,12 +7,12 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use trs_control::Permission;
-use trs_control::client::ClientError;
-use trs_control::proto::*;
-use trs_control::types::*;
-use trs_sync_net::chat::{AgentAccess, MessageKind};
-use trs_sync_proto::ids::FolderId;
+use seedwell_control::Permission;
+use seedwell_control::client::ClientError;
+use seedwell_control::proto::*;
+use seedwell_control::types::*;
+use seedwell_sync_net::chat::{AgentAccess, MessageKind};
+use seedwell_sync_proto::ids::FolderId;
 
 use crate::access::{level, set_level};
 use crate::sync::{SyncRig, other_device, wait_until};
@@ -24,7 +24,7 @@ fn api(e: ClientError) -> ApiError {
     }
 }
 
-async fn call(c: &mut trs_control::Client, method: &str, params: Value) -> Result<Value, ApiError> {
+async fn call(c: &mut seedwell_control::Client, method: &str, params: Value) -> Result<Value, ApiError> {
     let r = Request::decode(method, params).expect("params decode");
     c.call(&r).await.map_err(api)
 }
@@ -135,7 +135,7 @@ async fn only_the_users_own_reply_to_the_announcement_answers_a_request() {
 /// one; that device's agent cannot.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_users_reply_on_a_paired_device_answers_and_its_agents_does_not() {
-    use trs_sync_net::devices::DevicesState;
+    use seedwell_sync_net::devices::DevicesState;
     let mac = SyncRig::new(Permission::Control).await;
     let pc = SyncRig::new(Permission::Control).await;
     set_level(&mac.rig.state_dir(), Permission::Control);
@@ -184,7 +184,7 @@ async fn the_users_reply_on_a_paired_device_answers_and_its_agents_does_not() {
 /// exactly that one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn asking_to_open_a_channel_never_tells_whether_it_exists() {
-    use trs_control::access::How;
+    use seedwell_control::access::How;
     let s = SyncRig::new(Permission::Control).await;
     set_level(&s.rig.state_dir(), Permission::Control);
     let family: FolderId = s.h.chat_new("Family", false).await.unwrap().id.parse().unwrap();

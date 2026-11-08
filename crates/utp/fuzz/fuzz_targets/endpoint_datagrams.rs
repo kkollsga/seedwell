@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 
 use libfuzzer_sys::fuzz_target;
-use trs_utp::{Config, Endpoint};
+use seedwell_utp::{Config, Endpoint};
 
 fuzz_target!(|data: &[u8]| {
     let mut ep = Endpoint::new(Config { max_connections: 64, ..Config::default() }, 1);

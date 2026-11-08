@@ -27,7 +27,7 @@ if [ "${1:-}" = "--this" ]; then this="$2"; shift 2; fi
 [ $# -eq 1 ] || { sed -n '2,15p' "$0"; exit 2; }
 other="$1"
 for b in "$this" "$other"; do
-  [ -x "$b" ] || { echo "sync-compat: $b is not an executable (build this one with: tools/sysguard/heavy.sh cargo build -p trs-cli)" >&2; exit 2; }
+  [ -x "$b" ] || { echo "sync-compat: $b is not an executable (build this one with: tools/sysguard/heavy.sh cargo build -p seedwell-cli)" >&2; exit 2; }
 done
 
 # Short: a control socket's path must fit in sockaddr_un.

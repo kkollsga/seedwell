@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use trs_fswatch::{Backend, Hint, RawEvent, RescanReason, ResumeToken, WatchOptions, Watcher, watch};
+use seedwell_fswatch::{Backend, Hint, RawEvent, RescanReason, ResumeToken, WatchOptions, Watcher, watch};
 
 /// Generous: on an idle machine everything arrives in well under a second.
 pub const TIMEOUT: Duration = Duration::from_secs(20);
@@ -148,13 +148,13 @@ pub fn stop_is_prompt_under_a_burst(backend: Backend) -> Duration {
     w.stop();
     let took = t0.elapsed();
     assert!(took < Duration::from_secs(5), "stop took {took:?}");
-    let after = trs_fswatch::debug::callbacks();
+    let after = seedwell_fswatch::debug::callbacks();
     // The writer keeps going for a while: no callback may run any more.
     let until = Instant::now() + Duration::from_millis(300);
     while Instant::now() < until {
         std::thread::yield_now();
     }
-    assert_eq!(trs_fswatch::debug::callbacks(), after, "a callback ran after stop returned");
+    assert_eq!(seedwell_fswatch::debug::callbacks(), after, "a callback ran after stop returned");
     running.store(false, Ordering::Relaxed);
     writer.join().expect("writer");
     took

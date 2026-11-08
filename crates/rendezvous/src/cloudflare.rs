@@ -35,7 +35,7 @@
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use trs_http::{SmallRequest, request_small};
+use seedwell_http::{SmallRequest, request_small};
 
 use crate::client::{ClientError, Rendezvous};
 use crate::{BINDING, CLASS_NAME, COMPATIBILITY_DATE, MIGRATION_TAG, SCRIPT_NAME, WORKER_JS, hex};

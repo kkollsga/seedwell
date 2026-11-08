@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
-use trs_portmap::Protocol;
+use seedwell_portmap::Protocol;
 
 pub const EXTERNAL_IP: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 9);
 
@@ -386,8 +386,8 @@ pub mod net {
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, UdpSocket};
-    use trs_portmap::driver::DriverConfig;
-    use trs_portmap::{Config, Event, Method, NetInfo, Wanted};
+    use seedwell_portmap::driver::DriverConfig;
+    use seedwell_portmap::{Config, Event, Method, NetInfo, Wanted};
 
     use super::*;
 

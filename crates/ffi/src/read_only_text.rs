@@ -3,7 +3,7 @@
 //! computer is paired with nothing has it too). Only an owner of the folder may switch it; everywhere else it shows the
 //! state and who can switch it.
 
-use trs_platform::computer;
+use seedwell_platform::computer;
 
 use crate::backend::Backend;
 use crate::types::CoreError;

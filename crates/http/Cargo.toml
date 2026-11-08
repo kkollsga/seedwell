@@ -1,5 +1,5 @@
 [package]
-name = "trs-http"
+name = "seedwell-http"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,24 +8,24 @@ publish = false
 description = "Direct HTTP(S) downloads: resumable, segmented, throttled, staged in .part files (SPEC 7D)"
 
 [dependencies]
-trs-platform = { path = "../platform" }
-# Same HTTP stack as trs-tracker (hyper 1 + rustls via hyper-rustls) so the binary carries one.
+seedwell-platform = { path = "../platform" }
+# Same HTTP stack as seedwell-tracker (hyper 1 + rustls via hyper-rustls) so the binary carries one.
 tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "sync", "macros"] }
 hyper = { version = "1", default-features = false, features = ["http1", "client"] }
 hyper-util = { version = "0.1", default-features = false, features = ["tokio", "client-legacy", "http1"] }
 http-body-util = "0.1"
 bytes = "1"
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "webpki-roots", "tls12"] }
-# Optional integrity check. 0.11 has the ARMv8 SHA backends (same as trs-storage/trs-metainfo).
+# Optional integrity check. 0.11 has the ARMv8 SHA backends (same as seedwell-storage/seedwell-metainfo).
 sha2 = { version = "0.11", default-features = false }
 # Retry-After HTTP-date parsing (already in the lock file via hyper).
 httpdate = "1"
 # Downloads through the torrent proxy while it is on (SPEC §7H): a `.torrent` link is torrent traffic.
-trs-socks = { path = "../socks" }
+seedwell-socks = { path = "../socks" }
 tower-service = "0.3"
 
 [dev-dependencies]
-trs-socks = { path = "../socks", features = ["testkit"] }
+seedwell-socks = { path = "../socks", features = ["testkit"] }
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "net", "time", "sync"] }
 hyper = { version = "1", default-features = false, features = ["http1", "client", "server"] }
 tempfile = "3"

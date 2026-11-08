@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
-use trs_http::{SmallRequest, request_small};
+use seedwell_http::{SmallRequest, request_small};
 
 use crate::{MAX_RECORD, hex, now_ms};
 
@@ -132,11 +132,11 @@ pub struct Rendezvous {
     base: String,
 }
 
-fn network(e: trs_http::Error) -> ClientError {
+fn network(e: seedwell_http::Error) -> ClientError {
     ClientError::Network(match e {
-        trs_http::Error::Timeout => "no answer".into(),
-        trs_http::Error::Tls(_) => "its certificate is not valid".into(),
-        trs_http::Error::Network(m) | trs_http::Error::InvalidUrl(m) | trs_http::Error::BadResponse(m) => m,
+        seedwell_http::Error::Timeout => "no answer".into(),
+        seedwell_http::Error::Tls(_) => "its certificate is not valid".into(),
+        seedwell_http::Error::Network(m) | seedwell_http::Error::InvalidUrl(m) | seedwell_http::Error::BadResponse(m) => m,
         other => other.to_string(),
     })
 }
@@ -160,7 +160,7 @@ impl Rendezvous {
         &self.base
     }
 
-    async fn send(&self, method: &str, path: &str, headers: Vec<(String, String)>, body: Vec<u8>) -> Result<trs_http::SmallResponse, ClientError> {
+    async fn send(&self, method: &str, path: &str, headers: Vec<(String, String)>, body: Vec<u8>) -> Result<seedwell_http::SmallResponse, ClientError> {
         let req = SmallRequest { method: method.into(), url: format!("{}{path}", self.base), headers, body };
         request_small(req, VERSION, MAX_RECORD + 4096, TIMEOUT).await.map_err(network)
     }

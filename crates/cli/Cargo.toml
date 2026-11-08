@@ -1,5 +1,5 @@
 [package]
-name = "trs-cli"
+name = "seedwell-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ publish = false
 description = "The `seedwell` command: CLI for the control socket, the embedded Agent Skill and the headless daemon (`seedwell daemon`)"
 
 [lib]
-name = "trs_cli"
+name = "seedwell_cli"
 path = "src/lib.rs"
 
 [[bin]]
@@ -18,21 +18,21 @@ path = "src/main.rs"
 [features]
 default = ["daemon"]
 # `seedwell daemon`: the engine, persistence and the control socket in one headless process.
-daemon = ["dep:trs-engine", "dep:trs-storage", "dep:trs-state", "dep:trs-sync-net", "dep:trs-sync-proto", "trs-control/engine", "trs-control/sync", "tokio/signal", "tokio/rt-multi-thread"]
+daemon = ["dep:seedwell-engine", "dep:seedwell-storage", "dep:seedwell-state", "dep:seedwell-sync-net", "dep:seedwell-sync-proto", "seedwell-control/engine", "seedwell-control/sync", "tokio/signal", "tokio/rt-multi-thread"]
 
 [dependencies]
-trs-platform = { path = "../platform" }
-trs-control = { path = "../control", default-features = false }
+seedwell-platform = { path = "../platform" }
+seedwell-control = { path = "../control", default-features = false }
 # `seedwell log trackers`: the same renderer as the app's viewer, and the local-file fallback.
-trs-devlog = { path = "../devlog" }
-trs-engine = { path = "../engine", optional = true }
+seedwell-devlog = { path = "../devlog" }
+seedwell-engine = { path = "../engine", optional = true }
 # The daemon's global allocator (`MappedAlloc`); the thin client does not link it.
-trs-storage = { path = "../storage", optional = true }
-trs-state = { path = "../state", optional = true }
+seedwell-storage = { path = "../storage", optional = true }
+seedwell-state = { path = "../state", optional = true }
 # The daemon runs the folder sync service next to the engine (and `seedwell relay`).
-trs-sync-net = { path = "../sync-net", optional = true }
+seedwell-sync-net = { path = "../sync-net", optional = true }
 # The relay's device key (`seedwell relay`).
-trs-sync-proto = { path = "../sync-proto", optional = true }
+seedwell-sync-proto = { path = "../sync-proto", optional = true }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 # `seedwell mail --attach`: each attached file carries its SHA-256, checked when it is saved.
@@ -44,4 +44,4 @@ tokio = { version = "1", default-features = false, features = ["rt", "macros", "
 tempfile = "3"
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "process", "time", "io-util"] }
 # Test torrents are hashed with the engine's own SHA-1.
-trs-storage = { path = "../storage" }
+seedwell-storage = { path = "../storage" }

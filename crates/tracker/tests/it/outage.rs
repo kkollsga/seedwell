@@ -6,11 +6,11 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
-use trs_tracker::gate::{GateConfig, Ticket};
-use trs_tracker::hub::{TorrentSpec, TrackerHub};
-use trs_tracker::outage::{NetEvent, Reason};
-use trs_tracker::response::{AnnounceError, AnnounceResponse, TransportError};
-use trs_tracker::{InfoHash20, MemoryStore, Millis, Stats, TorrentEvent, TorrentRole, TrackerUrl};
+use seedwell_tracker::gate::{GateConfig, Ticket};
+use seedwell_tracker::hub::{TorrentSpec, TrackerHub};
+use seedwell_tracker::outage::{NetEvent, Reason};
+use seedwell_tracker::response::{AnnounceError, AnnounceResponse, TransportError};
+use seedwell_tracker::{InfoHash20, MemoryStore, Millis, Stats, TorrentEvent, TorrentRole, TrackerUrl};
 
 const HOSTS: [&str; 3] = ["a.test", "b.test", "c.test"];
 const N: usize = 300;
@@ -21,7 +21,7 @@ fn secs(s: u64) -> Millis {
 }
 
 fn ok(interval: u64) -> AnnounceResponse {
-    let t = trs_tracker::clamp_timing(Some(interval as i64), None);
+    let t = seedwell_tracker::clamp_timing(Some(interval as i64), None);
     AnnounceResponse {
         interval: t.interval,
         min_interval: t.min_interval,
@@ -51,7 +51,7 @@ struct Req {
     at: Millis,
     ih: InfoHash20,
     host: &'static str,
-    event: Option<trs_tracker::Event>,
+    event: Option<seedwell_tracker::Event>,
 }
 
 struct Sim {
@@ -447,7 +447,7 @@ fn a_torrent_added_during_an_outage_waits_for_it() {
     sim.run_until(secs(3000));
     assert!(sim.log[n..].iter().all(|r| r.ih != ih), "no request for the new torrent while offline");
     sim.run_until(secs(5400));
-    assert!(sim.log.iter().any(|r| r.ih == ih && r.event == Some(trs_tracker::Event::Started)));
+    assert!(sim.log.iter().any(|r| r.ih == ih && r.event == Some(seedwell_tracker::Event::Started)));
     assert_eq!(sim.max_failures, 0);
 }
 

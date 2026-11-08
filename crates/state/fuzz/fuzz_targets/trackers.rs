@@ -1,7 +1,7 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use trs_state::url::{AnnounceUrl, redact_url};
-use trs_state::{Document, TrackerProfiles};
+use seedwell_state::url::{AnnounceUrl, redact_url};
+use seedwell_state::{Document, TrackerProfiles};
 
 // Input: trackers.toml text, a NUL, then newline-separated announce URLs to match.
 fuzz_target!(|data: &[u8]| {

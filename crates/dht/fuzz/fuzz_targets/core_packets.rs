@@ -6,8 +6,8 @@
 use libfuzzer_sys::fuzz_target;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::time::{Duration, Instant};
-use trs_dht::codec::{self, Envelope, ResponseOut};
-use trs_dht::{Config, DhtCore, Input, Intent, PublicInfoHash};
+use seedwell_dht::codec::{self, Envelope, ResponseOut};
+use seedwell_dht::{Config, DhtCore, Input, Intent, PublicInfoHash};
 
 fn answer_queries(core: &mut DhtCore, out: Vec<Intent>, fuzz: &[u8], now: Instant, depth: u8) {
     if depth == 0 {

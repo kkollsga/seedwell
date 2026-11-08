@@ -1,4 +1,4 @@
-# trs-tracker
+# seedwell-tracker
 
 Tracker communication for Seedwell: **correct by construction** (SPEC 7B, 7C).
 One bug here can get users banned from private trackers, so the design goal is
@@ -29,7 +29,7 @@ Time is a `Millis(u64)` passed in by the caller; randomness is injected
 | `store` | `TimingStore` trait + `MemoryStore`: last announce, next allowed, min-allowed, `completed_sent`, `completion_owed`, `session_open`. (The `tracker_id` field is obsolete: the tracker id is per session.) `Debug` of keys and the store never prints the passkey. |
 | `policy` | `DestinationPolicy`: where the transports may connect (SSRF protection, below). |
 | `url` | `TrackerUrl` (passkey-safe `Display`), exact RFC 3986 encoding, the single `PARAM_ORDER` table, `canonical_host`. |
-| `response` | Defensive bencode response parsing via `trs-bencode`, the SPEC 7C.1 clamps, error classification. |
+| `response` | Defensive bencode response parsing via `seedwell-bencode`, the SPEC 7C.1 clamps, error classification. |
 | `backoff` | 1 → 2 → 4 … min, capped at 1 h nominal, +0–20 % jitter, server hints win. |
 | `udp_proto`, `scrape`, `retry_after` | Sans-I/O BEP 15/41 wire format, BEP 48, RFC 9110 `Retry-After`. All fuzzed. |
 | `crash` | `CrashLoopGuard`: 3 launches in 10 min *that followed an unclean exit* ⇒ hold; `LaunchLog`: the persisted launch history with clean-shutdown markers. |
@@ -228,7 +228,7 @@ cross-check and registry. Tests have a fourth, independent oracle
 | Fuzz | `fuzz/` | `response_parse`, `udp_decode`, `url_and_misc` (`cargo +nightly fuzz run <target>`) |
 | Network (ignored) | `tests/network.rs` | one started + one stopped to Debian's public tracker for the current netinst info-hash |
 
-### Simulation (seed 0, `cargo test --release -p trs-tracker --test simulation -- --nocapture`)
+### Simulation (seed 0, `cargo test --release -p seedwell-tracker --test simulation -- --nocapture`)
 
 1000 torrents × 50 hosts × 90 simulated days, ~8 s wall time in release
 (`SIM_SCALE=TxHxD` and `SIM_SEED=n` explore other sizes and worlds):
@@ -396,9 +396,13 @@ interval` (300 s when the tracker gave none).
   after a "manual-like" delay: a healthy machine ignores them. Only announces
   that already failed are rescheduled: a *network-class* backoff (DNS, connect,
   timeout) is shortened to ~1–16 s but never below 30 s after the last answer,
-  and the failure counter is kept. A storm of events cannot postpone announces
-  forever: the jitter window they open is not extended by further events and a
-  new one opens at most once per `wake_jitter`.
+  and the failure counter is kept. That happens once per failure series (the
+  failures since the last success): a network change and a wake share the one
+  pull, and a pulled retry that fails again goes on with the normal growing
+  backoff, so a flapping Wi-Fi or VPN cannot retry a dead tracker every 30 s.
+  A storm of events cannot postpone announces forever: the jitter window they
+  open is not extended by further events and a new one opens at most once per
+  `wake_jitter`.
 * **A halt after an accepted `started`** (the tracker rejects a later announce)
   still gets one best-effort, gated `stopped` when the torrent is stopped, so the
   next session's `started` is not a repeat. A halt on the very first `started`
@@ -413,7 +417,7 @@ interval` (300 s when the tracker gave none).
 * **Scrape gap:** no more often than the tracker's last announce interval and
   never below 30 min; before the first answered announce, 1 h.
 * **Memory.** One idle (added, not started) pair costs **257 B** of heap, down
-  from 2,851 B (`crates/engine/tests/scale.rs` "trs-tracker hub alone"; asserted
+  from 2,851 B (`crates/engine/tests/scale.rs` "seedwell-tracker hub alone"; asserted
   by `tests/memory.rs`). A pair of a 3-tracker torrent costs 189 B, a seeding
   pair about 680 B. How: exact-size slices instead of growing vectors; the
   machine splits into a 104-byte core and a session block that exists only while
@@ -441,7 +445,7 @@ The crate writes no log itself; it only exposes what the engine's developer log 
 
 | Crate | Why |
 |---|---|
-| `trs-bencode` | response parsing (workspace crate) |
+| `seedwell-bencode` | response parsing (workspace crate) |
 | `tokio` (`rt`, `net`, `time`, `sync`, `io-util`) | UDP sockets, timeouts, lookup (transports only) |
 | `hyper`, `hyper-util`, `http-body-util`, `bytes` | the HTTP client: connection pool, `HttpConnector` (connect timeout, happy eyeballs), body size limit |
 | `hyper-rustls` (`ring`, `webpki-roots`, `tls12`) | TLS via rustls with full certificate verification (webpki roots); the `ring` provider avoids a C toolchain dependency |
@@ -450,5 +454,5 @@ The crate writes no log itself; it only exposes what the engine's developer log 
 | `getrandom` | UDP transaction ids from the OS RNG |
 | dev: `proptest`, `stateright`, `sha1` | property tests, model checking, info-hash for the network test |
 
-The sans-I/O core builds with `--no-default-features` (only `trs-bencode`).
+The sans-I/O core builds with `--no-default-features` (only `seedwell-bencode`).
 `#![forbid(unsafe_code)]`.

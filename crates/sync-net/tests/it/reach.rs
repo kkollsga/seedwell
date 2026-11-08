@@ -4,10 +4,10 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 
-use trs_sync_net::status::FolderStatus;
-use trs_sync_proto::ids::FolderId;
-use trs_sync_proto::members::{InviteLink, Role};
-use trs_sync_proto::reach::LinkReach;
+use seedwell_sync_net::status::FolderStatus;
+use seedwell_sync_proto::ids::FolderId;
+use seedwell_sync_proto::members::{InviteLink, Role};
+use seedwell_sync_proto::reach::LinkReach;
 
 use crate::utp::{Device, addr, device_with, read, until};
 

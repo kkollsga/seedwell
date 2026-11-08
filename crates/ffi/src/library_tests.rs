@@ -4,7 +4,8 @@ use crate::library_rows::tests::{download, seed};
 use crate::library_rows::{GroupMore, ListCommand, ListGroup, RowControlKind, RowDisclosure};
 use crate::row_commands::RowCommand;
 use crate::row_text::TextTone;
-use crate::sidebar::{tracker_order, SidebarCommand, SidebarIcon};
+use crate::chat_groups::{ChatGroupIcon, SyncChatGroup};
+use crate::sidebar::{group_menu, tracker_order, SidebarCommand, SidebarIcon};
 use crate::sync::SyncRole;
 use crate::types::{PendingStart, SharingCounts, TrackerSummary, TransferRow, TransferState};
 use crate::devices_text::{follow_line_new, FollowLine};
@@ -73,7 +74,7 @@ pub(crate) fn sync() -> SyncSnapshot {
 }
 
 pub(crate) fn inputs(snapshot: Snapshot) -> Inputs {
-    Inputs { snapshot, sync: sync(), channels: Vec::new(), topics: Vec::new(), directs: Vec::new(), sharing: None, tracker_seeds: Vec::new() }
+    Inputs { snapshot, sync: sync(), channels: Vec::new(), groups: Vec::new(), topics: Vec::new(), directs: Vec::new(), sharing: None, tracker_seeds: Vec::new() }
 }
 
 pub(crate) fn state(place: LibraryPlace) -> LibraryState {
@@ -674,6 +675,7 @@ fn the_sidebar_menus_offer_what_each_item_can_do() {
         v.into_iter()
             .map(|e| match e {
                 SidebarMenuEntry::Item { title, destructive, .. } => if destructive { format!("{title}!") } else { title },
+                SidebarMenuEntry::Submenu { title, .. } => format!("{title} ▸"),
                 SidebarMenuEntry::Separator => "-".into(),
             })
             .collect::<Vec<_>>()
@@ -682,24 +684,243 @@ fn the_sidebar_menus_offer_what_each_item_can_do() {
     assert_eq!(titles(tracker_menu(&tracker("auto.org", 1, false))), ["Info", "Save as Favorite"]);
     assert!(tracker_menu(&tracker("public", 1, false)).is_empty() && tracker_menu(&tracker("other-private", 1, false)).is_empty());
     let alone = follow_line_new(&[], true);
-    assert_eq!(titles(channel_menu(&channel("Team", 2, 1, 0, false), &alone)), ["Share…", "New Topic…", "Mute", "Agents: No…", "Rename…", "-", "Leave Channel…"]);
+    assert_eq!(titles(channel_menu(&channel("Team", 2, 1, 0, false), &alone, &[])), ["Share…", "New Topic…", "Mute", "Agents: No…", "Rename…", "Move to Group ▸", "-", "Leave Channel…"]);
     let mut c = channel("News", 2, 1, 0, true);
     c.role = SyncRole::ReadWrite;
-    assert_eq!(titles(channel_menu(&c, &alone)), ["New Topic…", "Unmute", "Rename…", "-", "Leave Channel…"]);
+    assert_eq!(titles(channel_menu(&c, &alone, &[])), ["New Topic…", "Unmute", "Rename…", "Move to Group ▸", "-", "Leave Channel…"]);
     c.role = SyncRole::ReadOnly;
-    assert_eq!(titles(channel_menu(&c, &alone)), ["Unmute", "Rename…", "-", "Leave Channel…"]);
-    assert!(matches!(channel_menu(&c, &alone)[0], SidebarMenuEntry::Item { command: SidebarCommand::Unmute, .. }));
+    assert_eq!(titles(channel_menu(&c, &alone, &[])), ["Unmute", "Rename…", "Move to Group ▸", "-", "Leave Channel…"]);
+    assert!(matches!(channel_menu(&c, &alone, &[])[0], SidebarMenuEntry::Item { command: SidebarCommand::Unmute, .. }));
     // Paired with other devices: On All My Devices, checked while on, switching it the other way.
     let paired = follow_line_new(&["MacBook".into()], true);
-    let menu = channel_menu(&channel("Team", 2, 1, 0, false), &paired);
-    assert_eq!(titles(menu.clone()), ["Share…", "New Topic…", "Mute", "Agents: No…", "On All My Devices", "Rename…", "-", "Leave Channel…"]);
+    let menu = channel_menu(&channel("Team", 2, 1, 0, false), &paired, &[]);
+    assert_eq!(titles(menu.clone()), ["Share…", "New Topic…", "Mute", "Agents: No…", "On All My Devices", "Rename…", "Move to Group ▸", "-", "Leave Channel…"]);
     let SidebarMenuEntry::Item { command, checked, enabled, help, .. } = &menu[4] else { panic!() };
-    assert_eq!((*command, *checked, *enabled), (SidebarCommand::SetFollow { on: false }, true, true));
+    assert_eq!((command.clone(), *checked, *enabled), (SidebarCommand::SetFollow { on: false }, true, true));
     assert_eq!(help, &paired.line);
     let off = FollowLine { on: false, enabled: false, ..paired };
-    let menu = channel_menu(&channel("Team", 2, 1, 0, false), &off);
+    let menu = channel_menu(&channel("Team", 2, 1, 0, false), &off, &[]);
     assert!(matches!(menu[4], SidebarMenuEntry::Item { command: SidebarCommand::SetFollow { on: true }, checked: false, enabled: false, .. }));
     assert!(off.help.starts_with("Put it on every device paired with this "), "{}", off.help);
+}
+
+// MARK: Groups of channels
+
+fn grp(id: &str, icon: ChatGroupIcon) -> SyncChatGroup {
+    SyncChatGroup { id: id.into(), name: id.into(), icon }
+}
+
+fn in_group(mut c: SyncChannel, group: &str) -> SyncChannel {
+    c.group = Some(group.into());
+    c
+}
+
+fn names(channels: &[crate::sidebar::SidebarChannel]) -> Vec<&str> {
+    channels.iter().map(|c| c.item.title.as_str()).collect()
+}
+
+/// Catches a grouped channel drawn twice (under its group and in the plain list) or lost, the groups out of the user's
+/// order, and a channel whose group is not here (deleted, or unknown to this version) vanishing from the sidebar.
+#[test]
+fn a_grouped_channel_is_listed_under_its_group_and_not_in_the_plain_list() {
+    let mut i = inputs(snap());
+    i.groups = vec![grp("Work", ChatGroupIcon::Briefcase), grp("Agents", ChatGroupIcon::Sparkles)];
+    i.channels = vec![in_group(channel("Bridge", 2, 2, 0, false), "Agents"), channel("Family", 3, 1, 0, false), in_group(channel("Lost", 2, 1, 0, false), "gone"), in_group(channel("Mail", 2, 1, 0, false), "Agents")];
+    i.topics = vec![vec![topic("Mac", "Bridge", 0)], vec![], vec![], vec![]];
+    let chats = model(&i, &state(LibraryPlace::Downloads)).sidebar.chats;
+    assert_eq!(chats.groups.iter().map(|g| g.title.as_str()).collect::<Vec<_>>(), ["Work", "Agents"], "the user's order");
+    assert!(chats.groups[0].channels.is_empty(), "an empty group stays");
+    assert_eq!(chats.groups[0].help, "Work: no channels yet. Put one in with Move to Group in a channel's menu");
+    let agents = &chats.groups[1];
+    assert_eq!(names(&agents.channels), ["Bridge", "Mail"]);
+    assert_eq!((agents.icon, agents.icon_label.as_str(), agents.open, agents.help.as_str()), (ChatGroupIcon::Sparkles, "Sparkles", true, "Agents: 2 channels"), "a group starts open");
+    assert_eq!(agents.channels[0].topics.len(), 1, "a grouped channel keeps its topics");
+    assert_eq!(names(&chats.channels), ["Family", "Lost"], "only the ungrouped, and one whose group is not here");
+}
+
+/// Catches a closed group that hides its channels' new messages (no count), counts a muted channel's (which shows none
+/// itself), or counts only General's; and an open group counting what its channels already show.
+#[test]
+fn a_closed_group_sums_its_channels_unread_and_muted_ones_add_nothing() {
+    let mut i = inputs(snap());
+    i.groups = vec![grp("Agents", ChatGroupIcon::Sparkles)];
+    i.channels = vec![in_group(channel("Bridge", 2, 2, 5, false), "Agents"), in_group(channel("Quiet", 2, 1, 7, true), "Agents"), in_group(channel("Mail", 2, 1, 2, false), "Agents")];
+    i.topics = vec![vec![topic("Mac", "Bridge", 3)], vec![], vec![]];
+    let mut st = state(LibraryPlace::Downloads);
+    st.open_channels.insert("Bridge".into());
+    let open = model(&i, &st).sidebar.chats;
+    assert_eq!(open.groups[0].unread, 0, "open: each channel shows its own");
+    assert_eq!(open.groups[0].channels.iter().map(|c| c.item.unread).collect::<Vec<_>>(), [2, 0, 2], "Bridge open: General's own");
+    st.closed_groups.insert("Agents".into());
+    let closed = model(&i, &st).sidebar.chats;
+    assert!(!closed.groups[0].open);
+    assert_eq!(closed.groups[0].unread, 7, "Bridge's total (topics too) and Mail's; Quiet is muted");
+}
+
+/// Catches the channel shown vanishing from the sidebar without a trace when its group is closed (the user sees a page
+/// whose row is nowhere), and a closed group claiming a selection it does not hold.
+#[test]
+fn a_closed_group_holding_the_channel_shown_says_so_and_the_page_stays() {
+    let mut i = inputs(snap());
+    i.groups = vec![grp("Agents", ChatGroupIcon::Sparkles)];
+    i.channels = vec![in_group(channel("Bridge", 2, 2, 0, false), "Agents"), channel("Family", 3, 1, 0, false)];
+    i.topics = vec![vec![topic("Mac", "Bridge", 0)], vec![]];
+    let mut st = state(LibraryPlace::Chat { channel_id: "Bridge".into(), topic_id: Some("Mac".into()) });
+    assert!(!model(&i, &st).sidebar.chats.groups[0].holds_selection, "open: its row shows the selection itself");
+    st.closed_groups.insert("Agents".into());
+    let m = model(&i, &st);
+    assert!(m.sidebar.chats.groups[0].holds_selection, "a topic of its channel shown");
+    assert_eq!((m.page, m.place.clone()), (LibraryPage::Conversation, LibraryPlace::Chat { channel_id: "Bridge".into(), topic_id: Some("Mac".into()) }), "the page stays");
+    st.place = LibraryPlace::Chat { channel_id: "Family".into(), topic_id: None };
+    assert!(!model(&i, &st).sidebar.chats.groups[0].holds_selection, "another channel shown");
+}
+
+/// Catches deleting a group losing a channel, its topics or its open state (a deleted group must only return its
+/// channels to the plain list), a channel shown from elsewhere staying hidden in a closed group, and a left channel's
+/// id staying in a group, through the core's calls as a host makes them.
+#[test]
+fn deleting_a_group_returns_its_channels_with_their_topics_and_open_state() {
+    let (core, _d) = mock();
+    let lib = library(&core);
+    let c = core.chat_channels().into_iter().find(|c| !core.chat_topics(c.id.clone()).is_empty()).expect("a channel with topics");
+    let topics = core.chat_topics(c.id.clone()).len();
+    let before = lib.model(NOW_MS).sidebar.chats;
+    assert!(before.groups.is_empty());
+    let g = core.chat_group_new("Agents".into(), None, Some(c.id.clone())).unwrap();
+    assert_eq!(g.icon, ChatGroupIcon::Sparkles, "the name's icon");
+    lib.set_channel_open(c.id.clone(), true);
+    let chats = lib.model(NOW_MS).sidebar.chats;
+    assert_eq!(names(&chats.groups[0].channels), [c.name.as_str()]);
+    assert!(chats.groups[0].channels[0].open && chats.groups[0].channels[0].topics.len() == topics);
+    assert!(!names(&chats.channels).contains(&c.name.as_str()));
+    // Closed, then deleted: the channel is back where it was, open, with its topics; the closed mark is harmless.
+    lib.set_group_open(g.id.clone(), false);
+    assert!(!lib.model(NOW_MS).sidebar.chats.groups[0].open);
+    // Its channel shown from elsewhere (a notification): the group opens, so the selected row is not hidden.
+    lib.select_place(LibraryPlace::Chat { channel_id: c.id.clone(), topic_id: None });
+    assert!(lib.model(NOW_MS).sidebar.chats.groups[0].open);
+    lib.set_group_open(g.id.clone(), false);
+    core.chat_group_delete(g.id.clone()).unwrap();
+    let after = lib.model(NOW_MS).sidebar.chats;
+    assert!(after.groups.is_empty());
+    let back = after.channels.iter().find(|x| x.item.title == c.name).expect("back in the plain list");
+    assert!(back.open && back.topics.len() == topics);
+    assert_eq!(names(&after.channels), names(&before.channels), "the plain list as before");
+    // Left while in a group: the group keeps no trace of it.
+    let g = core.chat_group_new("Home".into(), None, Some(c.id.clone())).unwrap();
+    core.chat_leave(c.id.clone()).unwrap();
+    let chats = lib.model(NOW_MS).sidebar.chats;
+    assert!(chats.groups[0].channels.is_empty() && chats.groups[0].id == g.id);
+    assert!(core.chat_set_group(c.id.clone(), Some(g.id.clone())).is_err(), "a left channel cannot be put back");
+}
+
+/// Catches the groups changing the sidebar of a user who has none (its channels, their order or the signature that
+/// tells the host to rebuild), and a group's change (opened, renamed, a channel moved in) not rebuilding it.
+#[test]
+fn with_no_groups_the_sidebar_is_as_before_and_a_group_change_rebuilds_it() {
+    let mut i = inputs(snap());
+    i.channels = vec![channel("Team", 3, 2, 5, false), channel("Quiet", 2, 1, 4, true)];
+    i.topics = vec![vec![topic("Dinner", "Team", 1)], vec![]];
+    let st = state(LibraryPlace::Downloads);
+    let plain = model(&i, &st).sidebar;
+    assert!(plain.chats.groups.is_empty());
+    assert_eq!(names(&plain.chats.channels), ["Team", "Quiet"]);
+    assert!(!plain.signature.contains("|G"), "{}", plain.signature);
+    // An empty group appears (rebuild); the channels stay as they were.
+    i.groups = vec![grp("Agents", ChatGroupIcon::Sparkles)];
+    let with = model(&i, &st).sidebar;
+    assert_eq!(with.chats.channels, plain.chats.channels);
+    assert_ne!(with.signature, plain.signature);
+    i.channels[0].group = Some("Agents".into());
+    let moved = model(&i, &st).sidebar;
+    assert_ne!(moved.signature, with.signature, "a channel moved in");
+    let mut closed = state(LibraryPlace::Downloads);
+    closed.closed_groups.insert("Agents".into());
+    assert_ne!(model(&i, &closed).sidebar.signature, moved.signature, "closed");
+    i.groups[0].icon = ChatGroupIcon::Star;
+    assert_ne!(model(&i, &st).sidebar.signature, moved.signature, "a new icon");
+}
+
+/// Catches a group's menu offering a move it cannot make (up from the top, down from the bottom, either with one
+/// group), the wrong icon checked, a delete that asks first, and a channel's Move to Group not checking its group or
+/// offering Remove from Group when it is in none.
+#[test]
+fn the_group_menus_offer_what_each_can_do() {
+    let titles = |v: &[SidebarMenuEntry]| {
+        v.iter()
+            .map(|e| match e {
+                SidebarMenuEntry::Item { title, enabled, checked, .. } => format!("{}{title}{}", if *checked { "✓" } else { "" }, if *enabled { "" } else { " (off)" }),
+                SidebarMenuEntry::Submenu { title, .. } => format!("{title} ▸"),
+                SidebarMenuEntry::Separator => "-".into(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let (a, b) = (grp("Agents", ChatGroupIcon::Sparkles), grp("Home", ChatGroupIcon::House));
+    assert_eq!(titles(&group_menu(&a, 0, 2)), ["Rename Group…", "Icon ▸", "-", "Move Up (off)", "Move Down", "-", "Delete Group"]);
+    assert_eq!(titles(&group_menu(&b, 1, 2))[3..5], ["Move Up", "Move Down (off)"]);
+    assert_eq!(titles(&group_menu(&a, 0, 1)), ["Rename Group…", "Icon ▸", "-", "Delete Group"]);
+    let SidebarMenuEntry::Submenu { entries: icons, .. } = &group_menu(&b, 1, 2)[1] else { panic!() };
+    assert_eq!(icons.len(), 12);
+    assert_eq!(titles(icons).iter().filter(|t| t.starts_with('✓')).collect::<Vec<_>>(), ["✓House"]);
+    assert!(matches!(group_menu(&a, 0, 1).last(), Some(SidebarMenuEntry::Item { command: SidebarCommand::DeleteGroup, destructive: true, .. })));
+
+    let alone = follow_line_new(&[], true);
+    let sub = |c: &SyncChannel| {
+        let menu = channel_menu(c, &alone, &[a.clone(), b.clone()]);
+        let Some(SidebarMenuEntry::Submenu { title, entries }) = menu.into_iter().find(|e| matches!(e, SidebarMenuEntry::Submenu { .. })) else { panic!() };
+        assert_eq!(title, "Move to Group");
+        entries
+    };
+    let plain = sub(&channel("Team", 2, 1, 0, false));
+    assert_eq!(titles(&plain), ["Agents", "Home", "-", "New Group…"]);
+    let grouped = sub(&in_group(channel("Team", 2, 1, 0, false), "Home"));
+    assert_eq!(titles(&grouped), ["Agents", "✓Home", "-", "New Group…", "Remove from Group"]);
+    assert!(matches!(&grouped[0], SidebarMenuEntry::Item { command: SidebarCommand::MoveToGroup { group_id }, .. } if group_id == "Agents"));
+    // The library's menus come from what the model showed.
+    let (core, _d) = mock();
+    let lib = library(&core);
+    let g = core.chat_group_new("Work".into(), Some(ChatGroupIcon::Briefcase), None).unwrap();
+    lib.model(NOW_MS);
+    assert_eq!(titles(&lib.sidebar_group_menu(g.id.clone())), ["Rename Group…", "Icon ▸", "-", "Delete Group"]);
+    assert!(lib.sidebar_group_menu("nope".into()).is_empty());
+    lib.set_host_windows(host_windows_all().into_iter().filter(|w| *w != HostWindow::ChatGroups).collect());
+    assert!(lib.sidebar_group_menu(g.id).is_empty(), "a host that cannot draw groups is offered none of their commands");
+}
+
+/// Catches a host that cannot draw groups (Windows until it does) losing a channel an agent put in one: it vanished from
+/// that sidebar, and Move to Group ▸ was offered there with commands it could not run.
+#[test]
+fn a_host_without_groups_lists_every_channel_and_offers_no_group_command() {
+    let mut i = inputs(snap());
+    i.groups = vec![grp("Agents", ChatGroupIcon::Sparkles)];
+    i.channels = vec![in_group(channel("Bridge", 2, 2, 0, false), "Agents"), channel("Family", 3, 1, 0, false)];
+    i.topics = vec![vec![], vec![]];
+    let mut st = state(LibraryPlace::Downloads);
+    st.host = host_windows_all().into_iter().filter(|w| *w != HostWindow::ChatGroups).collect();
+    let chats = model(&i, &st).sidebar.chats;
+    assert!(chats.groups.is_empty());
+    assert_eq!(names(&chats.channels), ["Bridge", "Family"], "the grouped channel is in the plain list");
+    let menu = offered_sidebar(channel_menu(&i.channels[0], &follow_line_new(&[], true), &i.groups), &st.host);
+    assert!(!menu.iter().any(|e| matches!(e, SidebarMenuEntry::Submenu { .. })), "no Move to Group ▸");
+}
+
+/// Catches Move Up and Move Down moving a group past either end or two places, through the core as a host calls it.
+#[test]
+fn a_group_moves_one_place_and_stays_at_either_end() {
+    let (core, _d) = mock();
+    let ids: Vec<String> = ["A", "B", "C"].iter().map(|n| core.chat_group_new((*n).into(), None, None).unwrap().id).collect();
+    let order = || core.chat_groups().into_iter().map(|g| g.name).collect::<Vec<_>>();
+    core.chat_group_move(ids[0].clone(), true).unwrap();
+    assert_eq!(order(), ["A", "B", "C"], "the first stays first");
+    core.chat_group_move(ids[0].clone(), false).unwrap();
+    assert_eq!(order(), ["B", "A", "C"]);
+    core.chat_group_move(ids[2].clone(), false).unwrap();
+    assert_eq!(order(), ["B", "A", "C"], "the last stays last");
+    core.chat_group_move(ids[2].clone(), true).unwrap();
+    assert_eq!(order(), ["B", "C", "A"]);
+    core.chat_group_set_icon(ids[1].clone(), ChatGroupIcon::Heart).unwrap();
+    core.chat_group_rename(ids[1].clone(), " Bee ".into()).unwrap();
+    assert!(core.chat_groups().iter().any(|g| g.name == "Bee" && g.icon == ChatGroupIcon::Heart));
 }
 
 // MARK: Structure and cadence
@@ -891,6 +1112,7 @@ fn a_host_without_a_window_is_never_offered_what_needs_it() {
             .into_iter()
             .map(|e| match e {
                 SidebarMenuEntry::Item { title, .. } => title,
+                SidebarMenuEntry::Submenu { title, .. } => format!("{title} ▸"),
                 SidebarMenuEntry::Separator => "-".into(),
             })
             .collect::<Vec<_>>()
@@ -918,7 +1140,7 @@ fn the_day_has_its_year_only_when_it_is_not_this_one() {
     assert_eq!(local_year(&Clock, 951_782_400), 2000, "2000-02-29");
 }
 
-/// The cost of one model with a thousand rows (`tools/sysguard/heavy.sh cargo test --release -p trs-ffi -- --ignored
+/// The cost of one model with a thousand rows (`tools/sysguard/heavy.sh cargo test --release -p seedwell-ffi -- --ignored
 /// a_thousand_rows --nocapture`). Prints; never asserts a time.
 #[test]
 #[ignore]

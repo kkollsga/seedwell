@@ -26,9 +26,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{oneshot, watch};
-use trs_sync_proto::codec::Magic;
-use trs_sync_proto::ids::DeviceId;
-use trs_sync_proto::msg::{Introduce, MAX_ADDRS, Message, Rendezvous};
+use seedwell_sync_proto::codec::Magic;
+use seedwell_sync_proto::ids::DeviceId;
+use seedwell_sync_proto::msg::{Introduce, MAX_ADDRS, Message, Rendezvous};
 
 use crate::service::SyncHandle;
 use crate::session::{self, Via};
@@ -236,7 +236,7 @@ async fn run(h: SyncHandle, m: Introduce) {
 }
 
 /// Dials uTP to each address at once; the first finished handshake with `expect` wins.
-async fn dial_first(h: &SyncHandle, utp: &trs_utp::UtpSocket, addrs: Vec<SocketAddr>, expect: DeviceId) -> Option<session::Connected> {
+async fn dial_first(h: &SyncHandle, utp: &seedwell_utp::UtpSocket, addrs: Vec<SocketAddr>, expect: DeviceId) -> Option<session::Connected> {
     let mut set = tokio::task::JoinSet::new();
     for a in addrs {
         let (tls, utp) = (h.ctx().tls.clone(), utp.clone());

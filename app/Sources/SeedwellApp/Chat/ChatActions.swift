@@ -143,8 +143,65 @@ import SwiftUI
         case .reply: break
         case .setTags(let id, let tags):
             send(to: place, chatTagNote(messageId: id, tags: tags), replyTo: nil) { [model] sent in if sent { model.loadChatMessages() } }
+        case .moveToGroup(let group): if let c = channel { moveToGroup(c, group) }
+        case .newGroup: if let c = channel { newGroup(with: c, dialog) }
         }
         model.refresh()
+    }
+
+    // MARK: Groups of channels (SPEC 7G.7 Groups: this Mac's sidebar only)
+
+    /// Runs a group change in order, then tells a failure under the core's title and reads the sidebar again.
+    private func groupCall(moving: Bool, _ work: @escaping @Sendable () async throws -> Void) {
+        let title = chatGroupFailureTitle(movingChannel: moving)
+        CoreCalls.inOrder({ await catching(work) }) { [weak self] r in
+            if case .failure(let error) = r { self?.sync.alert(title, SyncText.message(error)) }
+            self?.changed()
+        }
+    }
+
+    /// Lists the channel under a group of the sidebar (nil: under none).
+    func moveToGroup(_ c: SyncChannel, _ group: String?) {
+        let (core, id) = (core, c.id)
+        groupCall(moving: true) { try await core.chatSetGroup(channelId: id, groupId: group) }
+    }
+
+    /// Asks for a new group's name and makes it (its icon from its name), with the channel in it when given.
+    func newGroup(with c: SyncChannel?, _ dialog: ChatDialog? = nil) {
+        let d = dialog ?? chatNewGroupDialog()
+        guard case .ready(let name?) = ask(d) else { return }
+        let (core, id) = (core, c?.id)
+        CoreCalls.inOrder({ await catching { try await core.chatGroupNew(name: name, icon: nil, channelId: id) } }) { [weak self] r in
+            if case .failure(let error) = r { self?.sync.alert(d.failureTitle, SyncText.message(error)) }
+            self?.changed()
+        }
+    }
+
+    /// Asks for the group's new name.
+    func renameGroup(_ g: SyncChatGroup) {
+        let d = chatRenameGroupDialog(group: g)
+        guard case .ready(let name?) = ask(d) else { return }
+        let (core, id) = (core, g.id)
+        CoreCalls.inOrder({ await catching { try await core.chatGroupRename(id: id, name: name) } }) { [weak self] r in
+            if case .failure(let error) = r { self?.sync.alert(d.failureTitle, SyncText.message(error)) }
+            self?.changed()
+        }
+    }
+
+    func setGroupIcon(_ g: SyncChatGroup, _ icon: ChatGroupIcon) {
+        let (core, id) = (core, g.id)
+        groupCall(moving: false) { try await core.chatGroupSetIcon(id: id, icon: icon) }
+    }
+
+    func moveGroup(_ g: SyncChatGroup, up: Bool) {
+        let (core, id) = (core, g.id)
+        groupCall(moving: false) { try await core.chatGroupMove(id: id, up: up) }
+    }
+
+    /// Deletes the group at once: its channels go back to the plain list, nothing is lost.
+    func deleteGroup(_ g: SyncChatGroup) {
+        let (core, id) = (core, g.id)
+        groupCall(moving: false) { try await core.chatGroupDelete(id: id) }
     }
 
     /// Asks for a topic's title and starts it in the channel; its page opens.

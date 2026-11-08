@@ -3,7 +3,7 @@
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
-use trs_classify::Category;
+use seedwell_classify::Category;
 
 /// `Option<Category>` as its lowercase name.
 pub mod category_opt {

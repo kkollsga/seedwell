@@ -1,4 +1,4 @@
-# trs-portmap
+# seedwell-portmap
 
 Makes the listen port reachable from the Internet: **PCP** (RFC 6887), **NAT-PMP**
 (RFC 6886) and **UPnP IGD** (`WANIPConnection:1/2`, `WANPPPConnection:1`) port mapping.
@@ -10,8 +10,8 @@ A **sans-I/O core** (`PortMapper`) does all protocol work, with time injected as
 exchanges and one timer.
 
 ```rust
-use trs_portmap::driver::{spawn, DriverConfig};
-use trs_portmap::{Config, Wanted};
+use seedwell_portmap::driver::{spawn, DriverConfig};
+use seedwell_portmap::{Config, Wanted};
 
 let (portmap, mut events) = spawn(DriverConfig {
     core: Config { wanted: Wanted::tcp_and_udp(listen_port), ..Config::default() },
@@ -101,7 +101,7 @@ builders, and the driver just does connect/write/read-until-complete.
 | Unit | `src/*` | byte-exact NAT-PMP/PCP layouts (RFC examples), every result code, truncation and garbage, epoch rule, SSDP, description + SOAP parsing, XML limits and hostile input, HTTP quirks (bare LF, chunked, truncated), `route` output |
 | Virtual time | `tests/core_virtual.rs` | the core against pure mock gateways (`tests/common`): schedules, renewals over 25 h, back-off, error codes, reboots (NAT-PMP and PCP), spoofed sources, nonce checks, fall-through, quiet-after-failure, shutdown (also with a dead gateway), UPnP quirks (725 permanent leases, 718 conflicts, 724, foreign LOCATION/controlURL, PPP-only, chunked), packet budget under a hostile gateway |
 | Loopback | `tests/{natpmp,pcp,upnp}_loopback.rs` | the tokio driver against real UDP/TCP servers on 127.0.0.1: mapping, error codes, renewal, reboot, shutdown deletes, dead-gateway shutdown, SSDP responder + SOAP server |
-| Real router (`#[ignore]`) | `tests/real_router.rs` | read-only: NAT-PMP external-address request, PCP ANNOUNCE (opcode 0), SSDP + `GetExternalIPAddress`. **Creates no mappings.** `cargo test -p trs-portmap --test real_router -- --ignored --nocapture` |
+| Real router (`#[ignore]`) | `tests/real_router.rs` | read-only: NAT-PMP external-address request, PCP ANNOUNCE (opcode 0), SSDP + `GetExternalIPAddress`. **Creates no mappings.** `cargo test -p seedwell-portmap --test real_router -- --ignored --nocapture` |
 | Fuzz | `fuzz/` | see above (`cargo +nightly fuzz run <target>`) |
 
 ## Not done / limits

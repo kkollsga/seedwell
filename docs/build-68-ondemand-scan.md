@@ -22,7 +22,7 @@ goes on from where it stopped instead of from the first byte.
 
 ## What the Windows host must do
 
-1. **Build with this core** (`app-windows\build.ps1`, which regenerates the C# bindings from trs-ffi). The bindings
+1. **Build with this core** (`app-windows\build.ps1`, which regenerates the C# bindings from seedwell-ffi). The bindings
    change: `SyncFolder` has a new field `Scan` (`SyncScan?`, last, with a default), and there are two new types,
    `SyncScan` and `SyncScanPhase`. No C# code constructs a `SyncFolder` (checked: `app-windows` has no
    `new SyncFolder`), so **no C# source changes**: the folder rows already draw `f.Subtitle` and `f.Badge`
@@ -101,17 +101,17 @@ goes on from where it stopped instead of from the first byte.
 
 ## Tests on the Mac (each names its failure)
 
-- trs-sync: `lazy::an_on_demand_folders_scan_reads_no_file` (both modes),
+- seedwell-sync: `lazy::an_on_demand_folders_scan_reads_no_file` (both modes),
   `lazy::a_folder_marked_on_demand_while_its_first_scan_walks_reads_none_of_its_big_files`,
   `lazy::the_first_download_reads_the_file_once_and_its_copy_serves_it_by_those_hashes`,
   `lazy::a_file_changed_while_it_streams_is_never_recorded_mixed`, and the unit tests in `src/lazy.rs`.
-- trs-sync-net (timed, in `tools/timing-tests.txt`): `lazy::a_big_on_demand_folder_is_listed_on_a_peer_within_seconds_of_being_added`
+- seedwell-sync-net (timed, in `tools/timing-tests.txt`): `lazy::a_big_on_demand_folder_is_listed_on_a_peer_within_seconds_of_being_added`
   (64 GiB: 1.6 s), `lazy::listings_and_status_answer_at_once_while_a_file_is_hashed_for_another_device`,
   `lazy::listings_and_status_answer_at_once_while_a_scan_holds_the_folder`,
   `lazy::a_member_whose_owner_has_not_listed_the_folder_yet_answers_at_once_and_says_whom_it_waits_for`; and
   `lazy::a_file_not_hashed_yet_is_fetched_verified_and_its_copy_then_serves_it_by_its_hashes`,
   `versions::a_device_of_0_1_18_is_refused_and_told_to_update`.
-- trs-ffi (over the real socket, as the File Provider extension asks):
+- seedwell-ffi (over the real socket, as the File Provider extension asks):
   `sync_host::tests::a_member_lists_at_once_while_its_owner_has_sent_nothing_and_is_signalled_when_it_does`.
 
 ## Recommendation for full folders that are not marked (not done)

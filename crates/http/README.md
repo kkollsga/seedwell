@@ -1,4 +1,4 @@
-# trs-http
+# seedwell-http
 
 Direct HTTP(S) downloads for Seedwell (SPEC 7D): large files from plain links
 with pause, resume, throttling and queueing, staged in `.incomplete`, never
@@ -60,11 +60,11 @@ is published through a `watch` channel (about 4 updates/s); `Event` (`Resolved`,
   `DownloadTask` aborts it like a crash (progress up to the last checkpoint stays resumable); `pause()` first for a
   lossless stop.
 
-## Dependencies (kept to what `trs-tracker` already links)
+## Dependencies (kept to what `seedwell-tracker` already links)
 
 | crate | why |
 |---|---|
-| `hyper` 1, `hyper-util` (client-legacy), `http-body-util`, `bytes` | the same HTTP/1.1 client as `trs-tracker`; one keep-alive pool |
+| `hyper` 1, `hyper-util` (client-legacy), `http-body-util`, `bytes` | the same HTTP/1.1 client as `seedwell-tracker`; one keep-alive pool |
 | `hyper-rustls` 0.27 (`ring`, `webpki-roots`) | TLS with full certificate verification, same as the tracker |
 | `tokio` (rt, net, time, sync, macros) | async runtime pieces: tasks, timers, `watch`/`mpsc`, `select!` |
 | `sha2` 0.11 | optional SHA-256 verification (ARMv8 backend, same as storage/metainfo) |
@@ -75,7 +75,7 @@ No `serde` (the sidecar is a 10-line text format with a hardened parser), no `ra
 
 ## Tests
 
-`cargo test -p trs-http` runs unit tests and `tests/download.rs`, which drives a local hyper server that can serve or
+`cargo test -p seedwell-http` runs unit tests and `tests/download.rs`, which drives a local hyper server that can serve or
 ignore ranges, change ETag mid-way, answer 429 + `Retry-After`, drop the connection mid-body, stall, trickle, redirect
 (chains, loops, cross-host), and send assorted `Content-Disposition` headers. Fuzz targets (`fuzz/`):
 `content_disposition` (parser + sanitizer + collision naming invariants) and `sidecar` (parser round trip):

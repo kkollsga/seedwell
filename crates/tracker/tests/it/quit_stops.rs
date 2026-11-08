@@ -7,8 +7,8 @@ use crate::adversarial_support;
 use std::time::Duration;
 
 use adversarial_support::*;
-use trs_tracker::gate::GateConfig;
-use trs_tracker::{Event, TorrentEvent};
+use seedwell_tracker::gate::GateConfig;
+use seedwell_tracker::{Event, TorrentEvent};
 
 const HOST: &str = "tl.test";
 
@@ -46,7 +46,7 @@ fn watch(lab: &mut Lab, total: Duration) -> (usize, usize) {
     (quit_max, host_max)
 }
 
-fn stopped_after(lab: &Lab, t: trs_tracker::Millis) -> Vec<&Sent> {
+fn stopped_after(lab: &Lab, t: seedwell_tracker::Millis) -> Vec<&Sent> {
     lab.sent.iter().filter(|x| x.t >= t && x.event() == Some(Event::Stopped)).collect()
 }
 

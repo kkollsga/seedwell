@@ -11,7 +11,7 @@ pub enum HttpRoute {
     /// Directly.
     Direct,
     /// Through this SOCKS5 proxy, which resolves the host name.
-    Via(trs_socks::Proxy),
+    Via(seedwell_socks::Proxy),
     /// The proxy is on and not working: wait, never directly.
     Held,
 }

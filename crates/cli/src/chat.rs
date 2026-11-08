@@ -18,8 +18,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use serde_json::Value;
-use trs_control::proto::*;
-use trs_control::types::*;
+use seedwell_control::proto::*;
+use seedwell_control::types::*;
 
 use crate::args::{Opts, Usage};
 use crate::commands::{CliError, Global, R, ask, connect, show, show_line};
@@ -83,6 +83,16 @@ pub enum Cmd {
     Agents { channel: String, open: bool },
     /// `chat leave <channel>`
     Leave { channel: String },
+    /// `chat group list`
+    GroupList,
+    /// `chat group new <name> [--icon I]`
+    GroupNew { name: String, icon: Option<String> },
+    /// `chat group edit <group> [--name N] [--icon I] [--position N]`
+    GroupEdit { group: String, name: Option<String>, icon: Option<String>, position: Option<u32> },
+    /// `chat group delete <group>`
+    GroupDelete { group: String },
+    /// `chat group move <channel> <group>|--none`
+    GroupMove { channel: String, group: Option<String> },
 }
 
 /// Most attachments in one message.
@@ -95,7 +105,9 @@ const MAX_AGENT: usize = 64;
 const MAX_TITLE: usize = 200;
 
 /// The one-line usage.
-pub const USAGE: &str = "usage: seedwell chat list | new <name> | join <link>|- | share <channel> [--role read_write|read_only|admin|owner] [--uses N|unlimited] [--days N|never] | members <channel> | role <channel> <device> owner|admin|read_write|read_only | remove-device <channel> <device> | share-until <channel> <days>|never [--extend] | topics <channel> | topic <channel> <title> [--as NAME] | send <channel> [--project P | --topic T] [--as NAME] [--reply ID] [--as-json] [--attach FILE]... [-|<text>] | attachment <channel> <hash> [--out PATH] [--png] [--no-wait] | attachment <channel> <hash> --cancel | stop-sharing <channel> <hash> | read <channel> [--project P | --topic T] [--since ID | [--unread [--peek]] [--last N]] [--as NAME] [--lean] | watch [<channel>...] [--project P | --topic T] [--as NAME] [--unread] [--all] [--count N] [--batch] [--timeout S] [--lean] | dm list | dm send <device> [--as NAME] [--reply ID] [--as-json] [--attach FILE]... [-|<text>] | dm attachment <device> <hash> [--out PATH] [--no-wait] | dm attachment <device> <hash> --cancel | dm stop-sharing <device> <hash> | dm read <device> [--before ID] [--last N] | dm watch [<device>...] [--count N] | dm delete <device> | address <channel> <host:port> | mute <channel> [on|off] | wake <channel> <command>|off | agents <channel> no | tag <channel> <id> [TAG...] [--remove TAG]... [--clear] [--as NAME] | leave <channel>";
+pub const USAGE: &str = "usage: seedwell chat list | new <name> | join <link>|- | share <channel> [--role read_write|read_only|admin|owner] [--uses N|unlimited] [--days N|never] | members <channel> | role <channel> <device> owner|admin|read_write|read_only | remove-device <channel> <device> | share-until <channel> <days>|never [--extend] | topics <channel> | topic <channel> <title> [--as NAME] | send <channel> [--project P | --topic T] [--as NAME] [--reply ID] [--as-json] [--attach FILE]... [-|<text>] | attachment <channel> <hash> [--out PATH] [--png] [--no-wait] | attachment <channel> <hash> --cancel | stop-sharing <channel> <hash> | read <channel> [--project P | --topic T] [--since ID | [--unread [--peek]] [--last N]] [--as NAME] [--lean] | watch [<channel>...] [--project P | --topic T] [--as NAME] [--unread] [--all] [--count N] [--batch] [--timeout S] [--lean] | dm list | dm send <device> [--as NAME] [--reply ID] [--as-json] [--attach FILE]... [-|<text>] | dm attachment <device> <hash> [--out PATH] [--no-wait] | dm attachment <device> <hash> --cancel | dm stop-sharing <device> <hash> | dm read <device> [--before ID] [--last N] | dm watch [<device>...] [--count N] | dm delete <device> | address <channel> <host:port> | mute <channel> [on|off] | wake <channel> <command>|off | agents <channel> no | tag <channel> <id> [TAG...] [--remove TAG]... [--clear] [--as NAME] | leave <channel> | group list | group new <name> [--icon I] | group edit <group> [--name N] [--icon I] [--position N] | group delete <group> | group move <channel> <group>|--none";
+
+const GROUP_USAGE: &str = "usage: seedwell chat group list | new <name> [--icon I] | edit <group> [--name N] [--icon I] [--position N] | delete <group> | move <channel> <group>|--none   (icons: sparkles, folder, briefcase, house, people, star, hammer, book, gamecontroller, heart, globe, tray)";
 
 const READ_USAGE: &str = "read <channel> [--project P | --topic T] [--since ID | [--unread [--peek]] [--last N]] [--as NAME] [--lean]";
 
@@ -106,11 +118,64 @@ fn switch_is_the_users() -> Usage {
     Usage(
         concat!(
             "only the user opens private messages to agents, in Seedwell: Chats ▸ a private conversation ▸ ⋯ ▸ Agents on This ",
-            trs_platform::computer!(),
+            seedwell_platform::computer!(),
             " (Off, Read, or Read and post); there is no command for it"
         )
         .into(),
     )
+}
+
+/// Words after `chat group`: this computer's sidebar groups of channels (SPEC §7G.7 *Groups*).
+fn parse_group(mut it: impl Iterator<Item = String>) -> Result<Cmd, Usage> {
+    let sub = it.next().ok_or_else(|| Usage(GROUP_USAGE.into()))?;
+    let mut o = Opts::new(it.collect());
+    let usage = || Usage(GROUP_USAGE.into());
+    Ok(match sub.as_str() {
+        "list" | "ls" => {
+            if !o.finish()?.is_empty() {
+                return Err(usage());
+            }
+            Cmd::GroupList
+        }
+        "new" | "create" => {
+            let icon = o.value(&["--icon"])?;
+            let mut p = o.finish()?;
+            if p.len() != 1 {
+                return Err(usage());
+            }
+            Cmd::GroupNew { name: p.remove(0), icon }
+        }
+        "edit" | "rename" => {
+            let name = o.value(&["--name"])?;
+            let icon = o.value(&["--icon"])?;
+            let position = match o.value(&["--position"])? {
+                None => None,
+                Some(n) => Some(n.parse::<u32>().ok().filter(|n| *n >= 1).ok_or_else(|| Usage(format!("--position counts from 1, not `{n}`")))?),
+            };
+            let mut p = o.finish()?;
+            if p.len() != 1 || (name.is_none() && icon.is_none() && position.is_none()) {
+                return Err(Usage("usage: seedwell chat group edit <group> [--name N] [--icon I] [--position N]   (at least one)".into()));
+            }
+            Cmd::GroupEdit { group: p.remove(0), name, icon, position }
+        }
+        "delete" | "remove" | "rm" => {
+            let mut p = o.finish()?;
+            if p.len() != 1 {
+                return Err(usage());
+            }
+            Cmd::GroupDelete { group: p.remove(0) }
+        }
+        "move" | "set" => {
+            let none = o.flag(&["--none"]);
+            let mut p = o.finish()?;
+            match (p.len(), none) {
+                (1, true) => Cmd::GroupMove { channel: p.remove(0), group: None },
+                (2, false) => Cmd::GroupMove { group: Some(p.remove(1)), channel: p.remove(0) },
+                _ => return Err(Usage("usage: seedwell chat group move <channel> <group>|--none".into())),
+            }
+        }
+        other => return Err(Usage(format!("unknown chat group command `{other}`; {GROUP_USAGE}"))),
+    })
 }
 
 /// Words after `chat dm`.
@@ -170,12 +235,12 @@ fn parse_dm(mut it: impl Iterator<Item = String>) -> Result<Cmd, Usage> {
 
 const STOP_SHARING_USAGE: &str = concat!(
     "stop-sharing <channel> <hash>   (a file sent from this ",
-    trs_platform::computer!(),
+    seedwell_platform::computer!(),
     ": the hash from chat read, at least its first 8 characters; devices that ask for it from now on hear that it is gone, and the file itself stays where it is)"
 );
 const STOP_SHARING_DM_USAGE: &str = concat!(
     "dm stop-sharing <device> <hash>   (a file sent from this ",
-    trs_platform::computer!(),
+    seedwell_platform::computer!(),
     " in the private conversation: the hash from chat dm read, at least its first 8 characters)"
 );
 
@@ -234,6 +299,9 @@ pub fn parse(args_in: Vec<String>) -> Result<Cmd, Usage> {
     let sub = it.next().ok_or_else(|| Usage(USAGE.into()))?;
     if sub == "dm" || sub == "direct" {
         return parse_dm(it);
+    }
+    if sub == "group" || sub == "groups" {
+        return parse_group(it);
     }
     let mut o = Opts::new(it.collect());
     // --as is taken by every subcommand (where it does not matter, it is ignored).
@@ -477,13 +545,13 @@ pub(crate) fn label(g: &Global, agent: &Option<String>, project: &Option<String>
     }
     let env = std::env::var("SEEDWELL_AGENT").ok();
     let cwd = std::env::current_dir().unwrap_or_default();
-    let home = trs_platform::dirs::home();
+    let home = seedwell_platform::dirs::home();
     default_agent(env.as_deref(), g.client_given.then_some(g.client.as_str()), &cwd, home.as_deref(), |p| p.join(".git").exists())
 }
 
 /// The id of the project's topic in `channel` (its title, any case), made first when there is none (`make`).
 /// Also the channel's topics, as listed.
-pub(crate) async fn project_topic(c: &mut trs_control::client::Client, channel: &str, project: &str, make: Option<&str>) -> R<(ChatTopicsDto, Option<String>)> {
+pub(crate) async fn project_topic(c: &mut seedwell_control::client::Client, channel: &str, project: &str, make: Option<&str>) -> R<(ChatTopicsDto, Option<String>)> {
     let (_, l): (_, ChatTopicsDto) = ask(c, Request::ChatTopics(ch(channel.to_owned()))).await?;
     let lower = project.to_lowercase();
     if let Some(id) = l.topics.iter().find(|t| t.title.to_lowercase() == lower).map(|t| t.id.clone()) {
@@ -507,7 +575,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
             let (raw, d): (_, ChatChannelDto) = ask(&mut c, Request::ChatNew(ChatNewParams { name })).await?;
             show(g, &raw, || {
                 format!(
-                    concat!("Made the channel {} (this ", trs_platform::computer!(), " is its owner), Agents: Yes: agents may read and post in it on every device that joins it, and the user reads it in the app.\nInvite another device: seedwell chat share {}"),
+                    concat!("Made the channel {} (this ", seedwell_platform::computer!(), " is its owner), Agents: Yes: agents may read and post in it on every device that joins it, and the user reads it in the app.\nInvite another device: seedwell chat share {}"),
                     d.name,
                     first_group(&d.id)
                 )
@@ -548,7 +616,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         Cmd::ShareUntil { channel, days, extend } => {
             let (raw, d): (_, ChatChannelDto) = ask(&mut c, Request::ChatSetShareUntil(ChatShareUntilParams { channel, days, extend })).await?;
             show(g, &raw, || match d.share_until {
-                Some(t) => format!("{} is shared until {}; after that only its owners post and read new messages.", d.name, trs_control::human::date(t)),
+                Some(t) => format!("{} is shared until {}; after that only its owners post and read new messages.", d.name, seedwell_control::human::date(t)),
                 None => format!("{} is shared with no end.", d.name),
             });
         }
@@ -594,7 +662,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
                 });
                 return Err(CliError::plain(1, format!("image {} ({}) is not here: {why}", a.name, &a.hash[..a.hash.len().min(12)])));
             };
-            let bytes = trs_control::b64::decode(b64, 64 << 20).ok_or_else(|| CliError::plain(1, "the app sent an image that is not base64"))?;
+            let bytes = seedwell_control::b64::decode(b64, 64 << 20).ok_or_else(|| CliError::plain(1, "the app sent an image that is not base64"))?;
             let name = if d.rendered { format!("{}.png", a.name.rsplit_once('.').map_or(a.name.as_str(), |(s, _)| s)) } else { a.name.clone() };
             let path = attachment_path(out.as_deref(), &a.hash, &name)?;
             std::fs::write(&path, &bytes).map_err(|e| CliError::plain(1, format!("cannot write {}: {e}", path.display())))?;
@@ -691,7 +759,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         }
         Cmd::DmDelete { device } => {
             let (raw, _): (_, serde_json::Value) = ask(&mut c, Request::ChatDmDelete(ChatDmDeleteParams { device: device.clone() })).await?;
-            show(g, &raw, || format!(concat!("Deleted the private conversation with {device} on this ", trs_platform::computer!(), " (the other device keeps its copy)."), device = device));
+            show(g, &raw, || format!(concat!("Deleted the private conversation with {device} on this ", seedwell_platform::computer!(), " (the other device keeps its copy)."), device = device));
         }
         Cmd::DmWatch { devices, count } => {
             // Names resolve to device ids first, so the stream can be filtered.
@@ -786,7 +854,7 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         }
         Cmd::Rename { channel, name } => {
             let (raw, d): (_, ChatChannelDto) = ask(&mut c, Request::ChatRename(ChatRenameParams { channel, name })).await?;
-            show(g, &raw, || format!(concat!("The channel is called {} on this ", trs_platform::computer!(), "."), d.name));
+            show(g, &raw, || format!(concat!("The channel is called {} on this ", seedwell_platform::computer!(), "."), d.name));
         }
         Cmd::Mute { channel, on } => {
             let (raw, d): (_, ChatChannelDto) = ask(&mut c, Request::ChatMute(ChatMuteParams { channel, muted: on })).await?;
@@ -809,11 +877,65 @@ pub async fn run(cmd: Cmd, g: &Global) -> R {
         }
         Cmd::Leave { channel } => {
             let raw = c.call(&Request::ChatLeave(ch(channel))).await?;
-            show(g, &raw, || format!(concat!("Left {}; its messages on this ", trs_platform::computer!(), " are gone (other members keep theirs)."), raw["name"].as_str().unwrap_or("the channel")));
+            show(g, &raw, || format!(concat!("Left {}; its messages on this ", seedwell_platform::computer!(), " are gone (other members keep theirs)."), raw["name"].as_str().unwrap_or("the channel")));
+        }
+        Cmd::GroupList => {
+            let (raw, l): (_, ChatGroupsDto) = ask(&mut c, Request::ChatGroups(Empty {})).await?;
+            show(g, &raw, || groups(&l));
+        }
+        Cmd::GroupNew { name, icon } => {
+            let (raw, d): (_, ChatGroupDto) = ask(&mut c, Request::ChatGroupNew(ChatGroupNewParams { name, icon })).await?;
+            show(g, &raw, || format!("Made the group {} (icon {}) in the sidebar's Chats.\nPut a channel in it: seedwell chat group move <channel> {}", d.name, d.icon, quoted(&d.name)));
+        }
+        Cmd::GroupEdit { group, name, icon, position } => {
+            let (raw, d): (_, ChatGroupDto) = ask(&mut c, Request::ChatGroupEdit(ChatGroupEditParams { group, name, icon, position })).await?;
+            show(g, &raw, || format!("The group {} has the icon {} and is {} in the order.", d.name, d.icon, ordinal(d.position)));
+        }
+        Cmd::GroupDelete { group } => {
+            let raw = c.call(&Request::ChatGroupDelete(ChatGroupParams { group })).await?;
+            show(g, &raw, || format!("Deleted the group {}; its channels are in the plain list again.", raw["name"].as_str().unwrap_or("")));
+        }
+        Cmd::GroupMove { channel, group } => {
+            let named = group.clone();
+            let (raw, d): (_, ChatChannelDto) = ask(&mut c, Request::ChatSetGroup(ChatSetGroupParams { channel, group })).await?;
+            show(g, &raw, || match &named {
+                Some(n) => format!("{} is listed under the group {n}.", d.name),
+                None => format!("{} is in no group (the plain list).", d.name),
+            });
         }
     }
     let _ = std::io::stdout().flush();
     Ok(())
+}
+
+/// `chat group list` for people: each group in the sidebar's order with its icon and its channels.
+pub fn groups(l: &ChatGroupsDto) -> String {
+    let mut out = String::new();
+    if l.groups.is_empty() {
+        out.push_str("No groups. Make one: seedwell chat group new <name> [--icon I]\n");
+    }
+    for g in &l.groups {
+        let channels: Vec<&str> = g.channels.iter().map(|c| c.name.as_str()).collect();
+        let listed = if channels.is_empty() { "no channels open to agents".to_owned() } else { channels.join(", ") };
+        out.push_str(&format!("{}. {}  [{}]  {}  ({})\n", g.position, g.name, g.icon, listed, g.id));
+    }
+    out.push_str(&format!("Icons: {}", l.icons.join(", ")));
+    out
+}
+
+/// A name as typed in a shell: in quotes when it has a space or a quote.
+fn quoted(name: &str) -> String {
+    if name.contains([' ', '"', '\'']) { format!("\"{}\"", name.replace('"', "\\\"")) } else { name.to_owned() }
+}
+
+/// "first", "second", "third", else "number 7".
+fn ordinal(n: u32) -> String {
+    match n {
+        1 => "first".into(),
+        2 => "second".into(),
+        3 => "third".into(),
+        n => format!("number {n}"),
+    }
 }
 
 /// Prints new messages that `keep` lets through, one per line, until `count` (or forever).
@@ -868,7 +990,7 @@ pub(crate) struct Hold {
 /// Subscribes this connection to chat messages; with `hold`, as the only watch of that place. A watch that has just
 /// died may hold it a moment longer (its connection is not seen closed yet): asked again for up to 3 s, then refused
 /// with what holds it. An older Seedwell, which knows no holds, is subscribed without one.
-pub(crate) async fn subscribe_chat(c: &mut trs_control::client::Client, hold: Option<&Hold>) -> R {
+pub(crate) async fn subscribe_chat(c: &mut seedwell_control::client::Client, hold: Option<&Hold>) -> R {
     let kinds = Some(vec!["chat.message".to_string()]);
     let Some(h) = hold else {
         c.call(&Request::EventsSubscribe(EventsSubscribeParams { kinds, hold: None })).await?;
@@ -878,7 +1000,7 @@ pub(crate) async fn subscribe_chat(c: &mut trs_control::client::Client, hold: Op
     loop {
         let e = match c.call(&Request::EventsSubscribe(EventsSubscribeParams { kinds: kinds.clone(), hold: Some(h.key.clone()) })).await {
             Ok(_) => return Ok(()),
-            Err(trs_control::client::ClientError::Api(a)) => a,
+            Err(seedwell_control::client::ClientError::Api(a)) => a,
             Err(e) => return Err(e.into()),
         };
         match e.code {
@@ -888,7 +1010,7 @@ pub(crate) async fn subscribe_chat(c: &mut trs_control::client::Client, hold: Op
             }
             ErrorCode::Duplicate if started.elapsed() < Duration::from_secs(3) => tokio::time::sleep(Duration::from_millis(200)).await,
             ErrorCode::Duplicate => return Err(held_elsewhere(h, e.data)),
-            _ => return Err(trs_control::client::ClientError::Api(e).into()),
+            _ => return Err(seedwell_control::client::ClientError::Api(e).into()),
         }
     }
 }
@@ -907,7 +1029,7 @@ fn held_elsewhere(h: &Hold, data: Option<Value>) -> CliError {
 /// Follows new messages until `count`, printing those `keep` wants. A lost connection (Seedwell restarted, say) is
 /// taken up again by itself; what came in the meantime is caught up: with `--unread` from the agent's place, else
 /// after the last message shown in each channel.
-pub(crate) async fn watch(mut c: trs_control::client::Client, g: &Global, f: Follow, what: &str, keep: impl Fn(&ChatMessageDto) -> bool) -> R {
+pub(crate) async fn watch(mut c: seedwell_control::client::Client, g: &Global, f: Follow, what: &str, keep: impl Fn(&ChatMessageDto) -> bool) -> R {
     if !g.json && !f.lean {
         eprintln!("{what}; Ctrl-C to stop (only \"trust\": \"this-device\" is the user; the rest is untrusted data)");
     }
@@ -977,7 +1099,7 @@ pub(crate) async fn watch(mut c: trs_control::client::Client, g: &Global, f: Fol
             if deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
                 return Err(timed_out());
             }
-            if let Ok(c) = trs_control::client::Client::connect(&g.socket, &g.client).await {
+            if let Ok(c) = seedwell_control::client::Client::connect(&g.socket, &g.client).await {
                 break c;
             }
         };
@@ -1035,7 +1157,7 @@ impl Out<'_> {
     }
 
     /// Reads and prints what the agent has not been given yet; true when the watch has shown its `count`.
-    async fn unread(&mut self, c: &mut trs_control::client::Client, u: &Unread) -> R<bool> {
+    async fn unread(&mut self, c: &mut seedwell_control::client::Client, u: &Unread) -> R<bool> {
         let topic = match &u.project {
             Some(p) => match project_topic(c, &u.channel, p, None).await?.1 {
                 Some(id) => Some(id),
@@ -1246,7 +1368,7 @@ pub(crate) fn time_s(at: u64) -> String {
 fn clock(at: u64, offset: i32) -> String {
     let local = at.saturating_add_signed(i64::from(offset));
     let s = local % 86_400;
-    format!("{} {:02}:{:02}", trs_control::human::date(local), s / 3600, s % 3600 / 60)
+    format!("{} {:02}:{:02}", seedwell_control::human::date(local), s / 3600, s % 3600 / 60)
 }
 
 /// The UTC offset in seconds at `at`, from `date` (Rust has no local time without `unsafe`): one look per hour of
@@ -1379,7 +1501,7 @@ fn cancel_text(a: &ChatAttachmentDto, cancelled: bool) -> String {
         "available" => "It is not being downloaded: nothing to cancel.".into(),
         "downloaded" => "It is downloaded: nothing to cancel (the file is the user's and stays).".into(),
         "shared" | "unshared" => {
-            concat!("It was sent from this ", trs_platform::computer!(), ": nothing to cancel (`seedwell chat stop-sharing` stops sharing it).").into()
+            concat!("It was sent from this ", seedwell_platform::computer!(), ": nothing to cancel (`seedwell chat stop-sharing` stops sharing it).").into()
         }
         s => format!("It is {}.", s.replace('_', " ")),
     };
@@ -1456,7 +1578,7 @@ fn with_attachments(a: &[ChatAttachmentDto]) -> String {
 
 /// `chat attachment` for a file: downloads it (to `out`, else the Downloads folder) unless it is here, and waits for it
 /// with its progress on standard error (`wait`), or leaves it to the app.
-async fn file(c: &mut trs_control::client::Client, g: &Global, params: ChatAttachmentParams, raw: Value, d: ChatAttachmentDataDto, out: Option<&str>, wait: bool) -> R {
+async fn file(c: &mut seedwell_control::client::Client, g: &Global, params: ChatAttachmentParams, raw: Value, d: ChatAttachmentDataDto, out: Option<&str>, wait: bool) -> R {
     let a = &d.attachment;
     if matches!(a.state.as_str(), "downloaded" | "shared") {
         let place = a.path.clone().unwrap_or_default();
@@ -1467,7 +1589,7 @@ async fn file(c: &mut trs_control::client::Client, g: &Global, params: ChatAttac
     // Sent from here and no longer shared: there is nothing to download.
     if a.state == "unshared" {
         show(g, &raw, || {
-            format!(concat!("{} It was sent from this ", trs_platform::computer!(), "; send it again to share it again."), file_card(a))
+            format!(concat!("{} It was sent from this ", seedwell_platform::computer!(), "; send it again to share it again."), file_card(a))
         });
         return Ok(());
     }
@@ -1548,7 +1670,7 @@ pub fn directs(l: &ChatDirectsDto) -> String {
     if let Some(h) = l.hint.as_deref() {
         return format!("No private messages for agents: {}.", h.trim_end_matches('.'));
     }
-    let mut o = format!(concat!("Agents on this ", trs_platform::computer!(), " may {} with private messages.\n"), agents(&l.agents));
+    let mut o = format!(concat!("Agents on this ", seedwell_platform::computer!(), " may {} with private messages.\n"), agents(&l.agents));
     if l.conversations.is_empty() {
         o.push_str("No private messages. Write to a member of a channel with `seedwell chat dm send <device> -`.");
         return o;
@@ -1610,7 +1732,7 @@ mod tests {
         assert_eq!(parse(w("send Plans --as-json -")).unwrap(), send(None, None, None, None, true, "-"));
         assert_eq!(parse(w("send Plans --topic May -")).unwrap(), send(o("May"), None, None, None, false, "-"));
         assert_eq!(parse(w("send Plans --project Seedwell --as-json -")).unwrap(), send(None, o("Seedwell"), None, None, true, "-"));
-        assert_eq!(parse(w("send Plans --project Seedwell --as TorrentRS -")).unwrap(), send(None, o("Seedwell"), o("TorrentRS"), None, false, "-"));
+        assert_eq!(parse(w("send Plans --project Seedwell --as Makro -")).unwrap(), send(None, o("Seedwell"), o("Makro"), None, false, "-"));
         let read = |topic, project, last| Cmd::Read { channel: "Plans".into(), topic, project, since: None, last, agent: None, unread: false, peek: false, lean: false };
         assert_eq!(parse(w("read Plans --last 5")).unwrap(), read(None, None, Some(5)));
         assert_eq!(parse(w("read Plans --topic general")).unwrap(), read(o("general"), None, None));
@@ -1657,6 +1779,29 @@ mod tests {
         for bad in ["", "frob", "new", "send Plans", "read Plans --since a --last 2", "agents Plans all", "mute Plans maybe", "role Plans X chief", "share Plans --uses 0", "wake Plans", "topic Plans", "watch --topic x", "watch A B --topic x", "send Plans --project P --topic T -", "read Plans --project P --topic T", "send Plans --as -", "dm", "dm send QKZ4", "dm agents all", "dm read", "dm frob"] {
             assert!(parse(w(bad)).is_err(), "{bad}");
         }
+    }
+
+    /// `chat group …` (SPEC §7G.7 *Groups*): the failures caught are a group command read as another (a channel's
+    /// group taken for its name, `--none` lost so a channel stays in a group), and an edit that changes nothing or a
+    /// position from 0 taken.
+    #[test]
+    fn group_commands_are_read_as_written() {
+        let w = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+        assert_eq!(parse(w("group list")).unwrap(), Cmd::GroupList);
+        assert_eq!(parse(w("groups ls")).unwrap(), Cmd::GroupList);
+        assert_eq!(parse(w("group new Agents --icon sparkles")).unwrap(), Cmd::GroupNew { name: "Agents".into(), icon: Some("sparkles".into()) });
+        assert_eq!(parse(w("group new Home")).unwrap(), Cmd::GroupNew { name: "Home".into(), icon: None });
+        assert_eq!(
+            parse(w("group edit Agents --name Bots --position 2")).unwrap(),
+            Cmd::GroupEdit { group: "Agents".into(), name: Some("Bots".into()), icon: None, position: Some(2) }
+        );
+        assert_eq!(parse(w("group delete Agents")).unwrap(), Cmd::GroupDelete { group: "Agents".into() });
+        assert_eq!(parse(w("group move Bridge Agents")).unwrap(), Cmd::GroupMove { channel: "Bridge".into(), group: Some("Agents".into()) });
+        assert_eq!(parse(w("group move Bridge --none")).unwrap(), Cmd::GroupMove { channel: "Bridge".into(), group: None });
+        for bad in ["group", "group frob", "group new", "group edit Agents", "group edit Agents --position 0", "group move Bridge", "group move Bridge Agents --none", "group delete"] {
+            assert!(parse(w(bad)).is_err(), "{bad}");
+        }
+        assert!(parse(w("group")).unwrap_err().0.contains("sparkles"), "the usage names the icons");
     }
 
     #[test]
@@ -1766,8 +1911,8 @@ mod tests {
     fn an_agent_is_named_after_its_project() {
         let repo = |root: &'static str| move |p: &Path| p == Path::new(root);
         let home = Some(Path::new("/Users/me"));
-        let cwd = Path::new("/Users/me/Koding/TorrentRS/crates/cli");
-        assert_eq!(default_agent(None, None, cwd, home, repo("/Users/me/Koding/TorrentRS")), "TorrentRS", "the repository's folder");
+        let cwd = Path::new("/Users/me/Koding/SeedWell/crates/cli");
+        assert_eq!(default_agent(None, None, cwd, home, repo("/Users/me/Koding/SeedWell")), "SeedWell", "the repository's folder");
         assert_eq!(default_agent(None, None, cwd, home, |_| false), "cli", "no repository: the working folder");
         assert_eq!(default_agent(Some("Seedwell"), Some("claude"), cwd, home, |_| false), "Seedwell", "$SEEDWELL_AGENT first");
         assert_eq!(default_agent(Some(" "), Some("claude"), cwd, home, |_| false), "claude", "then an explicit --client");

@@ -1,4 +1,4 @@
-//! One task drives `trs_tracker::TrackerHub` for every torrent, exactly as the tracker crate's
+//! One task drives `seedwell_tracker::TrackerHub` for every torrent, exactly as the tracker crate's
 //! README prescribes:
 //!
 //! * the clock is Unix milliseconds (`Millis`);
@@ -14,14 +14,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot};
-use trs_tracker::gate::GateConfig;
-use trs_tracker::http::HttpTransport;
-use trs_tracker::hub::{TorrentSpec, TrackerHub};
-use trs_tracker::machine::Report;
-use trs_tracker::store::{StoreError, TimingKey, TimingRecord, TimingStore};
-use trs_tracker::udp::{UdpConfig, UdpTransport};
-use trs_tracker::url::Scheme;
-use trs_tracker::{Millis, Stats, TorrentEvent, TrackerUrl};
+use seedwell_tracker::gate::GateConfig;
+use seedwell_tracker::http::HttpTransport;
+use seedwell_tracker::hub::{TorrentSpec, TrackerHub};
+use seedwell_tracker::machine::Report;
+use seedwell_tracker::store::{StoreError, TimingKey, TimingRecord, TimingStore};
+use seedwell_tracker::udp::{UdpConfig, UdpTransport};
+use seedwell_tracker::url::Scheme;
+use seedwell_tracker::{Millis, Stats, TorrentEvent, TrackerUrl};
 
 use crate::api::{ReannounceResult, SecretUrl, ShutdownReport, TorrentId, TrackerInfo, TrackerState};
 use crate::counters::Counters;
@@ -30,7 +30,7 @@ use crate::session::SessionMsg;
 use crate::shared::Shared;
 use crate::tracker_log::{self, Wire};
 use crate::util::unix_ms;
-use trs_devlog::{DevLog, Entry, Kind, Next};
+use seedwell_devlog::{DevLog, Entry, Kind, Next};
 
 /// Adapter so a boxed store can back the hub.
 struct BoxedTiming(Box<dyn TimingStore + Send>);
@@ -209,10 +209,10 @@ struct Driver {
     key: u32,
     numwant: u32,
     /// What HTTP announces say about encryption (follows `network.encryption`).
-    crypto: trs_tracker::Crypto,
+    crypto: seedwell_tracker::Crypto,
     removing: Vec<TorrentId>,
     /// Reports drained while answering a manual re-announce; handled with the next batch.
-    stash: Vec<trs_tracker::hub::HubReport>,
+    stash: Vec<seedwell_tracker::hub::HubReport>,
     /// Port announced to trackers: the listen port, or the external port a mapper obtained.
     ann_port: Option<u16>,
     /// While a port mapper is starting, commands wait (at most [`PORT_SETTLE`]) so that the
@@ -226,7 +226,7 @@ struct Driver {
     /// Titles for the log lines.
     titles: HashMap<TorrentId, String>,
     /// Announces in flight (not `stopped`): ticket -> torrent, and how many per torrent.
-    flight: HashMap<trs_tracker::gate::Ticket, TorrentId>,
+    flight: HashMap<seedwell_tracker::gate::Ticket, TorrentId>,
     busy: HashMap<TorrentId, u32>,
 }
 
@@ -237,7 +237,7 @@ const PORT_SETTLE: Duration = Duration::from_secs(5);
 /// `stopped` is irrelevant, so at quit they leave together (the hub lifts the per-host cap and the
 /// token bucket, up to 50 in flight over all hosts) and each waits only briefly: the connection
 /// gets [`QUIT_STOP_LIMITS`]`.connect`, the answer `.answer` after the request is written.
-const QUIT_STOP_LIMITS: trs_tracker::http::QuitLimits = trs_tracker::http::QuitLimits {
+const QUIT_STOP_LIMITS: seedwell_tracker::http::QuitLimits = seedwell_tracker::http::QuitLimits {
     connect: Duration::from_secs(3),
     answer: Duration::from_secs(2),
 };
@@ -302,12 +302,12 @@ pub(crate) fn spawn(
 
 /// The announce parameters for an encryption policy: prefer = `supportcrypto=1`, require adds
 /// `requirecrypto=1`, off sends neither.
-pub(crate) fn crypto_of(p: crate::config::EncryptionPolicy) -> trs_tracker::Crypto {
+pub(crate) fn crypto_of(p: crate::config::EncryptionPolicy) -> seedwell_tracker::Crypto {
     use crate::config::EncryptionPolicy as E;
     match p {
-        E::Off => trs_tracker::Crypto::Off,
-        E::Prefer => trs_tracker::Crypto::Support,
-        E::Require => trs_tracker::Crypto::Require,
+        E::Off => seedwell_tracker::Crypto::Off,
+        E::Prefer => seedwell_tracker::Crypto::Support,
+        E::Require => seedwell_tracker::Crypto::Require,
     }
 }
 
@@ -320,7 +320,7 @@ pub(crate) fn fold_profile_tiers(
     policy: Option<&crate::policy::PolicyData>,
 ) -> Vec<Vec<TrackerUrl>> {
     let Some(pol) = policy else { return tiers };
-    trs_tracker::set::fold_tiers(tiers, |u| crate::policy::match_profile(&pol.profiles, [u.raw()]).profile)
+    seedwell_tracker::set::fold_tiers(tiers, |u| crate::policy::match_profile(&pol.profiles, [u.raw()]).profile)
 }
 
 /// The wall clock moved on by much more than the monotonic one: the machine slept in between.
@@ -358,7 +358,7 @@ enum Plan {
     Direct,
     Proxied,
     /// Not sent: the proxy is on and cannot carry it.
-    Blocked(trs_tracker::ProxyBlock),
+    Blocked(seedwell_tracker::ProxyBlock),
 }
 
 fn clock() -> Millis {
@@ -374,16 +374,16 @@ async fn run(
     let policy = d.sh.cfg().tracker_destinations;
     // A direct request asks the proxy state again before every hop and the other family's retry (SPEC §7H).
     let gate_state = d.sh.proxy.clone();
-    let http = HttpTransport::with_config(&version, trs_tracker::http::HttpConfig { policy, ..Default::default() })
+    let http = HttpTransport::with_config(&version, seedwell_tracker::http::HttpConfig { policy, ..Default::default() })
         .with_direct_gate(Arc::new(move || !gate_state.on()));
     // An engine bound to one address (a test on loopback, `daemon --bind`) keeps its tracker sockets there too.
     let listen = d.sh.cfg().listen_addr;
     let udp = UdpTransport::bind(UdpConfig { policy, bind: (!listen.is_unspecified()).then_some(listen), ..UdpConfig::default() }).await.ok();
     // Torrents added by `seedwell sim` (marked by the control layer) announce to the mock tracker on 127.0.0.1;
     // every other torrent keeps the configured policy.
-    let http_sim = HttpTransport::with_config(&version, trs_tracker::http::HttpConfig { policy: trs_tracker::policy::DestinationPolicy { allow_loopback: true, ..policy }, ..Default::default() });
+    let http_sim = HttpTransport::with_config(&version, seedwell_tracker::http::HttpConfig { policy: seedwell_tracker::policy::DestinationPolicy { allow_loopback: true, ..policy }, ..Default::default() });
     // Through the proxy (SPEC §7H): a transport per server in use, made when the server changes.
-    let mut via: Option<(Arc<trs_socks::Proxy>, HttpTransport)> = None;
+    let mut via: Option<(Arc<seedwell_socks::Proxy>, HttpTransport)> = None;
     let (done_tx, mut done_rx) = mpsc::unbounded_channel();
     let (extra_tx, mut extra_rx) = mpsc::unbounded_channel::<(String, u32)>();
     let mut shutdown: Option<ShutdownState> = None;
@@ -421,7 +421,7 @@ async fn run(
         d.hub.note_alive(Millis(d.sh.net.alive_ms()));
         let quitting = shutdown.is_some();
         for req in d.hub.tick(now) {
-            if req.event() != Some(trs_tracker::Event::Stopped)
+            if req.event() != Some(seedwell_tracker::Event::Stopped)
                 && let Some(p) = req.announce_params()
             {
                 d.flight_started(req.ticket(), p.info_hash, now);
@@ -439,16 +439,16 @@ async fn run(
             }
             let plan = match &route {
                 crate::proxy::Route::Direct => Plan::Direct,
-                crate::proxy::Route::Held => Plan::Blocked(trs_tracker::ProxyBlock::Down),
+                crate::proxy::Route::Held => Plan::Blocked(seedwell_tracker::ProxyBlock::Down),
                 crate::proxy::Route::Via(p) => {
                     if via.as_ref().is_none_or(|(q, _)| !Arc::ptr_eq(q, p)) {
-                        let cfg = trs_tracker::http::HttpConfig { policy, ..Default::default() };
+                        let cfg = seedwell_tracker::http::HttpConfig { policy, ..Default::default() };
                         via = Some((p.clone(), HttpTransport::with_proxy(&version, cfg, (**p).clone())));
                     }
                     Plan::Proxied
                 }
             };
-            let plan = if req.url().scheme() == Scheme::Udp && plan == Plan::Proxied { Plan::Blocked(trs_tracker::ProxyBlock::Udp) } else { plan };
+            let plan = if req.url().scheme() == Scheme::Udp && plan == Plan::Proxied { Plan::Blocked(seedwell_tracker::ProxyBlock::Udp) } else { plan };
             let http = match (&plan, &via) {
                 (Plan::Proxied, Some((_, t))) => t.clone(),
                 _ if simulated => http_sim.clone(),
@@ -463,7 +463,7 @@ async fn run(
             // a request is outstanding, and a tracker that is slow on a regular announce is not
             // worth a 30 s wait. The abandoned request counts as a timeout (ambiguous: a `completed`
             // stays marked as sent). Every other request keeps its own timeouts.
-            let quit_stop = quitting && req.event() == Some(trs_tracker::Event::Stopped);
+            let quit_stop = quitting && req.event() == Some(seedwell_tracker::Event::Stopped);
             if quit_stop {
                 tally.released.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
@@ -475,16 +475,16 @@ async fn run(
                 let call = async {
                     let mut plan = plan;
                     let mut late = None;
-                    if plan == Plan::Blocked(trs_tracker::ProxyBlock::Down) && !quit_stop {
+                    if plan == Plan::Blocked(seedwell_tracker::ProxyBlock::Down) && !quit_stop {
                         // The servers are being tested (at start, after a switch): wait for one a little, rather
                         // than fail and wait for the retry. Never sent directly meanwhile.
                         let until = Instant::now() + HELD_WAIT;
                         while Instant::now() < until {
                             if let crate::proxy::Route::Via(p) = proxy_state.route() {
                                 if req.url().scheme() == Scheme::Udp {
-                                    plan = Plan::Blocked(trs_tracker::ProxyBlock::Udp);
+                                    plan = Plan::Blocked(seedwell_tracker::ProxyBlock::Udp);
                                 } else {
-                                    let cfg = trs_tracker::http::HttpConfig { policy, ..Default::default() };
+                                    let cfg = seedwell_tracker::http::HttpConfig { policy, ..Default::default() };
                                     late = Some(HttpTransport::with_proxy(&held_version, cfg, (*p).clone()));
                                     plan = Plan::Proxied;
                                 }
@@ -494,7 +494,7 @@ async fn run(
                         }
                     }
                     if let Plan::Blocked(why) = plan {
-                        return (Err(trs_tracker::AnnounceError::Transport(trs_tracker::TransportError::Proxy(why))), Wire::None);
+                        return (Err(seedwell_tracker::AnnounceError::Transport(seedwell_tracker::TransportError::Proxy(why))), Wire::None);
                     }
                     let http = late.as_ref().unwrap_or(&http);
                     match req.url().scheme() {
@@ -503,12 +503,12 @@ async fn run(
                                 let (r, t) = u.announce_traced(&req).await;
                                 (r, Wire::Udp(t))
                             }
-                            None => (Err(trs_tracker::AnnounceError::Transport(trs_tracker::TransportError::Connect)), Wire::None),
+                            None => (Err(seedwell_tracker::AnnounceError::Transport(seedwell_tracker::TransportError::Connect)), Wire::None),
                         },
                         _ => {
                             let o = if quit_stop { http.announce_quit(&req, QUIT_STOP_LIMITS).await } else { http.announce(&req).await };
                             let _ = extra.send((req.url().host().to_owned(), o.extra_hops));
-                            if matches!(o.result, Err(trs_tracker::AnnounceError::Transport(trs_tracker::TransportError::Proxy(_)))) {
+                            if matches!(o.result, Err(seedwell_tracker::AnnounceError::Transport(seedwell_tracker::TransportError::Proxy(_)))) {
                                 // The server in use failed: the monitor tests it now and switches.
                                 proxy_state.kick();
                             }
@@ -531,14 +531,14 @@ async fn run(
                     r = call => r,
                     () = patience => {
                         abandoned = Some(if quit_stop { "given up: the quit wait for stopped ran out" } else { "given up: the quit grace for a request in flight ran out" });
-                        (Err(trs_tracker::AnnounceError::Transport(trs_tracker::TransportError::Timeout)), Wire::None)
+                        (Err(seedwell_tracker::AnnounceError::Transport(seedwell_tracker::TransportError::Timeout)), Wire::None)
                     }
                 };
                 if quit_stop {
                     use std::sync::atomic::Ordering::Relaxed;
                     match &result {
                         Err(e) if e.never_reached_tracker() => tally.unreached.fetch_add(1, Relaxed),
-                        Err(trs_tracker::AnnounceError::Transport(trs_tracker::TransportError::Timeout)) => tally.timed_out.fetch_add(1, Relaxed),
+                        Err(seedwell_tracker::AnnounceError::Transport(seedwell_tracker::TransportError::Timeout)) => tally.timed_out.fetch_add(1, Relaxed),
                         _ => 0,
                     };
                 }
@@ -614,7 +614,7 @@ async fn run(
 
 impl Driver {
     /// An announce left: the torrent's row shows "Announcing…" (the app waits half a second before it does).
-    fn flight_started(&mut self, ticket: trs_tracker::gate::Ticket, id: TorrentId, now: Millis) {
+    fn flight_started(&mut self, ticket: seedwell_tracker::gate::Ticket, id: TorrentId, now: Millis) {
         self.flight.insert(ticket, id);
         let n = self.busy.entry(id).or_insert(0);
         *n += 1;
@@ -624,7 +624,7 @@ impl Driver {
     }
 
     /// Its answer (or failure) arrived; the row's own state follows through `TrackerHealth`.
-    fn flight_ended(&mut self, ticket: trs_tracker::gate::Ticket) {
+    fn flight_ended(&mut self, ticket: seedwell_tracker::gate::Ticket) {
         let Some(id) = self.flight.remove(&ticket) else { return };
         if let Some(n) = self.busy.get_mut(&id) {
             *n -= 1;
@@ -711,9 +711,9 @@ impl Driver {
                     // 15 min..6 h, SeedingDormant 30 min..12 h. The session sends it on every
                     // change: finishing, or the Sharing group drifting between Active and Dormant.
                     let r = match role {
-                        Role::Downloading => trs_tracker::TorrentRole::Downloading,
-                        Role::Seeding => trs_tracker::TorrentRole::Seeding,
-                        Role::SeedingDormant => trs_tracker::TorrentRole::SeedingDormant,
+                        Role::Downloading => seedwell_tracker::TorrentRole::Downloading,
+                        Role::Seeding => seedwell_tracker::TorrentRole::Seeding,
+                        Role::SeedingDormant => seedwell_tracker::TorrentRole::SeedingDormant,
                     };
                     self.hub.set_role(&id, r, now);
                 }
@@ -763,9 +763,9 @@ impl Driver {
                     size: t.size,
                 };
                 let role = match t.role {
-                    Role::Downloading => trs_tracker::TorrentRole::Downloading,
-                    Role::Seeding => trs_tracker::TorrentRole::Seeding,
-                    Role::SeedingDormant => trs_tracker::TorrentRole::SeedingDormant,
+                    Role::Downloading => seedwell_tracker::TorrentRole::Downloading,
+                    Role::Seeding => seedwell_tracker::TorrentRole::Seeding,
+                    Role::SeedingDormant => seedwell_tracker::TorrentRole::SeedingDormant,
                 };
                 for u in urls {
                     if let Ok(url) = TrackerUrl::parse(&u)
@@ -853,9 +853,9 @@ impl Driver {
                 self.log_net("path", format!("the OS reports the network path is {}", if ok { "satisfied" } else { "unsatisfied" }));
                 self.hub.path_changed(ok, now);
             }
-            TrackerCmd::WillSleep => self.log_net("will_sleep", concat!("the ", trs_platform::computer!(), " is going to sleep: nothing to do").into()),
+            TrackerCmd::WillSleep => self.log_net("will_sleep", concat!("the ", seedwell_platform::computer!(), " is going to sleep: nothing to do").into()),
             TrackerCmd::DidWake => {
-                self.log_net("did_wake", concat!("the ", trs_platform::computer!(), " woke: announces wait for the network (or 5 s), then one probe decides").into());
+                self.log_net("did_wake", concat!("the ", seedwell_platform::computer!(), " woke: announces wait for the network (or 5 s), then one probe decides").into());
                 self.hub.did_wake(now);
             }
             TrackerCmd::Alive => self.hub.net_hint(now),
@@ -919,7 +919,7 @@ impl Driver {
 
     /// What the hub decided about connectivity (SPEC 7C.4c): publish it, tell the session, log it.
     async fn drain_net(&mut self) {
-        use trs_tracker::outage::{NetEvent, Reason};
+        use seedwell_tracker::outage::{NetEvent, Reason};
         for ev in self.hub.take_net_events() {
             match ev {
                 NetEvent::Offline { at, reason, forgiven, due } => {
@@ -1011,8 +1011,8 @@ impl Driver {
         self.log.log(&Entry { ts_ms: unix_ms(), kind: Kind::Quit, decision: Some(code), note: Some(note), ..Entry::default() });
     }
 
-    fn log_gate(&self, ev: &trs_tracker::gate::GateEvent) {
-        use trs_tracker::gate::GateEvent as G;
+    fn log_gate(&self, ev: &seedwell_tracker::gate::GateEvent) {
+        use seedwell_tracker::gate::GateEvent as G;
         let now = unix_ms();
         let (host, code, note, next) = match ev {
             G::HostPaused { host, until } => (
@@ -1033,7 +1033,7 @@ impl Driver {
     }
 
     /// Reports that carry a decision (the exchanges themselves are logged by `log_finished`).
-    fn log_report(&self, r: &trs_tracker::hub::HubReport) {
+    fn log_report(&self, r: &seedwell_tracker::hub::HubReport) {
         let (code, note, next) = match &r.report {
             Report::ManualDeferred { until } => (
                 "manual_deferred",
@@ -1061,7 +1061,7 @@ impl Driver {
     }
 
     /// Add the title and the resulting schedule to a finished exchange and log it.
-    fn log_finished(&mut self, ticket: trs_tracker::gate::Ticket, mut f: tracker_log::Finished) {
+    fn log_finished(&mut self, ticket: seedwell_tracker::gate::Ticket, mut f: tracker_log::Finished) {
         let (ih, slot) = ticket.key();
         f.entry.title = self.titles.get(&ih).cloned();
         let stopped = f.entry.event == "stopped";
@@ -1071,7 +1071,7 @@ impl Driver {
             } else if let Some((interval, min)) = f.timing {
                 f.entry.next = m.regular_at().map(|at| Next { at_ms: at.0, why: tracker_log::schedule_why_ok(interval, min) });
             } else if let Some(err) = &f.error {
-                if m.health() == trs_tracker::machine::Health::Halted {
+                if m.health() == seedwell_tracker::machine::Health::Halted {
                     let n = f.entry.note.take().map(|n| format!("{n}; ")).unwrap_or_default();
                     f.entry.note = Some(format!("{n}halted: announcing stops until you re-announce or restart the torrent"));
                 } else if let Some(at) = m.retry_at() {
@@ -1145,12 +1145,12 @@ impl Driver {
                     slot.status = format!("failed: {error}");
                     slot.state = match &error {
                         // The tracker answered and said something: that is a message, not an outage.
-                        trs_tracker::AnnounceError::Rejected { .. } => SlotState::Warn,
+                        seedwell_tracker::AnnounceError::Rejected { .. } => SlotState::Warn,
                         _ => SlotState::Failed {
                             reason: short_failure(&error),
                             detail: describe_failure(&error),
                             retry_at_ms: retry_at.0,
-                            transport: matches!(error, trs_tracker::AnnounceError::Transport(_)),
+                            transport: matches!(error, seedwell_tracker::AnnounceError::Transport(_)),
                         },
                     };
                 }
@@ -1253,7 +1253,7 @@ impl Driver {
             let detail = states
                 .iter()
                 .find_map(|s| if let SlotState::Failed { detail, .. } = s { Some(detail.clone()) } else { None })
-                .unwrap_or_else(|| describe_failure(&trs_tracker::AnnounceError::Transport(trs_tracker::TransportError::Io)));
+                .unwrap_or_else(|| describe_failure(&seedwell_tracker::AnnounceError::Transport(seedwell_tracker::TransportError::Io)));
             let reason = states
                 .iter()
                 .find_map(|s| if let SlotState::Failed { reason, .. } = s { Some(reason.clone()) } else { None })
@@ -1290,10 +1290,10 @@ impl Driver {
                 };
                 out.push(TrackerInfo {
                     url: url.to_string(),
-                    shown_url: trs_state::url::mask_secrets(url.raw()),
+                    shown_url: seedwell_state::url::mask_secrets(url.raw()),
                     full_url: SecretUrl::new(url.raw()),
                     tier: tier_idx as u32,
-                    status: if st.status.is_empty() { "waiting".into() } else { trs_state::url::mask_urls_in_text(&st.status) },
+                    status: if st.status.is_empty() { "waiting".into() } else { seedwell_state::url::mask_urls_in_text(&st.status) },
                     last_announce_ms: last.map(|m| m.0),
                     next_announce_ms: next.map(|m| m.0),
                     seeds: st.seeds,
@@ -1349,7 +1349,7 @@ mod wake_tests {
 mod fold_tests {
     use super::*;
     use crate::policy::PolicyData;
-    use trs_state::trackers::{Profile, TrackerProfiles, UrlPattern};
+    use seedwell_state::trackers::{Profile, TrackerProfiles, UrlPattern};
 
     fn tiers(urls: &[&str]) -> Vec<Vec<TrackerUrl>> {
         urls.iter().map(|u| vec![TrackerUrl::parse(u).unwrap()]).collect()
@@ -1387,8 +1387,8 @@ mod fold_tests {
 pub(crate) const FAILING_SHORT: &str = "Tracker not responding";
 
 /// The short cause a row shows before "· retrying in 9 min": "Bad gateway", "Timed out", "Can't connect".
-pub(crate) fn short_failure(e: &trs_tracker::AnnounceError) -> String {
-    use trs_tracker::{AnnounceError as A, TransportError as T};
+pub(crate) fn short_failure(e: &seedwell_tracker::AnnounceError) -> String {
+    use seedwell_tracker::{AnnounceError as A, TransportError as T};
     match e {
         A::Rejected { reason, .. } => short_refused(reason),
         A::Http { status, .. } => match *status {
@@ -1407,8 +1407,8 @@ pub(crate) fn short_failure(e: &trs_tracker::AnnounceError) -> String {
             T::Io => "Connection dropped".into(),
             T::TooLarge => "Answer too big".into(),
             T::Connect | T::Forbidden(_) | T::NotSent | T::Redirect => "Can't connect".into(),
-            T::Proxy(trs_tracker::ProxyBlock::Down) => "Waiting for the proxy".into(),
-            T::Proxy(trs_tracker::ProxyBlock::Udp) => "Off with the proxy".into(),
+            T::Proxy(seedwell_tracker::ProxyBlock::Down) => "Waiting for the proxy".into(),
+            T::Proxy(seedwell_tracker::ProxyBlock::Udp) => "Off with the proxy".into(),
         },
     }
 }
@@ -1450,8 +1450,8 @@ fn status_phrase(status: u16) -> &'static str {
 /// tracker is: one sentence, with the short technical cause in brackets. The one place these
 /// words are made (the app and the CLI both show them). Never contains the announce URL or the
 /// passkey: only the status and the tracker's own `failure reason`.
-pub(crate) fn describe_failure(e: &trs_tracker::AnnounceError) -> String {
-    use trs_tracker::{AnnounceError as A, TransportError as T};
+pub(crate) fn describe_failure(e: &seedwell_tracker::AnnounceError) -> String {
+    use seedwell_tracker::{AnnounceError as A, TransportError as T};
     match e {
         A::Rejected { reason, .. } => tracker_refused(reason),
         A::Http { status, .. } => {
@@ -1475,10 +1475,10 @@ pub(crate) fn describe_failure(e: &trs_tracker::AnnounceError) -> String {
             T::Io => "The tracker can't be reached (the connection broke).".into(),
             T::Redirect => "The tracker can't be reached (it sent Seedwell somewhere it won't follow).".into(),
             T::TooLarge => "The tracker sent an answer that was too big to use.".into(),
-            T::Proxy(trs_tracker::ProxyBlock::Down) => {
+            T::Proxy(seedwell_tracker::ProxyBlock::Down) => {
                 "Not asked: torrents go through the proxy, which isn\u{2019}t working right now (Seedwell never connects directly instead).".into()
             }
-            T::Proxy(trs_tracker::ProxyBlock::Udp) => {
+            T::Proxy(seedwell_tracker::ProxyBlock::Udp) => {
                 "Not asked: this is a UDP tracker, and UDP is off while torrents go through the proxy.".into()
             }
         },
@@ -1498,7 +1498,7 @@ fn sentence_case(s: &str) -> String {
 #[cfg(test)]
 mod words_tests {
     use super::*;
-    use trs_tracker::{AnnounceError as A, TransportError as T};
+    use seedwell_tracker::{AnnounceError as A, TransportError as T};
 
     #[test]
     fn a_server_error_says_the_server_is_down() {
@@ -1519,7 +1519,7 @@ mod words_tests {
         assert_eq!(describe_failure(&A::Transport(T::Timeout)), "The tracker can't be reached (it didn't answer in time).");
         assert_eq!(describe_failure(&A::Transport(T::Connect)), "The tracker can't be reached (the connection was refused or failed).");
         assert_eq!(describe_failure(&A::Transport(T::Dns)), "The tracker can't be reached (its address couldn't be looked up).");
-        assert_eq!(describe_failure(&A::Garbage(trs_tracker::response::ParseError::NotBencode)), "The tracker sent an answer Seedwell couldn't read.");
+        assert_eq!(describe_failure(&A::Garbage(seedwell_tracker::response::ParseError::NotBencode)), "The tracker sent an answer Seedwell couldn't read.");
     }
 
     #[test]

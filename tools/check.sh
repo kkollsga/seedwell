@@ -3,16 +3,16 @@
 #
 #   tools/check.sh                  changes in the working folder (else the last commit)
 #   tools/check.sh --base public    everything since that revision
-#   tools/check.sh -p trs-tracker   these crates (and the crates that depend on them)
+#   tools/check.sh -p seedwell-tracker   these crates (and the crates that depend on them)
 #   tools/check.sh --full           the whole workspace, app and Swift tests (what GitHub CI runs)
 #   tools/check.sh --quick          a worker's check: the tests of the changed crates only, clippy for them and
-#                                   their dependents (no tests there), the app only when app/ or trs-ffi changed,
+#                                   their dependents (no tests there), the app only when app/ or seedwell-ffi changed,
 #                                   and a Windows compile check (AGENTS.md, *Catching bugs early*)
 #   tools/check.sh -- -E 'test(/accuracy/)'   extra arguments for cargo nextest
 #
 # Affected = the crates whose files changed plus every workspace crate that depends on them. Clippy
 # and the tests (cargo nextest, every test binary in parallel) run for those only; the app build and
-# the Swift tests only when app/ or trs-ffi is affected (the rendezvous Worker's node tests with trs-rendezvous, when
+# the Swift tests only when app/ or seedwell-ffi is affected (the rendezvous Worker's node tests with seedwell-rendezvous, when
 # Node is installed). A change to Cargo.toml, Cargo.lock, the
 # toolchain or the nextest config means everything. Documentation-only changes run nothing.
 # Two steps catch before CI what only CI would find: tools/test-portability.py reads the affected crates' tests for
@@ -20,7 +20,7 @@
 # priority, where the system delays timers as on CI's Mac runner.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-export TRS_FORBID_REAL_HOME=1
+export SEEDWELL_FORBID_REAL_HOME=1
 
 orig=("$@")
 base="" full=0 quick=0 app="auto" pkgs=() extra=()
@@ -62,8 +62,8 @@ if not full and not wanted:
     for f in files:
         if f.startswith("app/"): app = True
         if f == "tools/test-portability.py": scan_all = True
-        # The rendezvous Worker is embedded in trs-rendezvous (include_str!).
-        if f.startswith("tools/rendezvous-worker/") and not f.endswith(".md"): wanted.add("trs-rendezvous")
+        # The rendezvous Worker is embedded in seedwell-rendezvous (include_str!).
+        if f.startswith("tools/rendezvous-worker/") and not f.endswith(".md"): wanted.add("seedwell-rendezvous")
         for name, (d, _) in crates.items():
             if f.startswith(d + "/") and not f.endswith(".md"): wanted.add(name)
 if full: wanted = set(crates)
@@ -73,7 +73,7 @@ while grow:
     grow = False
     for name, (_, deps) in crates.items():
         if name not in wanted and deps & wanted: wanted.add(name); grow = True
-app = app or full or "trs-ffi" in (direct if quick else wanted)
+app = app or full or "seedwell-ffi" in (direct if quick else wanted)
 # The folders tools/test-portability.py reads: those of the affected crates (all when the scan itself changed).
 scan = sorted(d for d, _ in crates.values() if d.startswith("crates/")) if scan_all else sorted(crates[n][0] for n in wanted)
 print(" ".join(sorted(wanted)) + "|" + ("1" if app else "0") + "|" + " ".join(sorted(direct)) + "|" + " ".join(scan))
@@ -103,6 +103,15 @@ if [ $quick -eq 1 ]; then for p in $direct; do targs+=(-p "$p"); done; else targ
 
 # One heavy job for every step: this script runs itself again under heavy.sh.
 if [ -z "${CHECK_INNER:-}" ]; then
+  # Started under heavy.sh itself, its own heavy job would wait for the lock its parent holds, for ever, and every
+  # other build on the machine behind it (2026-11-07): refuse instead.
+  p=$PPID
+  while [ -n "$p" ] && [ "$p" -gt 1 ]; do
+    case "$(ps -o command= -p "$p" 2>/dev/null)" in
+      *sysguard/heavy.sh*) echo "check: run tools/check.sh directly, not under heavy.sh: it takes the heavy lock itself" >&2; exit 2 ;;
+    esac
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+  done
   start=$(date +%s)
   CHECK_INNER=1 CHECK_APP=$app tools/sysguard/heavy.sh "$0" ${orig[@]+"${orig[@]}"}
   echo "check: ok in $(( $(date +%s) - start )) s"
@@ -125,7 +134,7 @@ if [ -z "$(find "$stamp" -mtime -1 2>/dev/null)" ]; then
   fi
 fi
 # FFI names the Windows app's C# bindings cannot compile (Swift does not mind, so only Windows CI would find them).
-if [[ " $affected " == *" trs-ffi "* ]]; then
+if [[ " $affected " == *" seedwell-ffi "* ]]; then
   python3 -I tools/ffi-names.py
 fi
 if [ ${#args[@]} -gt 0 ]; then
@@ -150,7 +159,7 @@ if [ ${#targs[@]} -gt 0 ] && [ ${#extra[@]} -eq 0 ] && [ "$(uname)" = Darwin ]; 
   echo "check: the timing tests pass at utility priority, as on CI's Mac ($(( $(date +%s) - t0 )) s)"
 fi
 # The rendezvous Worker's own tests (worker.js against a local fake of the Workers runtime), when Node is here.
-if [[ " $affected " == *" trs-rendezvous "* ]] && [ ${#extra[@]} -eq 0 ]; then
+if [[ " $affected " == *" seedwell-rendezvous "* ]] && [ ${#extra[@]} -eq 0 ]; then
   if command -v node >/dev/null; then
     (cd tools/rendezvous-worker && node --test --test-reporter=dot test.mjs)
   else

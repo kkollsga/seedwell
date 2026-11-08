@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Duration;
 
 use common::*;
-use trs_engine::persist::*;
-use trs_engine::*;
+use seedwell_engine::persist::*;
+use seedwell_engine::*;
 
 struct Counting;
 static LIVE: AtomicUsize = AtomicUsize::new(0);
@@ -65,7 +65,7 @@ fn populate(state: &std::path::Path, n: usize) {
                 session_base: 0,
                 piece_length: t.piece_len,
                 private: false,
-                save_path: "/nonexistent/trs-scale".into(),
+                save_path: "/nonexistent/seedwell-scale".into(),
                 state: StoredState::Active,
                 file_priorities: vec![],
                 priority: 1,

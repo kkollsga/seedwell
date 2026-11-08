@@ -5,7 +5,7 @@
 
 use std::hint::black_box;
 use std::time::Instant;
-use trs_classify::{FileEntry, Input, classify};
+use seedwell_classify::{FileEntry, Input, classify};
 
 struct Rng(u64);
 impl Rng {

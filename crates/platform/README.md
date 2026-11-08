@@ -1,4 +1,4 @@
-# trs-platform
+# seedwell-platform
 
 The one place in Seedwell's core that names an operating system (docs/CROSS-PLATFORM.md §2). Every other crate asks
 for what it means ("the volume of this path", "read at this offset", "stop when asked to") and gets the same answer on

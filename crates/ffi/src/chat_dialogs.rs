@@ -4,9 +4,9 @@
 //! what the typed text becomes and why it cannot be used; the host draws them, runs the core call of the action and
 //! shows a failure under [`ChatDialog::failure_title`] with the error's sentence (`core_error_message`).
 
-use trs_platform::computer;
-use trs_sync_proto::keys::KeyError;
-use trs_sync_proto::members::InviteLink;
+use seedwell_platform::computer;
+use seedwell_sync_proto::keys::KeyError;
+use seedwell_sync_proto::members::InviteLink;
 
 use crate::chat_text::{agents_menu, chat_new_agents_note, ChatAgentsChoice, AGENTS_NO, AGENTS_YES};
 use crate::devices_text::FollowLine;
@@ -38,6 +38,10 @@ pub enum ChatDialogKind {
     DeleteConversation,
     /// `chat_set_agents(channel, !channel.agents)`: Agents: Yes/No… of the sidebar's menu, switched the other way.
     ChannelAgents,
+    /// `chat_group_new(name, None, channel)` (`chat_new_group_dialog`): a channel's New Group… moves it into the group.
+    NewGroup,
+    /// `chat_group_rename(group, name)` (`chat_rename_group_dialog`).
+    RenameGroup,
 }
 
 /// The text field of a dialog that asks for one.
@@ -216,6 +220,7 @@ pub fn chat_dialog_check(dialog: ChatDialog, input: String) -> ChatDialogInput {
             "" => ChatDialogInput::Ready { value: None },
             c => ChatDialogInput::Ready { value: Some(c.to_owned()) },
         },
+        ChatDialogKind::NewGroup | ChatDialogKind::RenameGroup => crate::chat_groups::check_group_name(&dialog, &input),
         ChatDialogKind::LeaveChannel | ChatDialogKind::DeleteConversation | ChatDialogKind::ChannelAgents => ChatDialogInput::Ready { value: None },
     }
 }

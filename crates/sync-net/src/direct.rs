@@ -1,13 +1,13 @@
 //! Private messages (SPEC §7G.7 *Direct messages*): between two devices, end-to-end encrypted to the recipient
-//! ([`trs_sync_proto::direct`]), and only over a session between the two of them that no other device relays
-//! ([`trs_sync_proto::msg::FEATURE_DIRECT`]).
+//! ([`seedwell_sync_proto::direct`]), and only over a session between the two of them that no other device relays
+//! ([`seedwell_sync_proto::msg::FEATURE_DIRECT`]).
 //!
 //! **Conversations.** Each conversation is a container of its own: the other device as this one knows it (its key,
 //! names and last addresses, a `[[conversation]]` entry in `sync.toml`), its messages (`sync/dm-<device>.chat`,
 //! sealed with the conversation's own key, [`crate::at_rest`]) and its attachments (`sync/dm-<device>.blobs/`,
 //! `sync/dm-<device>.files/`, [`crate::room`]: fetched only from the other device, over a direct session). One starts when two devices that share a channel
 //! write to each other; after that it stands on its own: while both keep it, a session may run for it alone
-//! ([`trs_sync_proto::msg::DirectJoin`]), so leaving the channel does not end it. Deleting it deletes all of them (a
+//! ([`seedwell_sync_proto::msg::DirectJoin`]), so leaving the channel does not end it. Deleting it deletes all of them (a
 //! download it started stops, and its partial file goes).
 //!
 //! **Delivery.** A message is written only while a direct session with its recipient is open, and goes only there:
@@ -26,13 +26,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use trs_sync_proto::chat::{AuthorHave, MessageKind};
-use trs_sync_proto::codec::{Reader, put_bytes, put_varint};
-use trs_sync_proto::device::DeviceKey;
-use trs_sync_proto::direct::{DirectBody, DirectDraft, DirectKey, DirectMessage, public_of, secret_of};
-use trs_sync_proto::ids::DeviceId;
-use trs_sync_proto::members::hex;
-use trs_sync_proto::msg::{DirectHave, DirectJoin, DirectKeys, DirectMessages, FEATURE_DIRECT, Message};
+use seedwell_sync_proto::chat::{AuthorHave, MessageKind};
+use seedwell_sync_proto::codec::{Reader, put_bytes, put_varint};
+use seedwell_sync_proto::device::DeviceKey;
+use seedwell_sync_proto::direct::{DirectBody, DirectDraft, DirectKey, DirectMessage, public_of, secret_of};
+use seedwell_sync_proto::ids::DeviceId;
+use seedwell_sync_proto::members::hex;
+use seedwell_sync_proto::msg::{DirectHave, DirectJoin, DirectKeys, DirectMessages, FEATURE_DIRECT, Message};
 
 use crate::at_rest::{DIRECT_KEY, Sealer};
 use crate::blobs::Blobs;
@@ -96,9 +96,9 @@ struct Store {
 }
 
 /// The attachments a stored private message names.
-fn attachments_of(s: &Stored) -> Option<trs_sync_proto::attach::Attachments> {
+fn attachments_of(s: &Stored) -> Option<seedwell_sync_proto::attach::Attachments> {
     let b = s.body.as_ref().filter(|b| b.kind == MessageKind::Text && !b.extra.is_empty())?;
-    trs_sync_proto::attach::Attachments::from_extra(&b.extra, b.body.len())
+    seedwell_sync_proto::attach::Attachments::from_extra(&b.extra, b.body.len())
 }
 
 fn record(s: &Stored, seal: &Sealer) -> Vec<u8> {
@@ -291,12 +291,12 @@ pub(crate) struct DirectRoom {
 }
 
 impl Room for DirectRoom {
-    fn scope(&self) -> trs_sync_proto::msg::BlobScope {
-        trs_sync_proto::msg::BlobScope::Direct
+    fn scope(&self) -> seedwell_sync_proto::msg::BlobScope {
+        seedwell_sync_proto::msg::BlobScope::Direct
     }
 
     fn peers(&self, ctx: &Ctx) -> Vec<Arc<PeerHandle>> {
-        ctx.registry.peer(&self.device).filter(|p| direct_ok(p) && p.has(trs_sync_proto::msg::FEATURE_BLOBS)).into_iter().collect()
+        ctx.registry.peer(&self.device).filter(|p| direct_ok(p) && p.has(seedwell_sync_proto::msg::FEATURE_BLOBS)).into_iter().collect()
     }
 
     fn blobs(&self) -> &Blobs {
@@ -327,7 +327,7 @@ fn base_of(device: &DeviceId) -> String {
 fn read_of(text: &str) -> Option<Key> {
     let mut p = text.split(':');
     let (at, seq, mid) = (p.next()?, p.next()?, p.next()?);
-    Some((at.parse().ok()?, seq.parse().ok()?, trs_sync_proto::members::invite_id_from_hex(mid)?))
+    Some((at.parse().ok()?, seq.parse().ok()?, seedwell_sync_proto::members::invite_id_from_hex(mid)?))
 }
 
 fn read_text(k: &Key) -> String {
@@ -603,7 +603,7 @@ pub(crate) async fn start(ctx: &Arc<Ctx>, peer: &Arc<PeerHandle>) {
         let _ = peer.control.send(Message::DirectHave(DirectHave { authors })).await;
     }
     // Attachments that wait for this device.
-    if peer.has(trs_sync_proto::msg::FEATURE_BLOBS)
+    if peer.has(seedwell_sync_proto::msg::FEATURE_BLOBS)
         && let Some(room) = room_of(ctx, &peer.device_pk)
     {
         wake_room(ctx, room);
@@ -754,7 +754,7 @@ fn info(ctx: &Ctx, c: &Conversation, s: &Stored, names: &HashMap<DeviceId, Names
 fn not_direct(ctx: &Ctx, device: &DeviceId) -> SyncError {
     match ctx.registry.peer(device) {
         Some(p) if p.agreed.features & FEATURE_DIRECT == 0 => invalid("that device runs an older Seedwell: update it to write to it privately"),
-        _ => invalid(concat!("that device is not connected to this ", trs_platform::computer!(), " directly; private messages go only over a direct connection between the two, never through another device, so write once both are online and can reach each other")),
+        _ => invalid(concat!("that device is not connected to this ", seedwell_platform::computer!(), " directly; private messages go only over a direct connection between the two, never through another device, so write once both are online and can reach each other")),
     }
 }
 
@@ -797,7 +797,7 @@ impl SyncHandle {
         let all = lock(&d.conversations);
         let Some(c) = all.values().find(|c| DeviceId::of_public_key(&c.pk) == *device) else { return Ok(Vec::new()) };
         let end = match before {
-            Some(b) => Some(trs_sync_proto::members::invite_id_from_hex(b).and_then(|id| c.store.ids.get(&id).copied()).ok_or_else(|| invalid("no such message"))?),
+            Some(b) => Some(seedwell_sync_proto::members::invite_id_from_hex(b).and_then(|id| c.store.ids.get(&id).copied()).ok_or_else(|| invalid("no such message"))?),
             None => None,
         };
         let mut page: Vec<MessageInfo> =
@@ -824,7 +824,7 @@ impl SyncHandle {
         let known = peer.as_ref().is_some_and(|p| d.has(&p.device_pk) || in_a_channel(ctx, &p.device_pk))
             || lock(&d.conversations).values().any(|c| DeviceId::of_public_key(&c.pk) == *device);
         if !known {
-            return Err(invalid(concat!("this ", trs_platform::computer!(), " has no conversation with that device and shares no channel with it, so it cannot write to it privately")));
+            return Err(invalid(concat!("this ", seedwell_platform::computer!(), " has no conversation with that device and shares no channel with it, so it cannot write to it privately")));
         }
         let peer = peer.filter(|p| direct_ok(p)).ok_or_else(|| not_direct(ctx, device))?;
         if d.start_with(&peer)? {
@@ -857,7 +857,7 @@ impl SyncHandle {
         let known = peer.as_ref().is_some_and(|p| d.has(&p.device_pk) || in_a_channel(ctx, &p.device_pk))
             || lock(&d.conversations).values().any(|c| DeviceId::of_public_key(&c.pk) == *device);
         if !known {
-            return Err(invalid(concat!("this ", trs_platform::computer!(), " has no conversation with that device and shares no channel with it, so it cannot write to it privately")));
+            return Err(invalid(concat!("this ", seedwell_platform::computer!(), " has no conversation with that device and shares no channel with it, so it cannot write to it privately")));
         }
         let peer = peer.filter(|p| direct_ok(p)).ok_or_else(|| not_direct(ctx, device))?;
         let key = lock(&peer.direct_key).ok_or_else(|| invalid("the connection with that device is just starting; try again in a moment"))?;
@@ -869,7 +869,7 @@ impl SyncHandle {
         }
         let reply_to = match reply_to {
             Some(r) => {
-                let id = trs_sync_proto::members::invite_id_from_hex(r);
+                let id = seedwell_sync_proto::members::invite_id_from_hex(r);
                 let known = id.is_some_and(|id| lock(&d.conversations).get(&peer.device_pk).is_some_and(|c| c.store.ids.contains_key(&id)));
                 Some(id.filter(|_| known).ok_or_else(|| invalid("no such message to reply to"))?)
             }
@@ -880,7 +880,7 @@ impl SyncHandle {
         if !extra.is_empty() && kind != MessageKind::Text {
             return Err(invalid("attachments go with a text message"));
         }
-        if !extra.is_empty() && peer.agreed.features & trs_sync_proto::msg::FEATURE_BLOBS == 0 {
+        if !extra.is_empty() && peer.agreed.features & seedwell_sync_proto::msg::FEATURE_BLOBS == 0 {
             return Err(invalid("that device runs an older Seedwell: update it to send it files"));
         }
         let plain = DirectBody { reply_to, agent: agent.map(str::to_string), kind, body: body.as_bytes().to_vec(), extra };
@@ -1033,7 +1033,7 @@ impl SyncHandle {
 mod tests {
     use super::*;
     use crate::secrets::FileSecrets;
-    use trs_sync_proto::msg::{Agreed, FEATURE_CHAT};
+    use seedwell_sync_proto::msg::{Agreed, FEATURE_CHAT};
 
     fn draft(n: u8, text: &str) -> DirectDraft {
         DirectDraft {

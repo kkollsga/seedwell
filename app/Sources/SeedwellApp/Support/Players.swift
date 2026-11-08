@@ -1,7 +1,7 @@
 import AppKit
 
 // Play while downloading (SPEC §7F.3): starting a video player. Which players this Mac has, which one plays a file and
-// how each is handed a stream are the core's (`Core.play`, trs_platform::players); this runs the launch it decides.
+// how each is handed a stream are the core's (`Core.play`, seedwell_platform::players); this runs the launch it decides.
 
 enum PlayerLauncher {
     /// QA runs set this: no Play launches anything (except the one explicit `play-app` test).
