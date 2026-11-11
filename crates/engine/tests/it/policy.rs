@@ -319,3 +319,41 @@ async fn a_torrent_stopped_at_its_goal_shares_again_when_its_rule_seeds_forever(
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(n.state(&b.id).await, Some(TorrentState::Paused), "a raised goal leaves it stopped");
 }
+
+/// Failure: a torrent stopped at its goal stayed stopped when the rules it launched with seed forever. The app's
+/// rules.toml is migrated to the Default rule's "seed forever" before the engine starts, so no live edit follows and only
+/// the launch can resume it (0.1.22 resumed only on a live edit: the user's five torrents stayed paused). One whose goal
+/// was only raised stays stopped across the launch too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_torrent_stopped_at_its_goal_shares_again_when_it_launches_with_a_rule_that_seeds_forever() {
+    let (a, b) = (standard_named("launch-a", 0, None, false, 353), standard_named("launch-b", 0, None, false, 354));
+    let mk = |id: &str, goal: SeedingGoal| {
+        let mut r = rule(id);
+        r.goal = Some(goal);
+        r
+    };
+    let mut n = node(|_| {}).await;
+    n.h.apply_policy(policy(vec![mk("fa", SeedingGoal::StopWhenFinished), mk("rb", SeedingGoal::StopWhenFinished)], vec![]));
+    for t in [&a, &b] {
+        t.write_to(n.dir.path());
+    }
+    n.h.add_torrent_file(a.bytes.clone(), AddOptions { rule: Some("fa".into()), ..Default::default() }).await.unwrap();
+    n.h.add_torrent_file(b.bytes.clone(), AddOptions { rule: Some("rb".into()), ..Default::default() }).await.unwrap();
+    wait_for("both stopped at their goal", 30, || async {
+        (n.state(&a.id).await? == TorrentState::Paused && n.state(&b.id).await? == TorrentState::Paused).then_some(())
+    })
+    .await;
+    n.shutdown(Duration::from_secs(3)).await;
+    let (dir, store) = (n.dir, n.store.clone());
+    drop(n.h);
+
+    let later = policy(vec![mk("fa", SeedingGoal::Forever), mk("rb", SeedingGoal::Ratio { ratio: 5.0 })], vec![]);
+    let engine = Engine::start_with_policy(test_config(dir.path()), std::sync::Arc::new(store.clone()), later).await.unwrap();
+    let m = Node { h: engine.handle(), engine: Some(engine), store, dir };
+    wait_for("the one that seeds forever shares after the launch", 30, || async {
+        matches!(m.state(&a.id).await?, TorrentState::LowPower | TorrentState::Seeding).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(m.state(&b.id).await, Some(TorrentState::Paused), "a raised goal leaves it stopped");
+}

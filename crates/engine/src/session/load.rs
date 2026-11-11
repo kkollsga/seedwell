@@ -165,6 +165,14 @@ impl Session {
             }
             if let Some(p) = &pol {
                 self.apply_policy_to(r.id, p);
+                // Its goal is gone from the rules it starts with (rules.toml migrated to the Default rule's "seed
+                // forever" before this launch): it shares again, as it would after a live edit of the rules.
+                if let Some(e) = self.table.get_mut(&r.id)
+                    && super::policy_apply::stopped_at_a_goal_gone(&e.cold)
+                {
+                    e.cold.want = Want::Active;
+                    self.mark_record(r.id);
+                }
             }
         }
         // Torrents with an interrupted move stay stopped until its journal is resolved.

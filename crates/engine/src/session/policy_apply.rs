@@ -98,11 +98,9 @@ impl Session {
                 self.mark_record(id);
             }
         }
-        // A torrent stopped at its goal whose rule now seeds forever (the default became "seed forever", the user's
-        // decision of 2026-11-11) shares again, through the start queue. A goal that was only raised leaves it stopped,
-        // as a changed private floor does (SPEC 7.2): resuming it is the user's.
-        let unmet: Vec<TorrentId> =
-            self.table.iter().filter(|(_, e)| e.cold.want == Want::GoalReached && !e.cold.seed_goal.is_set()).map(|(id, _)| *id).collect();
+        // A torrent stopped at its goal whose rule now seeds forever shares again, through the start queue
+        // (`stopped_at_a_goal_gone`; at launch, `load` does the same).
+        let unmet: Vec<TorrentId> = self.table.iter().filter(|(_, e)| stopped_at_a_goal_gone(&e.cold)).map(|(id, _)| *id).collect();
         for id in unmet {
             self.set_want_inner(id, Want::Active, false, true);
         }
@@ -224,6 +222,13 @@ impl Session {
                 organize::release(&self.sh.reserved, &p);
             }
     }
+}
+
+/// Stopped at its seeding goal while its rule now has none: it seeds forever, so it shares again (the default became
+/// "seed forever", the user's decision of 2026-11-11). A goal that was only raised leaves it stopped, as a changed
+/// private floor does (SPEC 7.2): resuming that one is the user's.
+pub(crate) fn stopped_at_a_goal_gone(c: &ColdTorrent) -> bool {
+    c.want == Want::GoalReached && !c.seed_goal.is_set()
 }
 
 /// The profiles match the same torrents: same ids in the same order with the same addresses.

@@ -270,8 +270,9 @@ finished_dir = "~/Software"
 idle seed cheap, and a goal is the user's to set. Until then it stopped at ratio 1.0 or 7 days, which stopped private torrents at
 ratio 0.0–0.1 after their 10-day floor while peers kept asking for them. A `rules.toml` of version 1 that still holds that old default
 written out (ratio 1.0 or 7 days, stop) is read as "seed forever" and rewritten once as version 2; any other goal or action there was
-chosen and stays. A torrent stopped at its goal whose rule now seeds forever shares again, through the start queue; one whose goal was
-only raised stays stopped (resuming it is the user's, as with a changed private floor).
+chosen and stays. A torrent stopped at its goal whose rule now seeds forever shares again, through the start queue, whether the rules
+changed while running or it launches with them (the migration happens before the launch); one whose goal was only
+raised stays stopped (resuming it is the user's, as with a changed private floor).
 
 ### 7.5 Inactive seeds (`stop_when_idle`)
 A second, independent stop condition next to `stop_when`: **stop seeding a finished torrent that uploaded less than `below` during the last `hours` hours of seeding** (typical: 1 GB in 150 h). It makes cleaning up dead seeds automatic while busy ones keep going. Either condition may stop a torrent; off by default.
