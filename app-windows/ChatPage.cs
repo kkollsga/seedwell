@@ -948,7 +948,7 @@ sealed class ChatPage
 
     void Press(ChatPageButton b)
     {
-        if (b.Question is SyncQuestion q) Ask(q, b.Command); else Run(b.Command);
+        if (b.Question is SyncQuestion q) Ask(q, b.Command); else _ = Run(b.Command);
     }
 
     /// <summary>An item: its dialog first (the sidebar's chat dialogs, which run what its action does), else its command.</summary>
@@ -959,7 +959,7 @@ sealed class ChatPage
             app.ChatDialogs.Show(d, Channel, DeviceId);
             return;
         }
-        Run(it.Command);
+        _ = Run(it.Command);
     }
 
     async void Ask(SyncQuestion q, ChatPageCommand command)
@@ -979,58 +979,58 @@ sealed class ChatPage
             DefaultButton = ContentDialogButton.Primary,
         };
         if (q.Destructive) RowCommands.Destructive(d);
-        try { if (await d.ShowAsync() == ContentDialogResult.Primary) Run(command); }
+        try { if (await d.ShowAsync() == ContentDialogResult.Primary) await Run(command); }
         catch (Exception e) { AppLog.Write($"chat question failed: {e.Message}"); }
     }
 
     /// <summary>What the host does for each command (the core's table); failures are alerts with the core's sentence.</summary>
-    internal void Run(ChatPageCommand command)
+    /// <remarks>It comes to the work it starts (QA awaits that, never a fixed time).</remarks>
+    internal Task Run(ChatPageCommand command)
     {
         AppLog.Write($"chat page: {command.GetType().Name}");
         var channel = Channel;
+        var call = Task.CompletedTask;
         switch (command)
         {
             case ChatPageCommand.ShowMembers:
-                LoadMembers(open: true);
+                call = LoadMembers(open: true);
                 break;
             case ChatPageCommand.Share:
                 if (channel is not null) ShareDialog.Show(app, channel.Id);
                 break;
             case ChatPageCommand.SetMuted mute when channel is not null:
-                Call(() => app.Core.ChatSetMuted(channel.Id, mute.Muted), e => new SyncAlert(e, ""));
-                return;
+                return Call(() => app.Core.ChatSetMuted(channel.Id, mute.Muted), e => new SyncAlert(e, ""));
             case ChatPageCommand.SetAgents agents when channel is not null:
-                Call(() => app.Core.ChatSetAgents(channel.Id, agents.Open), e => new SyncAlert(SeedwellFfiMethods.ChatAgentsMenu(channel).FailureTitle, e));
+                call = Call(() => app.Core.ChatSetAgents(channel.Id, agents.Open), e => new SyncAlert(SeedwellFfiMethods.ChatAgentsMenu(channel).FailureTitle, e));
                 break;
             case ChatPageCommand.SetFollow follow when channel is not null:
-                Call(() => app.Core.SyncSetFollow(channel.Id, follow.On), e => new SyncAlert(e, ""));
+                call = Call(() => app.Core.SyncSetFollow(channel.Id, follow.On), e => new SyncAlert(e, ""));
                 break;
             case ChatPageCommand.SetDirectAgents access:
-                Call(() => Task.Run(() => app.Core.ChatSetDirectAgents(access.Access)), e => new SyncAlert(e, ""));
+                call = Call(() => Task.Run(() => app.Core.ChatSetDirectAgents(access.Access)), e => new SyncAlert(e, ""));
                 break;
             case ChatPageCommand.SetRole sr when channel is not null:
                 var who = members.FirstOrDefault(m => m.DeviceId == sr.DeviceId)?.Name ?? "";
-                Call(() => app.Core.SyncSetRole(channel.Id, sr.DeviceId, sr.Role), e => SeedwellFfiMethods.SyncSetRoleFailed(who, e), () => LoadMembers(false));
+                call = Call(() => app.Core.SyncSetRole(channel.Id, sr.DeviceId, sr.Role), e => SeedwellFfiMethods.SyncSetRoleFailed(who, e), () => LoadMembers(false));
                 break;
             case ChatPageCommand.RemoveDevice rd when channel is not null:
                 var name = members.FirstOrDefault(m => m.DeviceId == rd.DeviceId)?.Name ?? "";
-                Call(() => app.Core.SyncRemoveDevice(channel.Id, rd.DeviceId), e => SeedwellFfiMethods.SyncRemoveDeviceFailed(name, channel.Name, e), () => LoadMembers(false));
+                call = Call(() => app.Core.SyncRemoveDevice(channel.Id, rd.DeviceId), e => SeedwellFfiMethods.SyncRemoveDeviceFailed(name, channel.Name, e), () => LoadMembers(false));
                 break;
             case ChatPageCommand.MessagePrivately mp:
                 membersFlyout.Hide();
                 app.Library.NoteDirectName(mp.DeviceId, mp.Name);
                 app.ShowPlace(new LibraryPlace.Direct(mp.DeviceId));
-                return;
+                return Task.CompletedTask;
             case ChatPageCommand.Reply r:
                 replyTo = r.MessageId;
                 FocusAfter(Redrawn());
-                return;
+                return Task.CompletedTask;
             case ChatPageCommand.SetTags tags:
-                _ = SendText(SeedwellFfiMethods.ChatTagNote(tags.MessageId, tags.Tags), null);
-                return;
+                return SendText(SeedwellFfiMethods.ChatTagNote(tags.MessageId, tags.Tags), null);
             case ChatPageCommand.MoveToGroup to when channel is not null:
                 // Into a sidebar group (null: out of its group); the sidebar is read again after it.
-                Call(() => app.Core.ChatSetGroup(channel.Id, to.GroupId), e => new SyncAlert(SeedwellFfiMethods.ChatGroupFailureTitle(true), e), () => app.LibraryWindowIfCreated?.Pane.Refresh());
+                call = Call(() => app.Core.ChatSetGroup(channel.Id, to.GroupId), e => new SyncAlert(SeedwellFfiMethods.ChatGroupFailureTitle(true), e), () => { app.LibraryWindowIfCreated?.Pane.Refresh(); return Task.CompletedTask; });
                 break;
             default:
                 // WakeCommand, NewTopic, Rename, Leave, DeleteConversation and NewGroup come with their dialog (RunItem).
@@ -1038,6 +1038,7 @@ sealed class ChatPage
                 break;
         }
         Redraw();
+        return call;
     }
 
     /// <summary>The field gets the focus once the page is drawn (a redraw takes the field out and puts it back).</summary>
@@ -1047,37 +1048,36 @@ sealed class ChatPage
         draft.Focus(FocusState.Programmatic);
     }
 
-    void Call(Func<Task> work, Func<string, SyncAlert> failed, Action? done = null)
+    /// <summary>A core call off the UI thread; back on it, a failure's alert, then <paramref name="done"/> and the page drawn again: done when all that is.</summary>
+    async Task Call(Func<Task> work, Func<string, SyncAlert> failed, Func<Task>? done = null)
     {
-        _ = Task.Run(work).ContinueWith(t => app.Dispatch(() =>
+        try
         {
-            if (!t.IsCompletedSuccessfully)
-            {
-                var e = t.Exception?.InnerException is CoreException ce ? SeedwellFfiMethods.CoreErrorMessage(ce) : t.Exception?.InnerException?.Message ?? "";
-                app.Alert(failed(e));
-            }
-            done?.Invoke();
-            Redraw();
-        }));
+            await Task.Run(work);
+        }
+        catch (Exception e)
+        {
+            app.Alert(failed(CoreCalls.Message(e)));
+        }
+        if (done is not null) await done();
+        await Redrawn();
     }
 
-    /// <summary>Reads the channel's members off the UI thread, then draws the panel (opening it when asked).</summary>
-    void LoadMembers(bool open)
+    /// <summary>Reads the channel's members off the UI thread, then draws the panel (opening it when asked): done when it is drawn.</summary>
+    async Task LoadMembers(bool open)
     {
         if (Channel is not SyncChannel channel) return;
-        _ = Task.Run(() => app.Core.SyncMembers(channel.Id)).ContinueWith(t => app.Dispatch(async () =>
+        try { members = await Task.Run(() => app.Core.SyncMembers(channel.Id)); }
+        catch (Exception e) { AppLog.Write($"chat members failed: {CoreCalls.Message(e)}"); }
+        await Redrawn();
+        if (model?.Members is ChatMembersPanel panel)
         {
-            if (t.IsCompletedSuccessfully) members = t.Result;
-            await Redrawn();
-            if (model?.Members is ChatMembersPanel panel)
+            membersFlyout.Content = Members(panel);
+            if (open && toolbar.Children.OfType<Button>().FirstOrDefault(b => FlyoutBase.GetAttachedFlyout(b) == membersFlyout) is Button anchor)
             {
-                membersFlyout.Content = Members(panel);
-                if (open && toolbar.Children.OfType<Button>().FirstOrDefault(b => FlyoutBase.GetAttachedFlyout(b) == membersFlyout) is Button anchor)
-                {
-                    membersFlyout.ShowAt(anchor);
-                }
+                membersFlyout.ShowAt(anchor);
             }
-        }));
+        }
     }
 
     void OpenLink(ChatLink link)
@@ -1138,7 +1138,7 @@ sealed class ChatPage
             foreach (var item in items)
             {
                 // A reference only for one image: several would land in an order the checks finish in.
-                if (item is Windows.Storage.StorageFile f) Attach(new ChatImageInput(f.Name, f.Path, null), items.Count == 1 ? caret : null);
+                if (item is Windows.Storage.StorageFile f) _ = Attach(new ChatImageInput(f.Name, f.Path, null), items.Count == 1 ? caret : null);
             }
         }
         else if (clip.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.Bitmap))
@@ -1150,7 +1150,7 @@ sealed class ChatPage
             using var reader = new Windows.Storage.Streams.DataReader(stream);
             await reader.LoadAsync((uint)stream.Size);
             reader.ReadBytes(bytes);
-            Attach(new ChatImageInput(attachments.Texts.PastedName, null, bytes), caret);
+            _ = Attach(new ChatImageInput(attachments.Texts.PastedName, null, bytes), caret);
         }
     }
 
@@ -1158,7 +1158,7 @@ sealed class ChatPage
     {
         foreach (var path in await app.PickFiles(attachments.Texts.Extensions))
         {
-            Attach(new ChatImageInput(Path.GetFileName(path), path, null));
+            _ = Attach(new ChatImageInput(Path.GetFileName(path), path, null));
         }
     }
 
@@ -1166,34 +1166,32 @@ sealed class ChatPage
     /// An image or file for the next message: the core checks it and makes its chip; a refusal is an alert. With
     /// <paramref name="marker"/> (a paste into text), an image's reference goes into the text there.
     /// </summary>
-    internal void Attach(ChatImageInput input, int? marker = null)
+    /// <remarks>Done once the chip is drawn (or the refusal told).</remarks>
+    internal async Task Attach(ChatImageInput input, int? marker = null)
     {
         if (attached.Count >= attachments.Texts.MaxImages)
         {
             app.Alert(new SyncAlert(attachments.Texts.TooMany, ""));
             return;
         }
-        _ = Task.Run(() => app.Core.ChatImageCheck(input)).ContinueWith(t => app.Dispatch(() =>
+        try
         {
-            if (t.IsCompletedSuccessfully)
+            var d = await Task.Run(() => app.Core.ChatImageCheck(input));
+            attached.Add((input, d));
+            AppLog.Write($"chat attach: {d.Caption}");
+            if (marker is int at && !d.File)
             {
-                attached.Add((input, t.Result));
-                AppLog.Write($"chat attach: {t.Result.Caption}");
-                if (marker is int at && !t.Result.File)
-                {
-                    var reference = SeedwellFfiMethods.ChatImageMarker((uint)(attached.Count(a => !a.Draft.File) - 1));
-                    var where = Math.Min(at, draft.Text.Length);
-                    draft.Text = draft.Text.Insert(where, reference);
-                    draft.SelectionStart = where + reference.Length;
-                }
+                var reference = SeedwellFfiMethods.ChatImageMarker((uint)(attached.Count(a => !a.Draft.File) - 1));
+                var where = Math.Min(at, draft.Text.Length);
+                draft.Text = draft.Text.Insert(where, reference);
+                draft.SelectionStart = where + reference.Length;
             }
-            else
-            {
-                var e = t.Exception?.InnerException is CoreException ce ? SeedwellFfiMethods.CoreErrorMessage(ce) : t.Exception?.InnerException?.Message ?? "";
-                app.Alert(new SyncAlert(e, ""));
-            }
-            Redraw();
-        }));
+        }
+        catch (Exception e)
+        {
+            app.Alert(new SyncAlert(CoreCalls.Message(e), ""));
+        }
+        await Redrawn();
     }
 
     /// <summary>
@@ -1288,7 +1286,8 @@ sealed class ChatPage
             attached.Clear();
             replyTo = null;
         }
-        Redraw();
+        // Done once the page is drawn again (QA reads it right after).
+        await Redrawn();
         return ok;
     }
 
@@ -1370,9 +1369,9 @@ sealed class ChatPage
     internal MenuFlyout RenderMenu() => Menu(model?.Toolbar.Menu.Entries ?? []);
     internal void QaReply(int n)
     {
-        if (model?.Messages.ElementAtOrDefault(n)?.Reply is ChatPageButton b) Run(b.Command);
+        if (model?.Messages.ElementAtOrDefault(n)?.Reply is ChatPageButton b) _ = Run(b.Command);
     }
-    internal void QaMembers() => Run(new ChatPageCommand.ShowMembers());
+    internal Task QaMembers() => Run(new ChatPageCommand.ShowMembers());
 
     /// <summary>QA: the member rows of the panel: who, the removal line, the role and its menu.</summary>
     internal string QaMemberRows() => string.Join(" || ", (model?.Members?.Rows ?? []).Select(r =>
@@ -1381,12 +1380,12 @@ sealed class ChatPage
             : "plain")));
 
     /// <summary>QA: a member's menu item by its device id and title, as its click (a disabled one does not run).</summary>
-    internal string QaMemberPress(string deviceId, string title)
+    internal async Task<string> QaMemberPress(string deviceId, string title)
     {
         var row = model?.Members?.Rows.FirstOrDefault(r => r.DeviceId == deviceId);
         if (row?.RoleMenu?.Entries.OfType<ChatPageMenuEntry.Item>().FirstOrDefault(i => i.Title.StartsWith(title)) is not ChatPageMenuEntry.Item it) return "no such item";
         if (!it.Enabled) return "disabled";
-        Run(it.Command);
+        await Run(it.Command);
         return $"ran {it.Command.GetType().Name}";
     }
 

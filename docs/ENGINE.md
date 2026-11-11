@@ -32,8 +32,8 @@ Session (actor)
 ## 3. Power tiers in memory (targets)
 | Tier | Resident | Target size |
 |---|---|---|
-| Cold | info-hash, name (`Box<str>`), save-root id (interned), sizes, counters, flags, tracker-profile id, rule id, private flag | **≤ 256 B** + name |
-| Warm | + `Layout` from seedwell-storage (rebuilt from the stored `.torrent`), small peer set (≤ 8) | ≤ 4 KiB + 32 B/file |
+| Cold | info-hash, name (`Box<str>`), save-root id (interned), sizes, counters, flags, tracker-profile id, rule id, private flag, known seeds (`Option<Box<[[u8; 6]]>>`, ≤ 64, only once one is known) | **≤ 256 B** + name (+ ≤ 384 B of known seeds) |
+| Warm | + `Layout` from seedwell-storage (rebuilt from the stored `.torrent`), small peer set (≤ 8; a seed whose tracker names leechers goes Hot for its dials, SPEC §6) | ≤ 4 KiB + 32 B/file |
 | Hot | + piece hashes, bitfield, availability (`u16`/piece), picker state, full peer set | proportional to pieces/peers |
 
 Tracker state for every torrent lives in seedwell-tracker's machines. It must stay compact (≤ 128 B per (torrent, tracker)) so 200 Cold torrents announcing cost about 50 KiB in total.

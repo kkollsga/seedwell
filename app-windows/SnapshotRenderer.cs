@@ -240,10 +240,10 @@ sealed class SnapshotRenderer(App app, FlyoutWindow flyout, string dir, string t
             if (pane.SyncPage is FolderSyncPage page)
             {
                 page.Choose(folder.Id);
-                page.Run(new SyncPageCommand.AskRemove(), folder.Id);
+                _ = page.Run(new SyncPageCommand.AskRemove(), folder.Id);
                 await Settle();
                 await Save(window.Content, "foldersync-remove");
-                page.Run(new SyncPageCommand.CancelRemove(), folder.Id);
+                _ = page.Run(new SyncPageCommand.CancelRemove(), folder.Id);
             }
             AddFolderDialog.Show(app, null);
             await PopupOpened(window.Content.XamlRoot);

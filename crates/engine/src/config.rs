@@ -276,7 +276,7 @@ pub struct EngineConfig {
     pub utp_probe_timeout: Duration,
     /// Talk to trackers at all (tests of pure peer-to-peer behaviour turn it off).
     pub trackers_enabled: bool,
-    /// Peers requested per announce.
+    /// Peers requested per announce (200, as libtorrent; 0 on `stopped`).
     pub numwant: u32,
     /// Power-tier timings.
     pub tiers: TierTimings,
@@ -418,7 +418,7 @@ impl Default for EngineConfig {
             outgoing_tcp: true,
             utp_probe_timeout: Duration::from_secs(5),
             trackers_enabled: true,
-            numwant: 50,
+            numwant: seedwell_tracker::DEFAULT_NUMWANT,
             tiers: TierTimings::default(),
             io_threads: 4,
             hash_threads: 0,

@@ -176,8 +176,8 @@ fn download_pause_resume_info_stats_and_two_step_remove() {
     assert!(r["seeded_secs"].is_number());
     leech.json(&["goal", &t1.id, "--rule-default"]);
     let r = wait_until(10, "goal back to the rule's", || row(&leech, &t1.id).filter(|r| r["seed_goal_user"] == false));
-    // (the Default rule: ratio 1.0 or 7 days)
-    assert_eq!((r["seed_goal"]["ratio"].as_f64(), r["seed_goal"]["text"].as_str()), (Some(1.0), Some("Ratio 1.0 or 7 days")), "{r}");
+    // (the Default rule: seed forever)
+    assert_eq!((r["seed_goal"]["ratio"].as_f64(), r["seed_goal"]["text"].as_str()), (None, Some("Seed forever")), "{r}");
     let bad = cli_text(&leech.socket, &["goal", &t1.id, "--rule-default", "--ratio", "3"]);
     assert_ne!(bad.code, 0, "{}", bad.stdout);
     // Skip a file right after adding: a low limit keeps the download slow enough to get there first.
@@ -222,6 +222,9 @@ fn download_pause_resume_info_stats_and_two_step_remove() {
         (s["all_time"]["downloaded"].as_u64().unwrap_or(0) >= 1_100_000).then_some(s)
     });
     assert!(stats["series"].as_array().unwrap().len() >= 30);
+    // The seeder keeps sharing (the Default rule seeds forever), and a live torrent's upload reaches the statistics on
+    // the engine's minute tick; a stopped one's at once. Alpha is done with on the seeder: pausing it writes them now.
+    seeder.json(&["pause", &t1.id]);
     let up = wait_until(20, "seeder statistics", || {
         let s = seeder.json(&["stats", "--days", "7"]);
         (s["all_time"]["uploaded"].as_u64().unwrap_or(0) > 1_000_000).then_some(s)

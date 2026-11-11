@@ -69,6 +69,10 @@ pub(crate) struct ColdTorrent {
     pub seed_goal: SeedGoal,
     /// Upload history of the inactive stop condition; only while the condition is on for this torrent.
     pub idle: Option<Box<crate::idle::IdleRing>>,
+    /// Addresses the torrent learned are seeds (IPv4, 6 bytes each, at most `torrent::MAX_COLD_SEEDS`), kept
+    /// across a demotion so that a wake does not dial them again while it only uploads (SPEC §5.1). Taken by
+    /// the actor while it runs and handed back when it stops; not persisted.
+    pub known_seeds: Option<Box<[[u8; 6]]>>,
     pub file_prios: Option<Box<[u8]>>,
     pub error: Option<Box<str>>,
     /// Only for magnet links whose metadata has not arrived.
@@ -126,6 +130,30 @@ pub(crate) const NONE_CAT: u8 = u8::MAX;
 impl ColdTorrent {
     pub(crate) fn has(&self, f: u8) -> bool {
         self.flags & f != 0
+    }
+
+    /// Hand the known seeds to an actor that starts (the record keeps none while it runs).
+    pub(crate) fn take_known_seeds(&mut self) -> Vec<std::net::SocketAddr> {
+        self.known_seeds
+            .take()
+            .map(|v| v.iter().map(|b| std::net::SocketAddr::from(([b[0], b[1], b[2], b[3]], u16::from_be_bytes([b[4], b[5]])))).collect())
+            .unwrap_or_default()
+    }
+
+    /// Keep the seeds a stopping actor knew (IPv4 only, at most `torrent::MAX_COLD_SEEDS`; none: nothing kept).
+    pub(crate) fn keep_known_seeds(&mut self, seeds: &[std::net::SocketAddr]) {
+        let v: Vec<[u8; 6]> = seeds
+            .iter()
+            .filter_map(|a| match crate::net::canonical(*a) {
+                std::net::SocketAddr::V4(v4) => {
+                    let (ip, port) = (v4.ip().octets(), v4.port().to_be_bytes());
+                    Some([ip[0], ip[1], ip[2], ip[3], port[0], port[1]])
+                }
+                std::net::SocketAddr::V6(_) => None,
+            })
+            .take(crate::torrent::MAX_COLD_SEEDS)
+            .collect();
+        self.known_seeds = (!v.is_empty()).then(|| v.into_boxed_slice());
     }
 
     pub(crate) fn set(&mut self, f: u8, on: bool) {
@@ -380,6 +408,7 @@ mod tests {
             session_base: 0,
             seed_goal: SeedGoal::FOREVER,
             idle: None,
+            known_seeds: None,
             file_prios: None,
             error: None,
             magnet: None,
@@ -414,6 +443,21 @@ mod tests {
         c.want = Want::Paused;
         assert!(!c.wants_slot());
         assert_eq!(c.state(None), TorrentState::Paused);
+
+        // Known seeds: what the actor hands back comes back to the next actor; the record stays small (at
+        // most `MAX_COLD_SEEDS`, IPv4 only, and nothing allocated for none).
+        let mut seeds: Vec<std::net::SocketAddr> = (0..100u16).map(|i| std::net::SocketAddr::from(([10, 0, 0, 1], 1000 + i))).collect();
+        seeds.insert(0, "[2001:db8::1]:6881".parse().unwrap());
+        seeds.insert(1, "[::ffff:10.0.0.2]:7000".parse().unwrap());
+        c.keep_known_seeds(&seeds);
+        assert_eq!(c.known_seeds.as_ref().map(|v| v.len()), Some(crate::torrent::MAX_COLD_SEEDS));
+        let back = c.take_known_seeds();
+        assert_eq!(back.len(), crate::torrent::MAX_COLD_SEEDS);
+        assert_eq!(back[0], "10.0.0.2:7000".parse().unwrap(), "a mapped address in its IPv4 form");
+        assert_eq!(back[1], seeds[2]);
+        assert!(c.known_seeds.is_none(), "taken by the actor");
+        c.keep_known_seeds(&[]);
+        assert!(c.known_seeds.is_none());
     }
 
     #[test]

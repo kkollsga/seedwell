@@ -196,8 +196,8 @@ fn status_line(t: &Totals) -> String {
 async fn run(a: Args) -> Result<(), String> {
     std::fs::create_dir_all(&a.download_dir).map_err(|e| format!("download dir: {e}"))?;
     std::fs::create_dir_all(&a.state_dir).map_err(|e| format!("state dir: {e}"))?;
-    // The benchmark contract is "seed until SIGTERM". The shipped default rule (ratio 1.0 or 7 days,
-    // then stop) would stop a torrent the moment the first leecher has taken it once, and a stopped
+    // The benchmark contract is "seed until SIGTERM". The shipped default rule seeds forever now; the
+    // old one (ratio 1.0 or 7 days, then stop), or a user's goal, would stop a torrent the moment the first leecher has taken it once, and a stopped
     // torrent refuses every later handshake: the root cause of the "second leecher never connects"
     // failure of the first hot campaign. Only written when there is no rules.toml yet.
     let rules = a.state_dir.join("rules.toml");

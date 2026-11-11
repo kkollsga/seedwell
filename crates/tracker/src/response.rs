@@ -17,8 +17,11 @@ pub const MIN_INTERVAL_FLOOR: Duration = Duration::from_secs(5 * 60);
 pub const MIN_INTERVAL_MIN: Duration = Duration::from_secs(60);
 /// Largest interval/min interval we accept.
 pub const MAX_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
-/// Peers kept from one response (compact + dict + v6 combined).
-pub const MAX_PEERS: usize = 200;
+/// Peers asked for on every announce but `stopped` (libtorrent's and so qBittorrent's `num_want`; Transmission asks
+/// 80). One response then holds as many peers as [`MAX_PEERS`] keeps.
+pub const DEFAULT_NUMWANT: u32 = 200;
+/// Peers kept from one response (compact + dict + v6 combined): what [`DEFAULT_NUMWANT`] asks for.
+pub const MAX_PEERS: usize = DEFAULT_NUMWANT as usize;
 /// Largest response body we parse.
 pub const MAX_BODY: usize = 1 << 20;
 /// Longest tracker-supplied text (failure reason, warning) kept for the UI.

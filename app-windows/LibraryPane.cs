@@ -755,8 +755,10 @@ sealed class LibraryPane
 
     UIElement AddLine(SidebarAdd add, int indent, Action run)
     {
-        // A + where the icons are, so it lines up with them (the Mac's).
-        var line = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Opacity = 0.7, Padding = new Thickness(10 + indent * 18 + (indent == 0 ? 20 : 0), 6, 10, 6) };
+        // Under a channel (New Topic…), a + where its topics' icons are. At the top (New Channel…), the section's own line:
+        // its + in the column of the disclosure chevrons, as on the Mac; lined up with the icons it read as nested under a
+        // group (the user's report, 2026-11-08).
+        var line = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Opacity = 0.7, Padding = new Thickness(indent == 0 ? 2 : 10 + indent * 18, 6, 10, 6) };
         line.Children.Add(new FontIcon { Glyph = "", FontSize = 14 });
         line.Children.Add(new TextBlock { Text = add.Title });
         ToolTipService.SetToolTip(line, add.Help);

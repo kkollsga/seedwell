@@ -2191,6 +2191,10 @@ async fn debug_peers<B: Backend>(ctx: &Arc<Ctx<B>>, p: DebugPeersParams) -> Resu
             snubbed: x.snubbed,
             upload_only: x.upload_only,
             has_pex: x.has_pex,
+            requests_received: x.requests_received,
+            blocks_served: x.blocks_served,
+            requests_rejected: x.requests_rejected,
+            last_request_secs: x.last_request_secs,
         })
         .collect();
     let c = |k: &str| probe.counters.get(k).copied().unwrap_or(0);

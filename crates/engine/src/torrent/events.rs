@@ -16,12 +16,17 @@ use crate::picker::{PickCtx, Received};
 
 /// Most peers we ever ban per torrent.
 const MAX_BANNED: usize = 1024;
-/// Outgoing attempts a seeding torrent may make in a burst (and keeps in reserve).
-const SEED_DIAL_BURST: u8 = 4;
-/// A seeding torrent earns one more outgoing attempt this often.
-const SEED_DIAL_EVERY: Duration = Duration::from_secs(30);
-/// Outgoing attempts of a seeding torrent that may be connecting at the same time.
-const SEED_MAX_CONNECTING: usize = 2;
+/// Outgoing attempts a seeding torrent keeps in hand between boosts (its first ones, and what the steady
+/// pace saves up while it has nothing to dial).
+pub(super) const SEED_DIAL_RESERVE: u8 = 4;
+/// Dials a seeding torrent may make at once for the new addresses of a tracker response, a DHT lookup or
+/// a wake (libtorrent's `torrent_connect_boost` is 30).
+const SEED_CONNECT_BOOST: u8 = 24;
+/// After the boost, a seeding torrent earns one more outgoing attempt this often.
+const SEED_DIAL_EVERY: Duration = Duration::from_secs(2);
+/// Outgoing attempts of a seeding torrent that may be connecting at the same time (each is bounded by
+/// `connect_timeout` and `handshake_timeout`, 10 s each).
+const SEED_MAX_CONNECTING: usize = 8;
 /// Allowed-fast pieces kept per peer.
 const MAX_ALLOWED_IN: usize = 32;
 
@@ -928,6 +933,7 @@ impl Torrent {
 
     /// Dial candidates while there is room under the caps.
     pub(super) fn connect_more(&mut self, now: Instant) {
+        self.dials_pending = false;
         if self.shutting_down || self.checking || self.meta.is_none() && self.meta_fetch.is_none() {
             return;
         }
@@ -942,16 +948,19 @@ impl Torrent {
         }
         // A change not told on its edge is told here (this runs on every tick), before a dial says it.
         self.advertise_upload_only();
-        // A complete torrent only needs a few peers; leechers find us through the tracker. Every
-        // address a tracker or the DHT hands a seeder is mostly another seed, a NAT'd leecher or a
-        // dead host, and dialling them all keeps a connection slot and a task busy for nothing
-        // (three seeding torrents held "32 connections" for ten minutes, none of them connected).
-        // So a seeder dials from a small allowance: a burst of `SEED_DIAL_BURST`, then one attempt
-        // per `SEED_DIAL_EVERY`, and never more than `SEED_MAX_CONNECTING` in flight.
+        // A complete torrent dials the leechers a tracker (or the DHT) names, promptly, as libtorrent
+        // does (`torrent_connect_boost`): the new addresses of a response get a boost of up to
+        // `SEED_CONNECT_BOOST` dials, then the rest follow at one per `SEED_DIAL_EVERY` (keeping up to
+        // `SEED_DIAL_RESERVE` in hand), never more than `SEED_MAX_CONNECTING` connecting at once. Many of
+        // those addresses are seeds, NAT'd leechers or dead hosts, so the dials are bounded over the whole
+        // client too: they take at most half the half-open slots (downloads keep the rest) and
+        // `budget::SEED_DIALS_PER_SEC` (200 seeding torrents answered by their trackers at once never dial
+        // a storm), and a dial that has not connected counts as connecting, never as a connection.
         let upload_only = self.upload_only_now();
         if !upload_only {
             self.pool.release_seeds();
         }
+        let fresh = std::mem::take(&mut self.fresh_peers);
         // Nobody is downloading (the tracker said so): a seeding torrent waits for them to come.
         if upload_only && self.no_leechers {
             return;
@@ -959,33 +968,82 @@ impl Torrent {
         let seeding = self.complete();
         let mut allowance = 8;
         if seeding {
-            let earned = now.saturating_duration_since(self.seed_dial_at).as_secs() / SEED_DIAL_EVERY.as_secs();
+            if fresh > 0 {
+                self.boost_seed_dials(fresh);
+            }
+            let every = SEED_DIAL_EVERY.as_millis();
+            let earned = now.saturating_duration_since(self.seed_dial_at).as_millis() / every;
             if earned > 0 {
-                self.seed_dials = (u64::from(self.seed_dials) + earned).min(u64::from(SEED_DIAL_BURST)) as u8;
+                let topped = (u128::from(self.seed_dials) + earned).min(u128::from(SEED_DIAL_RESERVE)) as u8;
+                self.seed_dials = self.seed_dials.max(topped);
                 self.seed_dial_at = now;
             }
-            let connecting = self.peers.values().filter(|p| !p.connected).count();
+            let connecting = self.peers.values().filter(|p| !p.connected && !p.incoming).count();
             allowance = usize::from(self.seed_dials).min(SEED_MAX_CONNECTING.saturating_sub(connecting));
         }
         let cap = self.peer_cap();
         let mut started = 0;
-        while self.peers.len() < cap && started < allowance && self.sh.budget.has_room() {
+        // Stopped by the allowance or a seeding budget with candidates perhaps left: come back in a second
+        // (`next_wait`). Not for a full connection cap: a closing connection calls here anyway.
+        let mut held = false;
+        while self.peers.len() < cap && self.sh.budget.has_room() {
+            if started >= allowance {
+                held = true;
+                break;
+            }
             let Some(addr) = self.pool.next(now, &self.addrs_in_use, &self.banned.ips, upload_only) else { break };
             if self.is_banned(addr) {
                 self.pool.forget(&addr);
                 continue;
             }
-            let Some(permit) = self.sh.budget.try_connection() else { break };
-            let Some(ho) = self.sh.budget.try_half_open() else {
+            let Some(permit) = self.sh.budget.try_connection() else {
                 self.pool.add_front(addr);
                 break;
             };
+            let ho = if seeding { self.sh.budget.try_seed_half_open() } else { self.sh.budget.try_half_open() };
+            let Some(ho) = ho else {
+                self.pool.add_front(addr);
+                held = seeding;
+                break;
+            };
+            if seeding && !self.sh.budget.try_seed_dial(now) {
+                self.pool.add_front(addr);
+                held = true;
+                break;
+            }
             self.spawn_peer(addr, None, permit, Some(ho));
             started += 1;
             if seeding {
                 self.seed_dials = self.seed_dials.saturating_sub(1);
             }
         }
+        self.dials_pending = held;
+    }
+
+    /// New non-seed addresses reached a seeding torrent: dial up to `SEED_CONNECT_BOOST` of them at once.
+    /// A Warm torrent whose boost does not fit its cap goes Hot for it, as it would for two interested
+    /// peers: the Warm cap (8 connections) is the resting size of a seed nobody asked for, and a tracker
+    /// naming leechers is demand. For a complete torrent Hot holds nothing more than Warm but the larger
+    /// peer cap; with nobody interested it goes back to Warm (and Cold) on the usual idle times, which
+    /// count from the last real demand.
+    fn boost_seed_dials(&mut self, fresh: usize) {
+        let boost = fresh.min(usize::from(SEED_CONNECT_BOOST)) as u8;
+        self.seed_dials = self.seed_dials.max(boost);
+        if self.tier == crate::tier::Tier::Warm && self.peers.len() + usize::from(boost) > self.peer_cap() {
+            self.tier = crate::tier::Tier::Hot;
+            self.sh.diag.promotions.fetch_add(1, Ordering::Relaxed);
+            self.live.tier.store(2, Ordering::Relaxed);
+        }
+    }
+
+    /// Candidates from a tracker response, the DHT or a wake: new non-seed ones earn a seeding torrent a
+    /// boost of dials at its next `connect_more` (which knows by then whether it is a seed). The row's
+    /// known-peer count follows at once: an idle seed may not tick again for minutes.
+    pub(super) fn offer_peers(&mut self, v: Vec<SocketAddr>) {
+        let upload_only = self.upload_only_now();
+        let fresh = self.pool.offer(v, upload_only);
+        self.fresh_peers = self.fresh_peers.saturating_add(fresh);
+        self.publish_peer_counts();
     }
 
     pub(super) fn publish_peer_counts(&self) {

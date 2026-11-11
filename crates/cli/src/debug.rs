@@ -246,7 +246,7 @@ pub fn peers(p: &DebugPeersDto) -> String {
     if p.peers.is_empty() {
         let _ = writeln!(o, "No peers connected to this torrent.");
     } else {
-        let _ = writeln!(o, "{:<24} {:<16} {:<4} {:<3} {:<6} {:>10} {:>10} {:>4} {:>6} {:>7}", "ADDRESS", "CLIENT", "NET", "DIR", "FLAGS", "DOWN", "UP", "REQ", "HAS", "TIME");
+        let _ = writeln!(o, "{:<24} {:<16} {:<4} {:<3} {:<6} {:>10} {:>10} {:>4} {:>6} {:>6} {:>5} {:>6} {:>6} {:>7}", "ADDRESS", "CLIENT", "NET", "DIR", "FLAGS", "DOWN", "UP", "REQ", "ASKED", "SENT", "REJ", "LAST", "HAS", "TIME");
         for x in &p.peers {
             let mut flags = String::new();
             for (on, ch) in [(x.choking_us, 'c'), (x.choked_by_us, 'C'), (x.interested, 'i'), (x.snubbed, 'S'), (x.upload_only, 'U'), (x.has_pex, 'x')] {
@@ -254,7 +254,7 @@ pub fn peers(p: &DebugPeersDto) -> String {
             }
             let _ = writeln!(
                 o,
-                "{:<24} {:<16} {:<4} {:<3} {:<6} {:>10} {:>10} {:>4} {:>5.0}% {:>7}",
+                "{:<24} {:<16} {:<4} {:<3} {:<6} {:>10} {:>10} {:>4} {:>6} {:>6} {:>5} {:>6} {:>5.0}% {:>7}",
                 x.addr,
                 x.client.chars().take(16).collect::<String>(),
                 x.transport,
@@ -263,11 +263,16 @@ pub fn peers(p: &DebugPeersDto) -> String {
                 if x.down_rate > 0 { human::rate(x.down_rate) } else { "-".into() },
                 if x.up_rate > 0 { human::rate(x.up_rate) } else { "-".into() },
                 x.requests_in_flight,
+                x.requests_received,
+                x.blocks_served,
+                x.requests_rejected,
+                x.last_request_secs.map_or_else(|| "-".to_owned(), human::duration),
                 f64::from(x.progress) * 100.0,
                 human::duration(x.connected_secs)
             );
         }
         let _ = writeln!(o, "flags: c they choke us, C we choke them, i they want our data, S snubbed, U upload-only, x peer exchange");
+        let _ = writeln!(o, "REQ our requests in flight to them; ASKED their requests to us, SENT blocks we sent them, REJ requests we declined, LAST since their last request");
         if p.truncated > 0 {
             let _ = writeln!(o, "... {} more peers not shown", p.truncated);
         }
@@ -290,7 +295,7 @@ pub fn perf(p: &DebugPerfDto) -> String {
     let _ = writeln!(o, "        favorite-tracker caps in force: {}", pr.tracker_caps);
     let _ = writeln!(o, "PEERS   {} connected over {} torrents; {} open of {} allowed, {} handshaking (cap {})", p.peers, p.torrent_count, pr.connections_open.saturating_sub(pr.half_open), pr.max_connections, pr.half_open, pr.max_half_open);
     let c = |k: &str| pr.counters.get(k).copied().unwrap_or(0);
-    let _ = writeln!(o, "        incoming accepted {} refused {} (busy {}, handshake {}, torrent not running {}, peer {}); uTP in {} out {}; encrypted in {} out {} (fallbacks {})", c("incoming_accepted"), c("incoming_refused"), c("refused_busy"), c("refused_handshake"), c("refused_torrent"), c("refused_peer"), c("utp_accepted"), c("utp_dialed"), c("mse_accepted"), c("mse_dialed"), c("mse_fallbacks"));
+    let _ = writeln!(o, "        incoming accepted {} refused {} (busy {}, not a handshake {}, handshake timed out {}, torrent unknown or not running {}, peer {}); uTP in {} out {}; encrypted in {} out {} (fallbacks {})", c("incoming_accepted"), c("incoming_refused"), c("refused_busy"), c("refused_handshake"), c("refused_timeout"), c("refused_torrent"), c("refused_peer"), c("utp_accepted"), c("utp_dialed"), c("mse_accepted"), c("mse_dialed"), c("mse_fallbacks"));
     let _ = writeln!(o, "        hash failures {}, peers banned {}, peer exchange in {} out {}", c("hash_failures"), c("peers_banned"), c("pex_received"), c("pex_sent"));
     let _ = writeln!(o, "DISK    verification slots {} of {} busy (peak {}); {} verifying now", pr.verify_slots - pr.verify_free.min(pr.verify_slots), pr.verify_slots, c("verify_peak"), p.torrents.iter().filter(|t| t.state == "checking").count());
     let _ = writeln!(o, "NETWORK {}; listening on {}{}", if pr.online { "online".to_owned() } else { "OFFLINE".to_owned() }, pr.listen_port, pr.port_fallback.as_deref().map(|f| format!(" ({f})")).unwrap_or_default());
@@ -361,5 +366,32 @@ mod tests {
         for bad in ["", "frob", "peers", "peers a b", "announce", "health extra", "trackers --enable"] {
             assert!(parse(w(bad)).is_err(), "`debug {bad}` should be a usage error");
         }
+    }
+
+    /// "Interested, unchoked, nothing sent for hours" is settled by what the peer asked of us: the table
+    /// shows it next to our own requests, and a peer that never asked shows no age.
+    #[test]
+    fn debug_peers_shows_what_each_peer_asked_of_us() {
+        let peer = |addr: &str, asked: u32, sent: u32, rej: u32, last: Option<u64>| DebugPeerDto {
+            addr: addr.into(),
+            client: "qBittorrent".into(),
+            transport: "tcp".into(),
+            direction: "in".into(),
+            requests_in_flight: 0,
+            requests_received: asked,
+            blocks_served: sent,
+            requests_rejected: rej,
+            last_request_secs: last,
+            ..Default::default()
+        };
+        let p = DebugPeersDto { peers: vec![peer("10.0.0.1:6881", 4321, 4000, 321, Some(7)), peer("10.0.0.2:6881", 0, 0, 0, None)], ..Default::default() };
+        let out = peers(&p);
+        let row = |a: &str| out.lines().find(|l| l.starts_with(a)).map(|l| l.split_whitespace().map(str::to_owned).collect::<Vec<_>>()).unwrap();
+        let (asking, quiet) = (row("10.0.0.1"), row("10.0.0.2"));
+        let header: Vec<&str> = out.lines().find(|l| l.starts_with("ADDRESS")).unwrap().split_whitespace().collect();
+        let col = |name: &str| header.iter().position(|h| *h == name).unwrap() - (header.len() - asking.len());
+        assert_eq!([&asking[col("ASKED")], &asking[col("SENT")], &asking[col("REJ")]], ["4321", "4000", "321"], "{out}");
+        assert_ne!(asking[col("LAST")], "-", "{out}");
+        assert_eq!(quiet[col("LAST")], "-", "{out}");
     }
 }

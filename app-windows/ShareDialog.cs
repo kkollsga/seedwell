@@ -67,7 +67,7 @@ sealed class ShareDialog
         dialog.Closed += (_, _) => countdown.Stop();
         countdown.Tick += (_, _) => _ = Refresh();
         Draw();
-        if (!opening) LoadInvites();
+        if (!opening) _ = LoadInvites();
     }
 
     /// <summary>The dialog open now (QA).</summary>
@@ -160,7 +160,7 @@ sealed class ShareDialog
                 // Drawn once, with its links: the form alone first would be one whole drawing more in the same moment.
                 form = t.Result;
                 failure.Visibility = Visibility.Collapsed;
-                LoadInvites(true);
+                _ = LoadInvites(true);
                 return;
             }
             AppLog.Write($"share: the form could not be read: {Message(t.Exception)}");
@@ -171,7 +171,8 @@ sealed class ShareDialog
     }
 
     /// <param name="first">The form just arrived and is not drawn yet: drawn whatever the links' read comes to.</param>
-    void LoadInvites(bool first = false)
+    /// <remarks>Done once the links read are drawn.</remarks>
+    async Task LoadInvites(bool first = false)
     {
         if (form.Id.Length == 0)
         {
@@ -180,20 +181,19 @@ sealed class ShareDialog
             return;
         }
         var id = form.Id;
-        _ = Task.Run(() => app.Core.SyncInvites(id)).ContinueWith(t => content.DispatcherQueue.TryEnqueue(() =>
+        var read = false;
+        try
         {
-            if (t.IsCompletedSuccessfully && form.Id == id)
-            {
-                invites = t.Result;
-                Draw();
-            }
-            else if (first)
-            {
-                Draw();
-            }
-            if (first) Tips();
-            ready.TrySetResult();
-        }));
+            var got = await Task.Run(() => app.Core.SyncInvites(id));
+            if (form.Id == id) { invites = got; read = true; }
+        }
+        catch (Exception e) { AppLog.Write($"share: links failed: {CoreCalls.Message(e)}"); }
+        if (read || first)
+        {
+            Draw();
+        }
+        if (first) Tips();
+        ready.TrySetResult();
     }
 
     /// <summary>A drop-down or menu of this drawing is open.</summary>
@@ -476,15 +476,15 @@ sealed class ShareDialog
     }
 
     /// <summary>Extend: the sharing period ends <paramref name="days"/> later (the core reads when it ends now).</summary>
-    void Extend(uint days)
+    Task Extend(uint days)
     {
         var id = form.Id;
-        Background(() => app.Core.SyncShareExtend(id, days, Now()), $"extend {days}");
+        return Background(() => app.Core.SyncShareExtend(id, days, Now()), $"extend {days}");
     }
 
-    void ShareUntil(ulong until) => Background(() => app.Core.SyncSetShareUntil(form.Id, until), $"share until {until}");
+    Task ShareUntil(ulong until) => Background(() => app.Core.SyncSetShareUntil(form.Id, until), $"share until {until}");
 
-    void Revoke(string linkId) => Background(() => app.Core.SyncRevokeInvite(form.Id, linkId), "revoke");
+    Task Revoke(string linkId) => Background(() => app.Core.SyncRevokeInvite(form.Id, linkId), "revoke");
 
     void SetDevices(bool on) => SetSwitch(f => app.Core.SyncShareSetDevices(f, on), $"devices {on}");
 
@@ -515,15 +515,16 @@ sealed class ShareDialog
     }
 
     /// <summary>A core call off the UI thread; a failure is the core's sentence in the dialog; the links are read again.</summary>
-    void Background(Func<Task> work, string what)
+    /// <remarks>Done once the links are read again and drawn.</remarks>
+    async Task Background(Func<Task> work, string what)
     {
-        _ = Task.Run(work).ContinueWith(t => content.DispatcherQueue.TryEnqueue(() =>
-        {
-            AppLog.Write($"share: {what} {(t.IsCompletedSuccessfully ? "done" : "failed")}");
-            Draw();
-            if (!t.IsCompletedSuccessfully) AddFolderDialog.Failed(failure, Message(t.Exception));
-            LoadInvites();
-        }));
+        string? failedWith = null;
+        try { await Task.Run(work); }
+        catch (Exception e) { failedWith = CoreCalls.Message(e); }
+        AppLog.Write($"share: {what} {(failedWith is null ? "done" : "failed")}");
+        Draw();
+        if (failedWith is not null) AddFolderDialog.Failed(failure, failedWith);
+        await LoadInvites();
     }
 
     static string Message(AggregateException? e) => e?.InnerException is CoreException ce ? SeedwellFfiMethods.CoreErrorMessage(ce) : e?.InnerException?.Message ?? "";
@@ -567,7 +568,7 @@ sealed class ShareDialog
         form = done.Form;
         copied = true;
         Draw();
-        LoadInvites();
+        _ = LoadInvites();
         var shown = model.CopiedMs;
         _ = Task.Delay(TimeSpan.FromMilliseconds(shown)).ContinueWith(_ => content.DispatcherQueue.TryEnqueue(() => { copied = false; Draw(); }));
         app.LibraryWindowIfCreated?.Pane.Refresh();
@@ -580,17 +581,15 @@ sealed class ShareDialog
     internal void QaSingleUse(bool on) => Change(form with { SingleUse = on });
     internal void QaExpires(bool on, uint days) => Change(form with { LinkExpires = on, LinkDays = days == 0 ? form.LinkDays : days });
     internal void QaChat(bool on, string chat) => Change(form with { WithChat = on, Chat = chat });
-    internal void QaRevokeFirst()
-    {
-        if (model.Links.FirstOrDefault() is SyncShareLink l) Revoke(l.Id);
-    }
-    internal void QaShareFor(uint days) => ShareUntil(SeedwellFfiMethods.SyncSharingEnd(days, Now()));
-    internal void QaNoEnd() => ShareUntil(0);
-    internal void QaExtend(uint days) => Extend(days);
+    internal Task QaRevokeFirst() => model.Links.FirstOrDefault() is SyncShareLink l ? Revoke(l.Id) : Task.CompletedTask;
+    internal Task QaShareFor(uint days) => ShareUntil(SeedwellFfiMethods.SyncSharingEnd(days, Now()));
+    internal Task QaNoEnd() => ShareUntil(0);
+    internal Task QaExtend(uint days) => Extend(days);
     internal void QaDropDown(bool open) { if (combos.FirstOrDefault() is ComboBox c) c.IsDropDownOpen = open; }
     internal bool Opening => opening;
     /// <summary>QA: a tooltip opens over the dialog, as the pointer or the keyboard's focus may open one at any moment.</summary>
-    internal void QaTooltip(bool open)
+    /// <remarks>Done once the tooltip is drawn open (or gone): a tooltip's popup opens a moment after IsOpen.</remarks>
+    internal async Task QaTooltip(bool open)
     {
         if (combos.FirstOrDefault() is not ComboBox c) return;
         if (ToolTipService.GetToolTip(c) is not ToolTip tip)
@@ -599,6 +598,12 @@ sealed class ShareDialog
             ToolTipService.SetToolTip(c, tip);
         }
         tip.IsOpen = open;
+        bool Shown() => dialog.XamlRoot is XamlRoot xr && Microsoft.UI.Xaml.Media.VisualTreeHelper.GetOpenPopupsForXamlRoot(xr).Any(p => p.IsOpen && p.Child is FrameworkElement e && (e == tip || RowCommands.Tree(e).Contains(tip)) && tip.ActualWidth > 0);
+        for (var waited = 0; Shown() != open && waited < 100; waited++)
+        {
+            await Quiet.AfterLayout();
+            await Task.Yield();
+        }
     }
     internal string QaFocused => FocusKeeper.Describe(content, dialog.XamlRoot);
     internal Task<string> QaWalk() => FocusKeeper.QaWalk(content, dialog.XamlRoot, Draw);

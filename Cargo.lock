@@ -1358,14 +1358,14 @@ dependencies = [
 
 [[package]]
 name = "seedwell-bencode"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "seedwell-buildsig"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "ring",
  "serde",
@@ -1376,14 +1376,14 @@ dependencies = [
 
 [[package]]
 name = "seedwell-classify"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "seedwell-cli"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "seedwell-control",
  "seedwell-devlog",
@@ -1402,7 +1402,7 @@ dependencies = [
 
 [[package]]
 name = "seedwell-control"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "getrandom 0.4.3",
  "seedwell-classify",
@@ -1424,7 +1424,7 @@ dependencies = [
 
 [[package]]
 name = "seedwell-devlog"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "seedwell-platform",
  "seedwell-state",
@@ -1434,7 +1434,7 @@ dependencies = [
 
 [[package]]
 name = "seedwell-dht"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "proptest",
  "seedwell-bencode",
@@ -1444,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "seedwell-engine"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "bytes",
  "getrandom 0.4.3",
@@ -1471,7 +1471,7 @@ dependencies = [
 
 [[package]]
 name = "seedwell-ffi"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "seedwell-buildsig",
  "seedwell-classify",
@@ -1501,7 +1501,7 @@ dependencies = [
 
 [[package]]
 name = "seedwell-fswatch"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "libc",
  "proptest",
@@ -1511,7 +1511,7 @@ dependencies = [
 
 [[package]]
 name = "seedwell-http"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "bytes",
  "http-body-util",
@@ -1529,7 +1529,7 @@ dependencies = [
 
 [[package]]
 name = "seedwell-media"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "image",
  "resvg",
@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "seedwell-metainfo"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "getrandom 0.4.3",
  "proptest",
@@ -1549,7 +1549,7 @@ dependencies = [
 
 [[package]]
 name = "seedwell-platform"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "libc",
  "objc2",
@@ -1562,14 +1562,14 @@ dependencies = [
 
 [[package]]
 name = "seedwell-portmap"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "seedwell-rendezvous"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "ring",
  "seedwell-http",
@@ -1580,7 +1580,7 @@ dependencies = [
 
 [[package]]
 name = "seedwell-socks"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "seedwell-socks",
  "tokio",
@@ -1588,7 +1588,7 @@ dependencies = [
 
 [[package]]
 name = "seedwell-state"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "proptest",
  "redb 2.6.4",
@@ -1602,7 +1602,7 @@ dependencies = [
 
 [[package]]
 name = "seedwell-storage"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "crossbeam-channel",
  "libc",
@@ -1615,7 +1615,7 @@ dependencies = [
 
 [[package]]
 name = "seedwell-stream"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "getrandom 0.4.3",
  "seedwell-platform",
@@ -1624,7 +1624,7 @@ dependencies = [
 
 [[package]]
 name = "seedwell-sync"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "libc",
  "proptest",
@@ -1638,7 +1638,7 @@ dependencies = [
 
 [[package]]
 name = "seedwell-sync-net"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "flate2",
  "image",
@@ -1662,7 +1662,7 @@ dependencies = [
 
 [[package]]
 name = "seedwell-sync-proto"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "proptest",
  "ring",
@@ -1671,7 +1671,7 @@ dependencies = [
 
 [[package]]
 name = "seedwell-tracker"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "bytes",
  "flate2",
@@ -1691,7 +1691,7 @@ dependencies = [
 
 [[package]]
 name = "seedwell-utp"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "libc",
  "tokio",
@@ -1699,7 +1699,7 @@ dependencies = [
 
 [[package]]
 name = "seedwell-wire"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "bytes",
  "proptest",
@@ -2137,7 +2137,7 @@ dependencies = [
 
 [[package]]
 name = "tracker-probe"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "anyhow",
  "bytes",

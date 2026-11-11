@@ -86,6 +86,7 @@ impl Session {
             session_base: 0,
             seed_goal: SeedGoal::FOREVER,
             idle: None,
+            known_seeds: None,
             file_prios: None,
             error: None,
             magnet: None,

@@ -51,7 +51,8 @@ async fn private_torrent_announces_plainly_and_stays_off_dht_and_pex() {
     assert!(!first.peer_id.starts_with(b"-TR") && !first.peer_id.starts_with(b"-qB"));
     // Added complete: `started` with left=0, nothing downloaded, and no `completed` ever.
     assert_eq!((ev(&first), first.left, first.downloaded, first.uploaded), ("started", 0, 0, 0));
-    assert!(first.numwant.unwrap_or(0) > 0 && first.numwant.unwrap_or(0) <= 100, "{:?}", first.numwant);
+    // No more peers than mainstream clients ask for (libtorrent and so qBittorrent: 200; SPEC §7B.3).
+    assert!(first.numwant.unwrap_or(0) > 0 && first.numwant.unwrap_or(0) <= 200, "{:?}", first.numwant);
 
     // Pause: `stopped` with numwant=0; resume: a new `started`, the same key and peer_id inside the process.
     node.h.pause(&[t.id]);

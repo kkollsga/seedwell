@@ -495,6 +495,18 @@ pub struct PeerDto {
     /// The peer does peer exchange.
     #[serde(default)]
     pub has_pex: bool,
+    /// Block requests the peer sent us.
+    #[serde(default)]
+    pub requests_received: u32,
+    /// Blocks we queued to it in answer.
+    #[serde(default)]
+    pub blocks_served: u32,
+    /// Its requests we declined.
+    #[serde(default)]
+    pub requests_rejected: u32,
+    /// Seconds since its last request (`null`: it never sent one).
+    #[serde(default)]
+    pub last_request_secs: Option<u64>,
 }
 
 /// `info` result.
@@ -1407,6 +1419,18 @@ pub struct DebugPeerDto {
     pub upload_only: bool,
     /// Does peer exchange.
     pub has_pex: bool,
+    /// Block requests the peer sent us on this connection.
+    #[serde(default)]
+    pub requests_received: u32,
+    /// Blocks we queued to it in answer.
+    #[serde(default)]
+    pub blocks_served: u32,
+    /// Its requests we declined (choked, a piece we lack, uploads held, the disk queue full, dropped by a choke).
+    #[serde(default)]
+    pub requests_rejected: u32,
+    /// Seconds since its last request (`null`: it never sent one).
+    #[serde(default)]
+    pub last_request_secs: Option<u64>,
 }
 
 /// `debug_peers` result.

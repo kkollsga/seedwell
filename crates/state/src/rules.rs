@@ -24,8 +24,8 @@ use crate::error::{DocError, FieldError, Warning};
 use crate::ids::valid_id;
 use crate::serde_util::{category_vec, string_or_vec};
 
-/// Highest `version` this build reads.
-pub const RULES_VERSION: u32 = 1;
+/// Highest `version` this build reads. v2: the Default rule seeds forever (it stopped at ratio 1.0 or 7 days).
+pub const RULES_VERSION: u32 = 2;
 /// Tracker id in a rule's `tracker` list that matches torrents without a profile.
 pub const PUBLIC_TRACKER: &str = "public";
 const MAX_RULES: usize = 1000;
@@ -380,7 +380,7 @@ impl Default for Rule {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DefaultRule {
-    /// Seeding goal (SPEC default: ratio 1.0 or 7 days).
+    /// Seeding goal (SPEC default: seed forever, as qBittorrent and Transmission; the user's decision of 2026-11-11).
     pub goal: SeedingGoal,
     /// Hit-and-run floor.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -400,7 +400,7 @@ pub struct DefaultRule {
 impl Default for DefaultRule {
     fn default() -> Self {
         DefaultRule {
-            goal: SeedingGoal::RatioOrTime { ratio: 1.0, time: Secs::days(7) },
+            goal: SeedingGoal::Forever,
             min_seed_time: None,
             priority: Priority::Normal,
             on_goal: OnGoal::StopKeep,
@@ -734,6 +734,18 @@ impl Document for RuleSet {
         let text = migrated.as_deref().unwrap_or(text);
         let (mut v, unknown, mut warnings) = parse_toml::<RuleSet>(Self::FILE, text, RULES_VERSION)?;
         v.unknown = unknown;
+        // v2: the Default rule's goal went from "ratio 1.0 or 7 days, then stop" to "seed forever". A v1 file carries
+        // the old default written out; exactly that is the default, not a choice, so it follows the new one. Any other
+        // goal or action was set on purpose and stays. The store rewrites the file once (`file_is_outdated`).
+        if v.version < 2
+            && v.default.goal == (SeedingGoal::RatioOrTime { ratio: 1.0, time: Secs::days(7) })
+            && v.default.on_goal == OnGoal::StopKeep
+        {
+            v.default.goal = SeedingGoal::Forever;
+        }
+        if v.version < RULES_VERSION {
+            v.version = RULES_VERSION;
+        }
         let errors = v.validate();
         if !errors.is_empty() {
             return Err(DocError::Invalid { file: Self::FILE, errors });
@@ -743,7 +755,9 @@ impl Document for RuleSet {
     }
 
     fn file_is_outdated(text: &str) -> bool {
-        text.parse::<toml::Table>().is_ok_and(|t| has_template_key(&t))
+        text.parse::<toml::Table>().is_ok_and(|t| {
+            has_template_key(&t) || t.get("version").and_then(toml::Value::as_integer).is_some_and(|v| v < i64::from(RULES_VERSION))
+        })
     }
 
     fn render(&self) -> Result<String, DocError> {
@@ -837,7 +851,7 @@ finished_dir = "~/Software"
         assert_eq!(p.goal, SeedingGoal::Ratio { ratio: 3.0 });
         let d = rs.resolve(&attrs(None, false, Category::Movie));
         assert_eq!(d.source, PolicySource::Default);
-        assert_eq!(d.goal, SeedingGoal::RatioOrTime { ratio: 1.0, time: Secs::days(7) });
+        assert_eq!(d.goal, SeedingGoal::Forever);
         // Public rule requires "no profile": a private software torrent from an unknown tracker misses it.
         assert_eq!(rs.resolve(&attrs(None, true, Category::Software)).source, PolicySource::Default);
     }
@@ -1197,5 +1211,23 @@ stop_when_idle = { below = 2000000000 }
             let doc = format!("version = 1\n[[rule]]\nid = \"x\"\nname = \"X\"\nstop_when_idle = {bad}\n");
             assert!(RuleSet::parse_str(&doc).is_err(), "{bad}");
         }
+    }
+
+    /// Failure: a rules file of version 1 kept stopping torrents at ratio 1.0 or 7 days after the default became "seed
+    /// forever" (the old default is written out in it), or a goal the user chose was replaced by the migration.
+    #[test]
+    fn a_version_1_file_with_the_old_default_seeds_forever_and_a_chosen_goal_stays() {
+        let old = "version = 1\n[default]\non_goal = \"stop_keep\"\npriority = \"normal\"\n[default.goal]\nkind = \"ratio_or_time\"\nratio = 1.0\ntime = \"7d\"\n";
+        assert!(RuleSet::file_is_outdated(old), "the store rewrites it once");
+        let v = RuleSet::parse_str(old).unwrap().value;
+        assert_eq!((v.version, v.default.goal), (RULES_VERSION, SeedingGoal::Forever));
+        assert!(!RuleSet::file_is_outdated(&v.render().unwrap()));
+        let chosen = old.replace("ratio = 1.0", "ratio = 2.0");
+        assert_eq!(RuleSet::parse_str(&chosen).unwrap().value.default.goal, SeedingGoal::RatioOrTime { ratio: 2.0, time: Secs::days(7) });
+        let removes = old.replace("stop_keep", "remove_keep_files");
+        assert_eq!(RuleSet::parse_str(&removes).unwrap().value.default.goal, SeedingGoal::RatioOrTime { ratio: 1.0, time: Secs::days(7) });
+        // Written by this version: the same goal is a choice now, and stays.
+        let v2 = old.replace("version = 1", "version = 2");
+        assert_eq!(RuleSet::parse_str(&v2).unwrap().value.default.goal, SeedingGoal::RatioOrTime { ratio: 1.0, time: Secs::days(7) });
     }
 }

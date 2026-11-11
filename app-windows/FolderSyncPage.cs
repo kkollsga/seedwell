@@ -68,8 +68,8 @@ sealed class FolderSyncPage
             // The core's pace, with the Mac's leeway of one refresh (200 ms).
             if (model is not SyncPageModel m) return;
             var now = DateTime.UtcNow;
-            if ((now - membersRead).TotalMilliseconds + 200 >= m.MembersRefreshMs) LoadMembers();
-            if ((now - conflictsRead).TotalMilliseconds + 200 >= m.ConflictsRefreshMs) LoadConflicts();
+            if ((now - membersRead).TotalMilliseconds + 200 >= m.MembersRefreshMs) _ = LoadMembers();
+            if ((now - conflictsRead).TotalMilliseconds + 200 >= m.ConflictsRefreshMs) _ = LoadConflicts();
         };
         root.Loaded += (_, _) => timer.Start();
         root.Unloaded += (_, _) => timer.Stop();
@@ -93,8 +93,8 @@ sealed class FolderSyncPage
         members = [];
         conflicts = [];
         Update();
-        LoadMembers();
-        LoadConflicts();
+        _ = LoadMembers();
+        _ = LoadConflicts();
     }
 
     /// <summary>Asks the core for the page and redraws when its signature changed (on every model refresh).</summary>
@@ -118,8 +118,8 @@ sealed class FolderSyncPage
             selected = m.Selected;
             members = [];
             conflicts = [];
-            LoadMembers();
-            LoadConflicts();
+            _ = LoadMembers();
+            _ = LoadConflicts();
         }
         if (m.Signature == drawn)
         {
@@ -163,31 +163,40 @@ sealed class FolderSyncPage
         };
     }
 
-    void LoadMembers()
+    /// <summary>Reads the folder's members off the UI thread, then the page again: done when it is drawn.</summary>
+    async Task LoadMembers()
     {
         if (selected is not string id)
         {
             return;
         }
         membersRead = DateTime.UtcNow;
-        _ = Task.Run(() => app.Core.SyncMembers(id)).ContinueWith(t =>
+        try
         {
-            if (t.IsCompletedSuccessfully) root.DispatcherQueue.TryEnqueue(() => { if (selected == id) { members = t.Result; Update(); } });
-        });
+            var read = await Task.Run(() => app.Core.SyncMembers(id));
+            if (selected == id) { members = read; Update(); }
+        }
+        catch (Exception e) { AppLog.Write($"sync members failed: {CoreCalls.Message(e)}"); }
     }
 
-    void LoadConflicts()
+    /// <summary>Reads the folder's conflicts off the UI thread, then the page again: done when it is drawn.</summary>
+    async Task LoadConflicts()
     {
         if (selected is not string id)
         {
             return;
         }
         conflictsRead = DateTime.UtcNow;
-        _ = Task.Run(() => app.Core.SyncConflicts(id)).ContinueWith(t =>
+        try
         {
-            if (t.IsCompletedSuccessfully) root.DispatcherQueue.TryEnqueue(() => { if (selected == id) { conflicts = t.Result; Update(); } });
-        });
+            var read = await Task.Run(() => app.Core.SyncConflicts(id));
+            if (selected == id) { conflicts = read; Update(); }
+        }
+        catch (Exception e) { AppLog.Write($"sync conflicts failed: {CoreCalls.Message(e)}"); }
     }
+
+    /// <summary>QA: the members read again and drawn.</summary>
+    internal Task QaLoadMembers() => LoadMembers();
 
     // ------------------------------------------------------------------------------------------- can others reach it
 
@@ -794,7 +803,7 @@ sealed class FolderSyncPage
         }
         try
         {
-            if (await d.ShowAsync() == ContentDialogResult.Primary) Run(command, folderId);
+            if (await d.ShowAsync() == ContentDialogResult.Primary) await Run(command, folderId);
         }
         catch (Exception e) { AppLog.Write($"sync question failed: {e.Message}"); }
     }
@@ -805,10 +814,12 @@ sealed class FolderSyncPage
     /// Runs a command of the page on folder <paramref name="id"/> (the page's own items: the folder shown; a list row's
     /// menu: that row's folder). Failures are alerts with the core's <c>sync_*_failed</c> texts.
     /// </summary>
-    internal void Run(SyncPageCommand command, string? id)
+    /// <remarks>It comes to the core call it starts (QA awaits that, never a fixed time).</remarks>
+    internal Task Run(SyncPageCommand command, string? id)
     {
         AppLog.Write($"sync page: {command.GetType().Name}");
         var f = Folder(id);
+        var call = Task.CompletedTask;
         switch (command)
         {
             case SyncPageCommand.Reveal:
@@ -850,7 +861,7 @@ sealed class FolderSyncPage
                 var trash = removal.Trash();
                 removal.Close();
                 Redraw();
-                Background(() => app.Core.SyncRemove(f.Id, trash), alert => alert, e => SeedwellFfiMethods.SyncRemoveFailed(f.Name, e));
+                call = Background(() => app.Core.SyncRemove(f.Id, trash), alert => alert, e => SeedwellFfiMethods.SyncRemoveFailed(f.Name, e));
                 break;
             case SyncPageCommand.AddFolder:
                 AddFolderDialog.Show(app, null);
@@ -861,12 +872,12 @@ sealed class FolderSyncPage
             case SyncPageCommand.SetRole sr:
                 if (f is null) break;
                 var who = members.FirstOrDefault(m => m.DeviceId == sr.DeviceId)?.Name ?? "";
-                Background(async () => { await app.Core.SyncSetRole(f.Id, sr.DeviceId, sr.Role); return null; }, _ => null, e => SeedwellFfiMethods.SyncSetRoleFailed(who, e), LoadMembers);
+                call = Background(async () => { await app.Core.SyncSetRole(f.Id, sr.DeviceId, sr.Role); return null; }, _ => null, e => SeedwellFfiMethods.SyncSetRoleFailed(who, e), LoadMembers);
                 break;
             case SyncPageCommand.RemoveDevice rd:
                 if (f is null) break;
                 var name = members.FirstOrDefault(m => m.DeviceId == rd.DeviceId)?.Name ?? f.Gone.FirstOrDefault(g => g.DeviceId == rd.DeviceId)?.Name ?? "";
-                Background(async () => { await app.Core.SyncRemoveDevice(f.Id, rd.DeviceId); return null; }, _ => null, e => SeedwellFfiMethods.SyncRemoveDeviceFailed(name, f.Name, e), LoadMembers);
+                call = Background(async () => { await app.Core.SyncRemoveDevice(f.Id, rd.DeviceId); return null; }, _ => null, e => SeedwellFfiMethods.SyncRemoveDeviceFailed(name, f.Name, e), LoadMembers);
                 break;
             case SyncPageCommand.Reshare:
                 if (f is null) break;
@@ -890,24 +901,24 @@ sealed class FolderSyncPage
             case SyncPageCommand.Resolve rs:
                 if (f is null) break;
                 var original = conflicts.FirstOrDefault(c => c.Copy == rs.Copy)?.Original ?? rs.Copy;
-                Background(async () => { await app.Core.SyncResolveConflict(f.Id, rs.Copy, rs.Keep); return null; }, _ => null, e => SeedwellFfiMethods.SyncResolveFailed(original, e), LoadConflicts);
+                call = Background(async () => { await app.Core.SyncResolveConflict(f.Id, rs.Copy, rs.Keep); return null; }, _ => null, e => SeedwellFfiMethods.SyncResolveFailed(original, e), LoadConflicts);
                 break;
         }
+        return call;
     }
 
     /// <summary>
     /// Runs a core call off the UI thread; back on it, an alert for what it returned (<paramref name="ok"/>) or for its
     /// error (<paramref name="failed"/>, given the core's sentence), then <paramref name="done"/> either way.
     /// </summary>
-    void Background(Func<Task<SyncAlert?>> work, Func<SyncAlert?, SyncAlert?> ok, Func<string, SyncAlert> failed, Action? done = null)
+    async Task Background(Func<Task<SyncAlert?>> work, Func<SyncAlert?, SyncAlert?> ok, Func<string, SyncAlert> failed, Func<Task>? done = null)
     {
-        _ = Task.Run(work).ContinueWith(t => root.DispatcherQueue.TryEnqueue(() =>
-        {
-            var alert = t.IsCompletedSuccessfully ? ok(t.Result) : failed(Message(t.Exception));
-            if (alert is not null) app.Alert(alert);
-            done?.Invoke();
-            Redraw();
-        }));
+        SyncAlert? alert;
+        try { alert = ok(await Task.Run(work)); }
+        catch (Exception e) { alert = failed(CoreCalls.Message(e)); }
+        if (alert is not null) app.Alert(alert);
+        if (done is not null) await done();
+        Redraw();
     }
 
     static string Message(AggregateException? e) => e?.InnerException is CoreException ce ? SeedwellFfiMethods.CoreErrorMessage(ce) : e?.InnerException?.Message ?? "";
@@ -956,12 +967,12 @@ sealed class FolderSyncPage
     }
 
     /// <summary>QA: a member's menu item by its device id and title, as its click after the question (a disabled one does not run).</summary>
-    internal string QaMemberPress(string deviceId, string title)
+    internal async Task<string> QaMemberPress(string deviceId, string title)
     {
         var row = model?.Page?.Members.Rows.FirstOrDefault(r => r.DeviceId == deviceId);
         if (row?.RoleMenu?.Entries.OfType<SyncPageMenuEntry.Item>().FirstOrDefault(i => i.Title.StartsWith(title)) is not SyncPageMenuEntry.Item it) return "no such item";
         if (!it.Enabled) return "disabled";
-        Run(it.Command, model!.Page!.FolderId);
+        await Run(it.Command, model!.Page!.FolderId);
         return $"ran {it.Command.GetType().Name}";
     }
 

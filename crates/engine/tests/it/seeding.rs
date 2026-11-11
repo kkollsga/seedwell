@@ -544,10 +544,11 @@ async fn peers_reaching_a_waking_torrent_are_answered_at_once_and_served() {
     assert_eq!(seeder.h.diagnostics().incoming_refused, refused);
 }
 
-/// A seeder is dialled by leechers; it does not chase every address a tracker or the DHT hands it.
-/// Forty silent hosts (accept, never answer) were once enough to hold 32 connection slots for
-/// as long as the torrent seeded, with nothing connected: now at most two attempts are in flight
-/// and a new one is earned every 30 s, and the connection count shows only what is connected.
+/// A seeder does not chase every address it was handed all at once. Forty silent hosts (accept, never
+/// answer) were once enough to hold 32 connection slots for as long as the torrent seeded, with nothing
+/// connected: now at most `SEED_MAX_CONNECTING` (8) attempts of a seeding torrent are in flight (addresses
+/// that are not news, like these, get no boost: the reserve of 4, then one per 2 s), and the connection
+/// count shows only what is connected.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_seeder_does_not_chase_every_address() {
     use std::sync::Arc;
@@ -575,11 +576,11 @@ async fn a_seeder_does_not_chase_every_address() {
     let dialled = accepted.load(Ordering::Relaxed);
     let totals = seeder.h.totals().await.unwrap();
     eprintln!("dialled {dialled} silent hosts in 6 s; totals {totals:?}");
-    assert!((1..=4).contains(&dialled), "dialled {dialled} of 40");
-    assert!(totals.half_open <= 2, "{totals:?}");
+    assert!((1..=8).contains(&dialled), "dialled {dialled} of 40");
+    assert!(totals.half_open <= 8, "{totals:?}");
     assert_eq!(totals.connections, 0, "nothing is connected: {totals:?}");
     let snap = seeder.h.snapshot().await.unwrap();
-    assert_eq!((snap.connections, snap.connecting <= 2), (0, true));
+    assert_eq!((snap.connections, snap.connecting <= 8), (0, true));
 
     // One real (idle) leecher: exactly one connection, and it is not "connecting".
     let mut s = TcpStream::connect(seeder.addr()).await.unwrap();

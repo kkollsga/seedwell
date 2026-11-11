@@ -174,7 +174,7 @@ pub(crate) struct Diag {
     pub incoming_accepted: AtomicU64,
     pub incoming_refused: AtomicU64,
     /// `incoming_refused` by [`Refusal`].
-    pub refused: [AtomicU64; 4],
+    pub refused: [AtomicU64; 5],
     pub rechecks: AtomicU64,
     pub utp_accepted: AtomicU64,
     pub utp_dialed: AtomicU64,
@@ -192,12 +192,15 @@ pub(crate) struct Diag {
 pub(crate) enum Refusal {
     /// The connection cap, or too many handshakes pending.
     Busy,
-    /// The handshake timed out or was not a BitTorrent one (plain or encrypted).
+    /// The handshake was not a BitTorrent one (plain or encrypted), or the peer closed during it.
     Handshake,
-    /// The torrent is unknown here, or not running (stopped, queued, moving, shutting down).
+    /// The torrent is unknown here, or not running (stopped, queued, moving, shutting down). An encrypted
+    /// handshake for an info-hash we do not have counts here too, as a plain one does.
     Torrent,
     /// The torrent refused the peer: banned, checking, full, or its queue full.
     Peer,
+    /// No complete handshake arrived in time (`handshake_timeout`).
+    Timeout,
 }
 
 impl Diag {
@@ -277,6 +280,34 @@ pub(crate) struct PeerShared {
     /// when it does), else [`ROUTE_DIRECT`] or [`ROUTE_PROXY`]. Set when the dial chooses, before it connects, and
     /// direct for one that came in.
     pub route: std::sync::atomic::AtomicU8,
+    /// Diagnostics (`seedwell debug peers`): what the peer asked of us, so that "interested, unchoked and
+    /// nothing sent" can be told apart from "never asked" and "asked and was turned down".
+    pub serving: ServeStats,
+}
+
+/// Block requests a peer sent us and what became of them (counted by the peer task, read by `detail`).
+#[derive(Default)]
+pub(crate) struct ServeStats {
+    /// `request` messages received.
+    pub requests: AtomicU32,
+    /// Blocks queued to the peer in answer.
+    pub served: AtomicU32,
+    /// Requests declined: while we choke it, for a piece we lack, uploads held, before the storage was ready,
+    /// the disk queue full, or dropped by a choke (with Fast the peer is told by a `reject`).
+    pub rejected: AtomicU32,
+    /// When the last request arrived (Unix ms; 0 = never). Shown as an age only.
+    pub last_request_ms: AtomicU64,
+}
+
+impl ServeStats {
+    fn request(&self) {
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        self.last_request_ms.store(crate::util::unix_ms(), Ordering::Relaxed);
+    }
+
+    fn reject(&self, n: usize) {
+        self.rejected.fetch_add(u32::try_from(n).unwrap_or(u32::MAX), Ordering::Relaxed);
+    }
 }
 
 /// A direct connection: incoming, or dialled while the proxy was off.
@@ -1132,10 +1163,13 @@ impl Peer {
     }
 
     fn on_request(&mut self, r: BlockRequest) -> Result<(), Close> {
+        self.shared.serving.request();
         let Some(d) = self.ctx.disk.get() else {
+            self.shared.serving.reject(1);
             return Ok(());
         };
         let reject = |this: &mut Self, r: BlockRequest| {
+            this.shared.serving.reject(1);
             if this.fast {
                 this.enc.push(&Message::<&[u8]>::RejectRequest(r));
             }
@@ -1204,6 +1238,7 @@ impl Peer {
                 Err(StorageError::Busy) => {
                     // The disk queue is full: tell the peer (Fast) and let it ask again.
                     let dropped: Vec<ReadJob> = self.reads.drain(i..j).collect();
+                    self.shared.serving.reject(dropped.len());
                     if self.fast {
                         for job in dropped {
                             self.enc.push(&Message::<&[u8]>::RejectRequest(job.req));
@@ -1291,6 +1326,7 @@ impl Peer {
             let at = self.enc_written + self.enc.pending().len() as u64 + 13;
             self.payload_marks.push_back((at, at + chunk.len() as u64));
             self.enc.push_piece(req.index, req.begin, chunk);
+            self.shared.serving.served.fetch_add(1, Ordering::Relaxed);
             run.users = run.users.saturating_sub(1);
             self.reads.pop_front();
             self.trim_runs();
@@ -1446,13 +1482,26 @@ impl Peer {
                     let m = Message::<&[u8]>::Choke;
                     self.st.on_sent(&m);
                     self.enc.push(&m);
-                    // Queued reads are dropped; with Fast the peer is told which ones.
-                    while let Some(j) = self.reads.pop_front() {
-                        if self.fast && !self.allowed_out.contains(&j.req.index) {
-                            self.enc.push(&Message::<&[u8]>::RejectRequest(j.req));
+                    // Queued reads are dropped and, with Fast, rejected; but a Fast peer keeps the ones for its
+                    // allowed-fast pieces, which a choked peer may still have (BEP 6). They were once
+                    // dropped without a word, and the peer waited for them until its request timeout.
+                    let mut dropped = 0;
+                    for mut j in std::mem::take(&mut self.reads) {
+                        if self.fast && self.allowed_out.contains(&j.req.index) {
+                            j.run = NO_RUN;
+                            self.reads.push_back(j);
+                        } else {
+                            dropped += 1;
+                            if self.fast {
+                                self.enc.push(&Message::<&[u8]>::RejectRequest(j.req));
+                            }
                         }
                     }
+                    self.shared.serving.reject(dropped);
                     self.runs.clear();
+                    if !self.reads.is_empty() {
+                        self.assign_runs()?;
+                    }
                 }
             }
             PeerCmd::Unchoke => {

@@ -123,8 +123,8 @@ The key idea: a seeding torrent nobody is downloading from goes into **low power
 ### 5.1 Power tiers (demand-driven, automatic)
 | Tier | What's resident | Enters when | Leaves when |
 |---|---|---|---|
-| **Cold** (low power) | info-hash, name, save path, size, counters, tracker URLs + next announce, rule id | no peer interest for N min (default 10) | a peer connects and sends `interested` |
-| **Warm** | + file table (piece → file mapping), fds via shared LRU, a few peer connections | a peer is interested | interest stops → back to Cold after N min |
+| **Cold** (low power) | info-hash, name, save path, size, counters, tracker URLs + next announce, rule id; the addresses it learned are seeds (at most 64 IPv4, 6 bytes each, only once it knows one; not persisted) | no peer interest for N min (default 10) | a peer connects and sends `interested`; a tracker response that names leechers |
+| **Warm** | + file table (piece → file mapping), fds via shared LRU, a few peer connections (8) | a peer is interested | interest stops → back to Cold after N min |
 | **Hot** | + piece bitfield, piece hashes, picker, full peer set | downloading, verifying, or high demand | done / demand falls |
 
 - A cold torrent still **announces at the tracker's required interval**. Skipping announces would drop it from the swarm, and private trackers would stop crediting seed time. Each announce is one small request, so this is cheap.
@@ -179,7 +179,8 @@ It must be safe to leave a torrent seeding for years, across app updates, reboot
 - Request pipelining sized to each peer's bandwidth-delay product (adaptive queue depth).
 - Choker: tit-for-tat plus optimistic unchoke; upload slots auto-sized to the upload limit.
 - Redundant connections (libtorrent's `close_redundant_connections`): a torrent that wants nothing more (complete, or a partial seed holding every wanted piece) closes any peer that can never want anything from it (it has every piece, or every piece we have; also when a HAVE completes it, and right after we finish), as a plain local close with no strike that first sends what is queued and then, over TCP, reads what the peer still sends until it closes too (bounded together: 4 KiB, 2 s; a socket closed with bytes unread resets the connection, and a reset makes the peer's system, Windows above all, discard what it has received and not yet read), and does not dial those addresses again while upload-only. They are candidates again the moment more files are ticked or a recheck finds pieces missing. Downloading torrents and tracker announces are never affected. Our extended handshake says `upload_only` (BEP 21) whenever the torrent wants nothing, complete or partial seed, and is sent again to connected peers when that changes either way: the peer we close learns from it that we want nothing, and does not dial us back. The handshake also lists libtorrent's `upload_only` message in `m` (our id 3; payload one byte, 1 or 0): libtorrent-family clients (qBittorrent, Deluge) only ever set a peer's upload-only state from its handshake and clear it only through that message, so it goes with every re-sent handshake to a peer that lists it (and once its id is known, if we cleared it before), and one received sets that peer's `upload_only`. A change a full command queue kept from a peer is told on the next tick. A peer's listen address (from its extended handshake) is not dialled while that peer is connected. Addresses have one form: an IPv4 peer is known by its IPv4 address also when a dual-stack socket reports it IPv4-mapped (`::ffff:a.b.c.d`), as trackers and PEX give it.
-- Idle seeds (upload-only torrents): leechers find us, not the other way round. An incoming connection is never refused for want of a slot while the torrent is upload-only: at the per-torrent cap a redundant peer, else the longest-idle peer that is not interested in us (10 s or more) and has sent no HAVE for 5 minutes (a peer still downloading stays until it is done), is closed to admit it (a Cold torrent wakes for the handshake as before). Outgoing, an upload-only torrent dials nothing when the last tracker response reported zero leechers (`incomplete` = 0), and otherwise never dials an address remembered as a seed; with nothing to dial and no peers the actor sleeps. `numwant`, announce intervals, `left` and events are untouched (no scrapes, no extra announces). The global connection cap is not evicted against (redundant peers are dropped at once, their slot held at most 2 s while their last words are sent and the close drained, so it rarely fills with them).
+- Idle seeds (upload-only torrents): leechers find us, not the other way round. An incoming connection is never refused for want of a slot while the torrent is upload-only: at the per-torrent cap a redundant peer, else the longest-idle peer that is not interested in us (10 s or more) and has sent no HAVE for 5 minutes (a peer still downloading stays until it is done), is closed to admit it (a Cold torrent wakes for the handshake as before). Outgoing, an upload-only torrent dials nothing when the last tracker response reported zero leechers (`incomplete` = 0), and otherwise never dials an address remembered as a seed; with nothing to dial and no peers the actor sleeps. The seeds it knows outlive its actor: the Cold record keeps up to 64 of them (§5.1) and hands them to the next actor, whose cached peers are the others, so a wake does not dial the download's seeds again (libtorrent's `is_connect_candidate` skips seeds once finished). `numwant`, announce intervals, `left` and events are untouched (no scrapes, no extra announces).
+- Seeds reach leechers promptly (libtorrent's `torrent_connect_boost`). The new addresses of a tracker response, a DHT lookup or a wake that are not known seeds earn a complete torrent a boost of up to 24 dials at once; after it, one more dial every 2 s (4 kept in hand). At most 8 of a seeding torrent's dials are connecting at once, each bounded by the 10 s connect and handshake timeouts. Over the whole client, seeding torrents' dials take at most half the half-open slots (downloads keep the rest) and start at no more than 10 a second (a burst of 20), so 200 seeds answered in the same minute never dial a storm; a dial that has not connected counts as connecting, never as a connection. Addresses handed over all at once that are no news (cached peers, peers added with the torrent) get no boost. A Cold torrent woken by a tracker response that names leechers gets that response as a live one would, and a Warm one goes Hot for the boost (its 8 connections are the resting size of a seed nobody asked for; for a complete torrent Hot holds nothing more than the larger peer cap, and it falls back to Warm and Cold on the usual idle times, counted from the last real demand). Failed addresses are retried after 30, 60 and 90 s and forgotten after the fourth failure, from the same pace. The global connection cap is not evicted against (redundant peers are dropped at once, their slot held at most 2 s while their last words are sent and the close drained, so it rarely fills with them).
 - TCP and uTP in parallel; uTP yields to other traffic via LEDBAT.
 - Hardware SHA-1/SHA-256 (ARMv8 crypto extensions). Hashing runs on a worker pool, off the network threads.
 - Disk: sparse files by default (APFS), optional full preallocation. Writes are coalesced and `pwrite` runs on a dedicated I/O pool.
@@ -262,8 +263,15 @@ stop_when = { ratio = 3.0 }
 finished_dir = "~/Software"
 
 [default]
-stop_when = { ratio = 1.0, seed_time = "7d", mode = "any" }
+# no stop_when: seed forever (the shipped default)
 ```
+
+**The Default rule seeds forever** (the user's decision of 2026-11-11), as qBittorrent and Transmission do: low power (§5) keeps an
+idle seed cheap, and a goal is the user's to set. Until then it stopped at ratio 1.0 or 7 days, which stopped private torrents at
+ratio 0.0–0.1 after their 10-day floor while peers kept asking for them. A `rules.toml` of version 1 that still holds that old default
+written out (ratio 1.0 or 7 days, stop) is read as "seed forever" and rewritten once as version 2; any other goal or action there was
+chosen and stays. A torrent stopped at its goal whose rule now seeds forever shares again, through the start queue; one whose goal was
+only raised stays stopped (resuming it is the user's, as with a changed private floor).
 
 ### 7.5 Inactive seeds (`stop_when_idle`)
 A second, independent stop condition next to `stop_when`: **stop seeding a finished torrent that uploaded less than `below` during the last `hours` hours of seeding** (typical: 1 GB in 150 h). It makes cleaning up dead seeds automatic while busy ones keep going. Either condition may stop a torrent; off by default.
@@ -461,7 +469,7 @@ Private trackers ban clients that "report malformed stats" or "hammer our hardwa
   - Exponential backoff.
   - `failure reason` is shown to the user. One that looks permanent (unregistered torrent, banned client, bad passkey) stops re-announcing until the user acts; any other is retried slowly (30 min → 1 h → … → daily, §7C.4).
   - `warning message` is shown.
-- `numwant` is moderate (default 50). Scrape only when the UI needs it, no more often than the announce interval.
+- `numwant` is 200, what libtorrent and so qBittorrent ask (Transmission asks 80), and 0 on `stopped`; a response is read up to the same 200 peers. Scrape only when the UI needs it, no more often than the announce interval.
 
 ### 7B.4 Private torrent rules (BEP 27)
 - Private torrents use **only** the trackers in the `.torrent`.
@@ -1668,7 +1676,8 @@ Chat between devices, for people and agents (0.1.6).
     never as instructions.
 - **Notifications:** a macOS notification for a new message, per conversation ("Team › Dinner" for a topic, the
   device's name for a private message); clicking one opens it. Muted per channel (muting a channel mutes its
-  topics); @mentions reach one member.
+  topics); @mentions reach one member. A message an agent wrote makes no notification unless it answers one of the
+  user's own messages: agents talking to each other are not news (the user's rule, 2026-11-08).
 - **Agent push:** agents are woken rather than polling.
   - `seedwell chat send|list|watch --json` (watch streams new messages: ids, replies, topics, times, sender, agent
     label; private ones carry `direct` and `peer_device`).
@@ -3079,8 +3088,8 @@ Agents like Claude should be able to operate Seedwell as easily as a person: "ad
 - `trackers [<torrent>] [--tracker X]` - per torrent and tracker URL (passkeys masked): state (working / warning / backoff / halted / waiting), last announce and answer, seeders and leechers, next announce and why, failure count, the manual-announce gate (the tracker's minimum interval) and the circuit-breaker reason, plus the network state (online / offline-held).
 - `trackers log [--follow] [--torrent] [--tracker] [--event] [--errors] [--since 10m]` - the developer log.
 - `announce <torrent> [--tracker X] [--force] [--wait]` - Ask Tracker Again, as `seedwell reannounce` (§7C.4): Seedwell's own backoff never holds it back, the tracker's minimum interval does unless `--force` (one per tracker per 5 min); `--wait` prints the tracker's answer. The tracker is shown by host only, never the announce URL.
-- `peers <torrent> [--redact] [-f]` - address, client, TCP/uTP, direction, choke and interest flags, snubbed, upload-only, peer exchange, rates, requests in flight, pieces they have, time connected; totals for connected, handshaking, the connection budget and incoming accepted/refused.
-- `perf [-f]` - rates against limits (and whether a limiter is on), favorite-tracker caps, the verification gate, DHT state, port mapping (UPnP / NAT-PMP / PCP, external port, CGNAT), the process (memory, CPU, threads, open files), and the active torrents with their stalled flag and queue position.
+- `peers <torrent> [--redact] [-f]` - address, client, TCP/uTP, direction, choke and interest flags, snubbed, upload-only, peer exchange, rates, our requests in flight, what the peer asked of us on this connection (block requests received, blocks served, requests declined: while choked, for a piece we lack, uploads held, the disk queue full, dropped by a choke; and how long ago it last asked), pieces they have, time connected; totals for connected, handshaking, the connection budget and incoming accepted/refused.
+- `perf [-f]` - rates against limits (and whether a limiter is on), favorite-tracker caps, incoming connections refused by cause (no room, not a BitTorrent handshake, handshake timed out, torrent unknown or not running: an encrypted handshake for an info-hash we do not have counts here, as a plain one does; the torrent refused the peer), the verification gate, DHT state, port mapping (UPnP / NAT-PMP / PCP, external port, CGNAT), the process (memory, CPU, threads, open files), and the active torrents with their stalled flag and queue position.
 Not exposed by the engine (reported as unavailable, never guessed): the host gate's token buckets and breaker per host, a peer's source and encryption, disk queue depth and disk I/O rates.
 
 ### 9A.6 Simulated torrents (`seedwell sim`)

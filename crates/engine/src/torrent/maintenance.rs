@@ -113,9 +113,11 @@ impl Torrent {
             d = d.min((self.last_resume + self.cfg.resume_interval).saturating_duration_since(now));
         }
         // An upload-only torrent with nobody to dial (no leechers, or only known seeds) sleeps.
-        let nothing_to_dial = self.upload_only_now() && (self.no_leechers || self.pool.len() <= self.pool.seed_count());
+        let nothing_to_dial = self.upload_only_now() && (self.no_leechers || !self.pool.has_non_seed());
         if self.pool.len() > 0 && self.meta.is_some() && !nothing_to_dial {
-            d = d.min(Duration::from_secs(15));
+            // Candidates left by a spent allowance or budget (a seed's boost meeting the global pace) are
+            // dialled as the allowance comes back, not 15 s later.
+            d = d.min(if self.dials_pending { Duration::from_secs(1) } else { Duration::from_secs(15) });
         }
         d.clamp(Duration::from_millis(500), Duration::from_secs(3600))
     }
@@ -779,6 +781,13 @@ impl Torrent {
                 snubbed: p.snubbed_at.is_some(),
                 upload_only: p.upload_only,
                 has_pex: p.has_pex && self.pex_allowed(),
+                requests_received: p.shared.serving.requests.load(Ordering::Relaxed),
+                blocks_served: p.shared.serving.served.load(Ordering::Relaxed),
+                requests_rejected: p.shared.serving.rejected.load(Ordering::Relaxed),
+                last_request_secs: match p.shared.serving.last_request_ms.load(Ordering::Relaxed) {
+                    0 => None,
+                    at => Some(crate::util::unix_ms().saturating_sub(at) / 1000),
+                },
             })
             .collect();
         DetailParts { files, peers, piece_count, piece_length: piece_len, comment }

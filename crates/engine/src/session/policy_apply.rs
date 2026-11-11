@@ -98,6 +98,14 @@ impl Session {
                 self.mark_record(id);
             }
         }
+        // A torrent stopped at its goal whose rule now seeds forever (the default became "seed forever", the user's
+        // decision of 2026-11-11) shares again, through the start queue. A goal that was only raised leaves it stopped,
+        // as a changed private floor does (SPEC 7.2): resuming it is the user's.
+        let unmet: Vec<TorrentId> =
+            self.table.iter().filter(|(_, e)| e.cold.want == Want::GoalReached && !e.cold.seed_goal.is_set()).map(|(id, _)| *id).collect();
+        for id in unmet {
+            self.set_want_inner(id, Want::Active, false, true);
+        }
         self.replan();
         self.goal_check();
         // Only a change of ids or addresses can move a torrent between trackers; a renamed, recoloured

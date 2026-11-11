@@ -518,6 +518,16 @@ impl MockTracker {
     pub fn log_for(&self, ih: &[u8]) -> Vec<Announce> {
         self.log().into_iter().filter(|a| a.info_hash == ih).collect()
     }
+
+    /// List these loopback ports in the torrent's swarm, as seeds or as leechers, as if they had announced
+    /// (hosts the test runs, or nobody).
+    pub fn add_peers(&self, ih: &[u8], ports: &[u16], seed: bool) {
+        let mut g = self.state.lock().unwrap();
+        let entry = g.peers.entry(ih.to_vec()).or_default();
+        for p in ports {
+            entry.insert(*p, (seed, Instant::now()));
+        }
+    }
 }
 
 // ---- raw peers ----------------------------------------------------------------------------

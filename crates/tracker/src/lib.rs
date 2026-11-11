@@ -33,7 +33,7 @@ pub use machine::{
     AnnounceMachine, Health, Input, Intent, MachineConfig, Report, SendAnnounce, SendKind,
 };
 pub use response::{
-    AnnounceError, AnnounceResponse, ProxyBlock, RetryIn, Timing, TransportError, clamp_timing,
+    AnnounceError, AnnounceResponse, DEFAULT_NUMWANT, ProxyBlock, RetryIn, Timing, TransportError, clamp_timing,
     parse_announce_response,
 };
 pub use store::{MemoryStore, TimingKey, TimingRecord, TimingStore};

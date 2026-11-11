@@ -41,6 +41,7 @@ impl Session {
                 session_base: r.session_base,
                 seed_goal: r.seed_goal,
                 idle: r.idle.map(Box::new),
+                known_seeds: None,
                 file_prios: (!r.file_priorities.is_empty()).then(|| r.file_priorities.clone().into_boxed_slice()),
                 error: None,
                 magnet: r.magnet.clone().map(String::into_boxed_str),

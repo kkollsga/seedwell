@@ -7,9 +7,15 @@
 //!
 //! Permits are RAII: dropping one returns the slot, so a task that panics or is cancelled cannot
 //! leak capacity.
+//!
+//! Seeding torrents dial from a share of it ([`ConnectionBudget::try_seed_half_open`],
+//! [`ConnectionBudget::try_seed_dial`]): the addresses a tracker hands a seed are mostly seeds, NAT'd
+//! leechers and dead hosts, and two hundred seeds answered by their trackers in the same minute must
+//! neither dial a storm nor take every dial slot from a download.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 #[derive(Debug)]
 struct Inner {
@@ -18,10 +24,17 @@ struct Inner {
     total: AtomicUsize,
     half_open: AtomicUsize,
     incoming: AtomicUsize,
+    /// Dials seeding torrents may still start now (a token bucket), and when it was last filled.
+    seed_tokens: Mutex<(f64, Option<Instant>)>,
 }
 
 /// Incoming connections that may be reading their handshake at once.
 pub const MAX_INCOMING_HANDSHAKES: usize = 128;
+/// Dials per second all seeding torrents together may start (libtorrent's `connection_speed`, 30 a
+/// second, is for every torrent; downloads here are bounded by the half-open cap alone).
+pub const SEED_DIALS_PER_SEC: f64 = 10.0;
+/// Dials seeding torrents may start at once after a quiet spell (about one torrent's boost).
+pub const SEED_DIAL_BURST: f64 = 20.0;
 
 /// Shared budget.
 #[derive(Clone, Debug)]
@@ -48,6 +61,7 @@ impl ConnectionBudget {
             total: AtomicUsize::new(0),
             half_open: AtomicUsize::new(0),
             incoming: AtomicUsize::new(0),
+            seed_tokens: Mutex::new((SEED_DIAL_BURST, None)),
         }))
     }
 
@@ -73,6 +87,29 @@ impl ConnectionBudget {
     pub fn try_half_open(&self) -> Option<HalfOpenPermit> {
         Self::take(&self.0.half_open, self.0.max_half_open.load(Ordering::Relaxed))
             .then(|| HalfOpenPermit(self.0.clone()))
+    }
+
+    /// A half-open slot for a seeding torrent's dial: only while fewer than half the slots are taken, so
+    /// that seeds chasing leechers never hold up a download's dials.
+    pub fn try_seed_half_open(&self) -> Option<HalfOpenPermit> {
+        let share = (self.0.max_half_open.load(Ordering::Relaxed) / 2).max(1);
+        Self::take(&self.0.half_open, share).then(|| HalfOpenPermit(self.0.clone()))
+    }
+
+    /// May a seeding torrent start a dial now? Takes one of the [`SEED_DIALS_PER_SEC`] tokens.
+    pub fn try_seed_dial(&self, now: Instant) -> bool {
+        let mut g = self.0.seed_tokens.lock().unwrap_or_else(|e| e.into_inner());
+        let (tokens, at) = &mut *g;
+        if let Some(t) = *at {
+            *tokens = (*tokens + now.saturating_duration_since(t).as_secs_f64() * SEED_DIALS_PER_SEC).min(SEED_DIAL_BURST);
+        }
+        *at = Some(now);
+        if *tokens >= 1.0 {
+            *tokens -= 1.0;
+            true
+        } else {
+            false
+        }
     }
 
     /// Reserve a slot for an incoming connection's handshake, or `None` when too many are pending.
@@ -158,6 +195,35 @@ mod tests {
         drop(incoming);
         assert_eq!(b.half_open(), 2);
         assert!(b.try_half_open().is_none(), "incoming slots are not dial slots");
+    }
+
+    /// Seeds chasing the leechers a tracker named must not take every dial slot: a download that wants
+    /// peers at the same moment still finds half of them free.
+    #[test]
+    fn seeding_dials_leave_half_the_dial_slots_to_downloads() {
+        let b = ConnectionBudget::new(1000, 8);
+        let seeds: Vec<_> = std::iter::from_fn(|| b.try_seed_half_open()).take(100).collect();
+        assert_eq!(seeds.len(), 4);
+        let downloads: Vec<_> = std::iter::from_fn(|| b.try_half_open()).take(100).collect();
+        assert_eq!(downloads.len(), 4);
+        drop(downloads);
+        assert!(b.try_seed_half_open().is_none(), "the seeds' share is still taken");
+    }
+
+    /// Two hundred seeding torrents answered at once must not dial a storm: over the whole client their
+    /// dials start at no more than `SEED_DIALS_PER_SEC` after the first burst.
+    #[test]
+    fn seeding_dials_are_paced_over_the_whole_client() {
+        let b = ConnectionBudget::new(1000, 1000);
+        let t0 = Instant::now();
+        let burst = (0..1000).filter(|_| b.try_seed_dial(t0)).count();
+        assert_eq!(burst, SEED_DIAL_BURST as usize);
+        let later = t0 + std::time::Duration::from_secs(2);
+        let more = (0..1000).filter(|_| b.try_seed_dial(later)).count();
+        assert_eq!(more, (2.0 * SEED_DIALS_PER_SEC) as usize);
+        let much_later = later + std::time::Duration::from_secs(3600);
+        let refilled = (0..1000).filter(|_| b.try_seed_dial(much_later)).count();
+        assert_eq!(refilled, SEED_DIAL_BURST as usize, "a quiet hour saves up no more than one burst");
     }
 
     #[test]

@@ -111,3 +111,39 @@ async fn thirty_simultaneous_encrypted_handshakes_are_all_accepted() {
     assert_eq!(seeder.h.diagnostics().incoming_refused, 0, "{:?}", seeder.h.diagnostics());
     assert!(seeder.h.diagnostics().mse_accepted >= 30);
 }
+
+/// `debug perf` lumped every failed incoming handshake together: an encrypted one for an info-hash we do
+/// not have (a peer looking for a torrent we removed) read as a broken or a timed-out handshake. It counts
+/// as "torrent unknown", as a plain one does, and a peer that says nothing counts as a timeout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refused_handshakes_say_whether_the_torrent_was_unknown_or_the_peer_too_slow() {
+    let ours = standard_torrent(300_000, None, false, 311);
+    let theirs = standard_torrent(300_000, None, false, 312);
+    let seeder = node(|c| {
+        c.encryption = Enc::Require;
+        c.handshake_timeout = Duration::from_millis(500);
+    })
+    .await;
+    ours.write_to(seeder.dir.path());
+    seeder.h.add_torrent_file(ours.bytes.clone(), AddOptions::default()).await.unwrap();
+    wait_done(&seeder, &ours.id, 30).await;
+
+    // An encrypted handshake for a torrent the seeder does not have.
+    let other = node(|c| c.encryption = Enc::Require).await;
+    other.h.add_torrent_file(theirs.bytes.clone(), AddOptions { peers: vec![seeder.addr()], ..Default::default() }).await.unwrap();
+    let d = wait_for("refused", 15, || async {
+        let d = seeder.h.diagnostics();
+        (d.refused_torrent >= 1).then_some(d)
+    })
+    .await;
+    assert_eq!((d.refused_handshake, d.refused_timeout), (0, 0), "{d:?}");
+
+    // A peer that connects and says nothing.
+    let _silent = tokio::net::TcpStream::connect(seeder.addr()).await.unwrap();
+    let d = wait_for("timed out", 15, || async {
+        let d = seeder.h.diagnostics();
+        (d.refused_timeout >= 1).then_some(d)
+    })
+    .await;
+    assert_eq!(d.refused_handshake, 0, "{d:?}");
+}

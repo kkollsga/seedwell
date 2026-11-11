@@ -63,6 +63,11 @@ struct SidebarView: View {
                     .buttonStyle(.plain)
                     .help(add.help)
                     .accessibilityIdentifier("chat-new-channel")
+                    // The section's own line, not a row in it: its "+" in the column of the top level's disclosure
+                    // triangles. The outline list puts a plain row's label where the channels' icons are, which is
+                    // about where a grouped channel's triangle is, so it read as nested under the group (the user's
+                    // report, 2026-11-08).
+                    .padding(.leading, -Theme.Sidebar.disclosureWidth)
                 }
             }
             // Private conversations (end-to-end encrypted, carried by the channels' members).

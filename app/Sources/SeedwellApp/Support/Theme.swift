@@ -106,6 +106,11 @@ enum Theme {
         static let hero: CGFloat = 40
     }
 
+    enum Sidebar {
+        /// What the outline list sets a plain row's label in by, past the column of the disclosure triangles.
+        static let disclosureWidth: CGFloat = 16
+    }
+
     /// The same scale for AppKit (the menu bar menu, alerts): the menu's own font for its rows, and the sizes above.
     enum NS {
         static var menu: NSFont { .menuFont(ofSize: 0) }

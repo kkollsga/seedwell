@@ -277,7 +277,7 @@ impl Notices {
         let core: &Core = &self.core;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let seen = &mut state.seen;
-        off_runtime(move || chat_step(seen, conversations(core), &view, |p| last_message(core, p)))
+        off_runtime(move || chat_step(seen, conversations(core), &view, |p| last_message(core, p), |p, id| mine_among_recent(core, p, id)))
     }
 }
 
@@ -742,18 +742,33 @@ fn last_message(core: &Core, place: &LibraryPlace) -> Option<SyncMessage> {
     }
 }
 
+/// How far back an agent's reply is looked up for the user's message it answers.
+const REPLY_LOOKBACK: u32 = 200;
+
+/// Whether message `id` is among the recent messages of `place` and is this device's own.
+fn mine_among_recent(core: &Core, place: &LibraryPlace, id: &str) -> bool {
+    let recent = match place {
+        LibraryPlace::Chat { channel_id, topic_id } => core.chat_messages(channel_id.clone(), topic_id.clone(), None, REPLY_LOOKBACK),
+        LibraryPlace::Direct { device_id } => core.chat_direct_messages(device_id.clone(), None, REPLY_LOOKBACK),
+        _ => return false,
+    };
+    recent.iter().any(|m| m.id == id && m.is_me)
+}
+
 /// The conversation is on screen: the app in front with the window on it.
 fn showing(view: &NoticeView, place: &LibraryPlace) -> bool {
     view.in_front && view.window_place.as_ref() == Some(place)
 }
 
 /// The banners for the conversations whose unread count went up since `seen`, which becomes the counts of now. A muted
-/// channel's counts are kept too, so unmuting it announces nothing old.
+/// channel's counts are kept too, so unmuting it announces nothing old. A message an agent wrote makes none unless it
+/// answers one of the user's own (`mine(place, id)`: message `id` there is this device's).
 pub(crate) fn chat_step(
     seen: &mut Option<HashMap<LibraryPlace, u32>>,
     convs: Vec<Conversation>,
     view: &NoticeView,
     last: impl Fn(&LibraryPlace) -> Option<SyncMessage>,
+    mine: impl Fn(&LibraryPlace, &str) -> bool,
 ) -> Vec<Notice> {
     let before = seen.take();
     let mut now = HashMap::with_capacity(convs.len());
@@ -765,6 +780,11 @@ pub(crate) fn chat_step(
             continue;
         }
         let Some(m) = last(&c.place).filter(|m| !m.is_me) else { continue };
+        // Agents talking to each other are not news for the user (the user's rule, 2026-11-08: every message in the
+        // agents' channel made a banner); an agent answering the user is.
+        if m.agent.is_some() && !m.reply_to.as_deref().is_some_and(|r| mine(&c.place, r)) {
+            continue;
+        }
         let text = chat_notification_text(c.title, m);
         let key = match &c.place {
             LibraryPlace::Chat { channel_id, topic_id } => format!("chat-{channel_id}/{}", topic_id.as_deref().unwrap_or_default()),

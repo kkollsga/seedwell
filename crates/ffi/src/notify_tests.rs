@@ -319,7 +319,7 @@ const AWAY: NoticeView = NoticeView { in_front: false, window_place: None };
 
 /// One poll with these counts, each conversation's newest message from another device.
 fn poll(seen: &mut Option<HashMap<LibraryPlace, u32>>, convs: Vec<Conversation>, view: &NoticeView) -> Vec<Notice> {
-    chat_step(seen, convs, view, |_| Some(message("Hello there", false)))
+    chat_step(seen, convs, view, |_| Some(message("Hello there", false)), |_, _| false)
 }
 
 #[test]
@@ -353,9 +353,9 @@ fn topics_and_private_conversations_have_their_own_banners() {
 fn my_own_message_a_muted_channel_and_the_conversation_on_screen_get_none() {
     let mut seen = None;
     poll(&mut seen, vec![conv(general("Team"), 0, "Team", false)], &AWAY);
-    let mine = chat_step(&mut seen, vec![conv(general("Team"), 1, "Team", false)], &AWAY, |_| Some(message("from me", true)));
+    let mine = chat_step(&mut seen, vec![conv(general("Team"), 1, "Team", false)], &AWAY, |_| Some(message("from me", true)), |_, _| false);
     assert!(mine.is_empty(), "sent from this device (another of my devices' copy counts as read here)");
-    assert!(chat_step(&mut seen, vec![conv(general("Team"), 2, "Team", false)], &AWAY, |_| None).is_empty(), "no message to show");
+    assert!(chat_step(&mut seen, vec![conv(general("Team"), 2, "Team", false)], &AWAY, |_| None, |_, _| false).is_empty(), "no message to show");
 
     let front = NoticeView { in_front: true, window_place: Some(general("Team")) };
     assert!(poll(&mut seen, vec![conv(general("Team"), 3, "Team", false)], &front).is_empty(), "the user is looking at it");
@@ -533,4 +533,20 @@ fn a_free_that_kept_files_says_how_many_and_why() {
     assert!(one.key.as_ref().is_some_and(|k| k.len() <= 64));
     let elsewhere = evict_notice("another", Some("Docs"), &evicted(vec![kept("x", KEPT_PINNED)], Vec::new()), true).unwrap();
     assert_ne!(elsewhere.key, one.key);
+}
+
+/// Failure: every message agents wrote to each other in their channel made a banner (the user's report, 2026-11-08);
+/// or, the other way, an agent's answer to the user's own message made none.
+#[test]
+fn an_agents_message_makes_a_banner_only_when_it_answers_the_user() {
+    let agent = |reply_to: Option<&str>| SyncMessage { agent: Some("claude-code".into()), reply_to: reply_to.map(Into::into), ..message("Bundle sent", false) };
+    let mut seen = None;
+    let convs = |n| vec![conv(general("Dev"), n, "Dev", false)];
+    chat_step(&mut seen, convs(0), &AWAY, |_| None, |_, _| false);
+    assert!(chat_step(&mut seen, convs(1), &AWAY, |_| Some(agent(None)), |_, _| false).is_empty(), "agent to agent");
+    let to_another = chat_step(&mut seen, convs(2), &AWAY, |_| Some(agent(Some("theirs"))), |_, id| id == "mine");
+    assert!(to_another.is_empty(), "an agent answering another agent");
+    let to_me = chat_step(&mut seen, convs(3), &AWAY, |_| Some(agent(Some("mine"))), |_, id| id == "mine");
+    assert_eq!(to_me.len(), 1, "an agent answering the user");
+    assert_eq!(chat_step(&mut seen, convs(4), &AWAY, |_| Some(message("From a person", false)), |_, _| false).len(), 1, "a person");
 }

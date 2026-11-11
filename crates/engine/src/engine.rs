@@ -2,7 +2,7 @@
 
 use std::net::{SocketAddr, SocketAddrV4};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncReadExt;
@@ -380,51 +380,59 @@ fn admit(sh: &Arc<Shared>, stream: PeerIo, addr: SocketAddr) {
         let res = tokio::time::timeout(timeout, accept_handshake(stream, &sh2)).await;
         drop(half);
         match res {
-            Ok(Some((stream, hs))) => {
+            Ok(Ok((stream, hs))) => {
                 let _ = sh2.session.send(SessionMsg::Incoming { stream, hs, addr, permit }).await;
             }
-            _ => sh2.diag.refuse(Refusal::Handshake),
+            Ok(Err(why)) => sh2.diag.refuse(why),
+            Err(_) => sh2.diag.refuse(Refusal::Timeout),
         }
     });
 }
 
 /// The BitTorrent handshake of an incoming connection: plain, or inside an encrypted handshake
-/// (MSE) when the first bytes are not "BitTorrent protocol" and the policy allows it.
-async fn accept_handshake(mut stream: PeerIo, sh: &Arc<Shared>) -> Option<(PeerIo, Handshake)> {
+/// (MSE) when the first bytes are not "BitTorrent protocol" and the policy allows it. A failure says
+/// why (`seedwell debug perf`): an encrypted handshake for an info-hash we do not have is a
+/// [`Refusal::Torrent`], as a plain one is (the session refuses that one); anything else that is not a
+/// handshake is a [`Refusal::Handshake`]. The caller's deadline makes a [`Refusal::Timeout`].
+async fn accept_handshake(mut stream: PeerIo, sh: &Arc<Shared>) -> Result<(PeerIo, Handshake), Refusal> {
     const PLAIN_PREFIX: &[u8; 20] = b"\x13BitTorrent protocol";
     let policy = sh.cfg().encryption;
     let mut first = [0u8; 20];
     if stream.read_exact(&mut first).await.is_err() {
-        return None;
+        return Err(Refusal::Handshake);
     }
     if &first == PLAIN_PREFIX {
         if policy == EncryptionPolicy::Require {
             reject(stream).await;
-            return None;
+            return Err(Refusal::Handshake);
         }
         let mut buf = [0u8; HANDSHAKE_LEN];
         buf[..20].copy_from_slice(&first);
-        stream.read_exact(&mut buf[20..]).await.ok()?;
+        stream.read_exact(&mut buf[20..]).await.map_err(|_| Refusal::Handshake)?;
         return match Handshake::decode(&buf) {
-            Ok(Some(h)) => Some((stream, h)),
-            _ => None,
+            Ok(Some(h)) => Ok((stream, h)),
+            _ => Err(Refusal::Handshake),
         };
     }
     if policy == EncryptionPolicy::Off {
         // Not a BitTorrent handshake and encryption is off: send the peer away as before.
         reject(stream).await;
-        return None;
+        return Err(Refusal::Handshake);
     }
     let tx = sh.session.clone();
+    let unknown = AtomicBool::new(false);
+    let unknown_ref = &unknown;
     let accepted = crate::mse::respond(stream, &first, policy, &sh.mse_slots, |req2| async move {
         let (reply, rx) = oneshot::channel();
         tx.send(SessionMsg::MseLookup { target: req2, reply }).await.ok()?;
-        rx.await.ok().flatten()
+        let found = rx.await.ok().flatten();
+        unknown_ref.store(found.is_none(), Ordering::Relaxed);
+        found
     })
     .await
-    .ok()?;
+    .map_err(|_| if unknown.load(Ordering::Relaxed) { Refusal::Torrent } else { Refusal::Handshake })?;
     sh.diag.mse_accepted.fetch_add(1, Ordering::Relaxed);
-    Some((accepted.io, accepted.handshake))
+    Ok((accepted.io, accepted.handshake))
 }
 
 /// Close a connection whose first bytes were not a BitTorrent handshake (an encrypted handshake,
@@ -1231,6 +1239,7 @@ impl EngineHandle {
             incoming_refused: g(&d.incoming_refused),
             refused_busy: g(&d.refused[Refusal::Busy as usize]),
             refused_handshake: g(&d.refused[Refusal::Handshake as usize]),
+            refused_timeout: g(&d.refused[Refusal::Timeout as usize]),
             refused_torrent: g(&d.refused[Refusal::Torrent as usize]),
             refused_peer: g(&d.refused[Refusal::Peer as usize]),
             rechecks: g(&d.rechecks),

@@ -83,7 +83,7 @@ another port, or when the UDP port could not be bound (then the engine runs TCP-
 
 Root causes of the failed hot campaign (`bench/scripts/tests/repro-seeder-reconnect.py`), all covered by `tests/seeding.rs`:
 
-1. **A stopped torrent refuses handshakes.** The default rule is "ratio 1.0 or 7 days, then stop"; the first Transmission leecher took
+1. **A stopped torrent refuses handshakes.** The default rule was then "ratio 1.0 or 7 days, then stop" (it seeds forever since 2026-11-11); the first Transmission leecher took
    a torrent once, the goal was reached and the torrent was stopped (the tracker saw `stopped` 1.2 s after the leecher's `completed`),
    so the next leecher process was never answered. The engine is right; the benchmark seeder must not have a goal.
    `bench_client` writes `rules.toml` with the goal `forever` when the state directory has none.

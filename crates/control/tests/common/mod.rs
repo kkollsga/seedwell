@@ -123,7 +123,16 @@ impl Backend for Mock {
                 status: "failed: https://t.example.org/a/0123456789abcdef0123456789abcdef/announce?passkey=SECRETKEY refused".into(),
                 ..Default::default()
             }],
-            peers: (0..150).map(|i| PeerDto { addr: format!("10.0.0.{}:6881", i % 250), ..Default::default() }).collect(),
+            peers: (0..150)
+                .map(|i| PeerDto {
+                    addr: format!("10.0.0.{}:6881", i % 250),
+                    requests_received: 3 * i,
+                    blocks_served: 2 * i,
+                    requests_rejected: i,
+                    last_request_secs: (i > 0).then_some(u64::from(i)),
+                    ..Default::default()
+                })
+                .collect(),
             ..Default::default()
         })
     }

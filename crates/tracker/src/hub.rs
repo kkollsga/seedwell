@@ -95,7 +95,7 @@ pub struct TorrentSpec {
 }
 
 impl TorrentSpec {
-    /// Spec with the SPEC defaults (numwant 50).
+    /// Spec with the SPEC defaults (numwant [`crate::DEFAULT_NUMWANT`]).
     pub fn new(
         info_hash: InfoHash20,
         peer_id: PeerId20,
@@ -108,7 +108,7 @@ impl TorrentSpec {
             peer_id,
             key,
             port,
-            numwant: 50,
+            numwant: crate::DEFAULT_NUMWANT,
             ipv4: None,
             ipv6: None,
             crypto: Crypto::Off,

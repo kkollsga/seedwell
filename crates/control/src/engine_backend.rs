@@ -260,6 +260,10 @@ fn detail_dto(d: &TorrentDetail) -> DetailDto {
                 snubbed: p.snubbed,
                 upload_only: p.upload_only,
                 has_pex: p.has_pex,
+                requests_received: p.requests_received,
+                blocks_served: p.blocks_served,
+                requests_rejected: p.requests_rejected,
+                last_request_secs: p.last_request_secs,
             })
             .collect(),
         piece_count: d.piece_count,
@@ -797,6 +801,7 @@ impl Backend for EngineBackend {
             ("incoming_refused", d.incoming_refused),
             ("refused_busy", d.refused_busy),
             ("refused_handshake", d.refused_handshake),
+            ("refused_timeout", d.refused_timeout),
             ("refused_torrent", d.refused_torrent),
             ("refused_peer", d.refused_peer),
             ("rechecks", d.rechecks),

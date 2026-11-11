@@ -674,7 +674,7 @@ public partial class App : Application
                 switch (arg(2))
                 {
                     case "limits" when ulong.TryParse(arg(3), out var down) && ulong.TryParse(arg(4), out var up): f.SetLimits(t, down, up); await Task.Delay(1200); break;
-                    case "pex": f.Run(t, new TrackerInfoCommand.SetPex(arg(3) == "on")); await Task.Delay(1000); break;
+                    case "pex": f.Run(t, new TrackerInfoCommand.SetPex(arg(3) == "on")); await CoreCalls.Idle(); break;
                     case "add":
                         f.Run(t, new TrackerInfoCommand.AddAddress());
                         await Task.Delay(500);
@@ -1547,10 +1547,10 @@ public partial class App : Application
                         case "rows": result = sp2.QaRows() + "; "; break;
                         case "made": result = $"made {SettingsPage.Made}; "; break;
                         case "row": result = sp2.QaRow(Arg(2)) + "; "; break;
-                        case "set": result = sp2.QaSet(Arg(2), w.Skip(3).ToArray()) + "; "; await Task.Delay(700); await CoreCalls.Idle(); break;
+                        case "set": result = sp2.QaSet(Arg(2), w.Skip(3).ToArray()) + "; "; sp2.QaSaveNow(); await CoreCalls.Idle(); break;
                         // The rules editor: rules [status | section rules|trackers | select <title> | add | remove | save | revert |
                         // move <from> <to> | new-tracker <host>]; its rows are set with set <row> as Settings' are.
-                        case "rules": result = sp2.QaRulesCommand(w.Skip(2).ToArray()) + "; "; await Task.Delay(900); await CoreCalls.Idle(); result += sp2.QaRules() + "; "; break;
+                        case "rules": result = sp2.QaRulesCommand(w.Skip(2).ToArray()) + "; "; sp2.QaSaveNow(); await CoreCalls.Idle(); result += sp2.QaRules() + "; "; break;
                     }
                     await Quiet.Settle(LibraryWindow.Content);
                     result += sp2.QaDescribe();
@@ -1729,14 +1729,14 @@ public partial class App : Application
                     switch (Arg(1))
                     {
                         case "type": cp.QaType(string.Join(' ', w.Skip(2))); break;
-                        case "send": result = await cp.Send() ? "sent; " : "not sent; "; await Task.Delay(300); break;
+                        case "send": result = await cp.Send() ? "sent; " : "not sent; "; break;
                         case "reply": cp.QaReply(int.TryParse(Arg(2), out var rn) ? rn : -1); break;
-                        case "attach": cp.Attach(new ChatImageInput(Path.GetFileName(string.Join(' ', w.Skip(2))), string.Join(' ', w.Skip(2)), null)); await Task.Delay(1000); break;
+                        case "attach": await cp.Attach(new ChatImageInput(Path.GetFileName(string.Join(' ', w.Skip(2))), string.Join(' ', w.Skip(2)), null)); break;
                         case "menu": result = cp.QaMenu(Arg(2)) + "; "; await Quiet.Settle(LibraryWindow.Content); break;
                         case "menu-text": result = cp.QaMenuText() + "; "; break;
-                        case "members": cp.QaMembers(); await Task.Delay(1500); break;
+                        case "members": await cp.QaMembers(); break;
                         case "member-rows": result = $"rows {cp.QaMemberRows()}; "; break;
-                        case "member": result = cp.QaMemberPress(Arg(2), string.Join(' ', w.Skip(3))) + "; "; await Task.Delay(1000); break;
+                        case "member": result = await cp.QaMemberPress(Arg(2), string.Join(' ', w.Skip(3))) + "; "; break;
                         case "members-shot":
                             var panelDir = Path.Combine(Path.GetDirectoryName(foldsFile) ?? "", "qa");
                             Directory.CreateDirectory(panelDir);
@@ -1768,13 +1768,12 @@ public partial class App : Application
                             break;
                         case "tag":
                             if (CardAt(Arg(2))?.TagMenu?.Entries.OfType<ChatPageMenuEntry.Item>().FirstOrDefault(t => t.Title.StartsWith(Arg(3))) is not ChatPageMenuEntry.Item tagItem) { result = "no such tag; "; break; }
-                            cp.Run(tagItem.Command);
-                            await Task.Delay(800);
+                            await cp.Run(tagItem.Command);
                             break;
                         case "slow-read": ChatPage.QaSlowReadMs = int.TryParse(Arg(2), out var slowMs) ? slowMs : 0; break;
                         case "focus": cp.QaFocus(int.TryParse(Arg(2), out var caretAt) ? caretAt : 0); break;
                         case "redraw": await cp.QaRedraw(); break;
-                        case "click-send": result = await cp.QaClickSend() ? "sent; " : "not sent; "; await Task.Delay(300); break;
+                        case "click-send": result = await cp.QaClickSend() ? "sent; " : "not sent; "; break;
                     }
                     await cp.Read();
                     var cm = cp.Model;
@@ -1799,10 +1798,10 @@ public partial class App : Application
                     switch (Arg(1))
                     {
                         case "press": result = page.QaPress(Arg(2), w.Length > 3 ? FolderId(Arg(3)) : null) + "; "; break;
-                        case "member": result = page.QaMemberPress(Arg(2), string.Join(' ', w.Skip(3))) + "; "; await Task.Delay(1000); break;
-                        case "members": await Task.Delay(300); break;
+                        case "member": result = await page.QaMemberPress(Arg(2), string.Join(' ', w.Skip(3))) + "; "; break;
+                        case "members": await page.QaLoadMembers(); break;
                         case "trash": page.QaTrash(Arg(2) == "on"); break;
-                        case "remove": page.Run(new SyncPageCommand.Remove(), page.Chosen); await Task.Delay(1000); break;
+                        case "remove": await page.Run(new SyncPageCommand.Remove(), page.Chosen); break;
                         case "choose": page.Choose(FolderId(Arg(2))); break;
                     }
                     await Quiet.Settle(LibraryWindow.Content);
@@ -1902,14 +1901,14 @@ public partial class App : Application
                         case "readonly": sd.QaReadOnly(Arg(2) == "on"); break;
                         case "scroll-end": sd.QaScrollEnd(); await Quiet.Settle(LibraryWindow.Content); break;
                         case "copy": result = await sd.Copy() ? "copied" : "not copied"; break;
-                        case "revoke": sd.QaRevokeFirst(); await Task.Delay(500); break;
-                        case "for": sd.QaShareFor(uint.TryParse(Arg(2), out var forDays) ? forDays : 7); await Task.Delay(500); break;
-                        case "noend": sd.QaNoEnd(); await Task.Delay(500); break;
+                        case "revoke": await sd.QaRevokeFirst(); break;
+                        case "for": await sd.QaShareFor(uint.TryParse(Arg(2), out var forDays) ? forDays : 7); break;
+                        case "noend": await sd.QaNoEnd(); break;
                         // extend <days>: as Extend's menu does. refresh: the core's refresh_ms ran out. dropdown open|close: the first drop-down, as a click leaves it.
                         // focus <label>: that control takes the keyboard's focus.
                         case "focus": result = sd.QaFocus(Arg(2)) ? "focused" : "not focused"; await Quiet.Settle(LibraryWindow.Content); break;
-                        case "tooltip": sd.QaTooltip(Arg(2) == "open"); await Quiet.Settle(LibraryWindow.Content); await Task.Delay(300); break;
-                        case "extend": sd.QaExtend(uint.TryParse(Arg(2), out var extendDays) ? extendDays : 7); await Task.Delay(500); break;
+                        case "tooltip": await sd.QaTooltip(Arg(2) == "open"); await Quiet.Settle(LibraryWindow.Content); break;
+                        case "extend": await sd.QaExtend(uint.TryParse(Arg(2), out var extendDays) ? extendDays : 7); break;
                         case "refresh": await sd.Refresh(); break;
                         case "dropdown": sd.QaDropDown(Arg(2) == "open"); await Quiet.Settle(LibraryWindow.Content); break;
                         case "cancel": sd.QaCancel(); break;

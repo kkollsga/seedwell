@@ -173,7 +173,8 @@ impl Session {
                     if let Some(l) = &e.live {
                         let _ = l.tx.try_send(TorrentMsg::AddPeers(peers));
                     } else if e.cold.want == Want::Active && !e.cold.has(F_QUEUED) && !e.cold.awaiting() && !self.mover.blocks(&id) && !self.boot.holds(&id) {
-                        self.spawn_torrent(id, Vec::new(), peers);
+                        // Handed over as news once the actor is up: a seed dials them at once (a boost).
+                        self.spawn_torrent(id, vec![TorrentMsg::AddPeers(peers)], Vec::new());
                     }
                 }
             }
@@ -498,9 +499,12 @@ impl Session {
         if let Some(p) = self.paused_peers.remove(&id) {
             peers.extend(p);
         }
+        // Seeds the torrent knew when it went Cold: the actor does not dial them while it only uploads, and
+        // the cached peers it starts with are the others (the cache still holds the download's seeds).
+        let known_seeds = c.take_known_seeds();
         if !fresh
             && let Ok(p) = self.sh.store.load_peers(&id) {
-                peers.extend(p.into_iter().take(32));
+                peers.extend(p.into_iter().filter(|a| !known_seeds.contains(&crate::net::canonical(*a))).take(32));
             }
         let incomplete = !c.complete() && !c.has(F_WANTED_DONE);
         let tier = if incomplete || fresh { Tier::Hot } else { Tier::Warm };
@@ -525,6 +529,7 @@ impl Session {
             fresh,
             force_recheck: force,
             peers,
+            known_seeds,
             first,
             up_limit: c.up_limit(),
             group: ColdTorrent::opt(c.tracker_profile).and_then(|i| self.ids.get(i)).and_then(|p| self.sh.groups.get(p)),
@@ -580,6 +585,7 @@ impl Session {
         }
         let Some(live) = e.live.take() else { return };
         if let Some(info) = info {
+            e.cold.keep_known_seeds(&info.seeds);
             if let Some(r) = info.resume {
                 self.dirty_resume(id, Some(r));
             }

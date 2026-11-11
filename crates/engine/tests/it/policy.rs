@@ -288,3 +288,34 @@ async fn resume_after_the_goal_keeps_sharing() {
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert_ne!(n.state(&t.id).await, Some(TorrentState::Paused), "still sharing after a goal check");
 }
+
+/// Failure: a torrent stopped at its goal stayed stopped after its rule came to seed forever (the Default rule became
+/// "seed forever" on 2026-11-11, and the user's torrents stopped at ratio 0.0–0.1 kept refusing the peers asking for
+/// them); or one whose goal was only raised started again by itself (resuming that is the user's, SPEC 7.2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_torrent_stopped_at_its_goal_shares_again_when_its_rule_seeds_forever() {
+    let (a, b) = (standard_named("forever-a", 0, None, false, 351), standard_named("raised-b", 0, None, false, 352));
+    let mk = |id: &str, goal: SeedingGoal| {
+        let mut r = rule(id);
+        r.goal = Some(goal);
+        r
+    };
+    let n = node(|_| {}).await;
+    n.h.apply_policy(policy(vec![mk("fa", SeedingGoal::StopWhenFinished), mk("rb", SeedingGoal::StopWhenFinished)], vec![]));
+    for t in [&a, &b] {
+        t.write_to(n.dir.path());
+    }
+    n.h.add_torrent_file(a.bytes.clone(), AddOptions { rule: Some("fa".into()), ..Default::default() }).await.unwrap();
+    n.h.add_torrent_file(b.bytes.clone(), AddOptions { rule: Some("rb".into()), ..Default::default() }).await.unwrap();
+    wait_for("both stopped at their goal", 30, || async {
+        (n.state(&a.id).await? == TorrentState::Paused && n.state(&b.id).await? == TorrentState::Paused).then_some(())
+    })
+    .await;
+    n.h.apply_policy(policy(vec![mk("fa", SeedingGoal::Forever), mk("rb", SeedingGoal::Ratio { ratio: 5.0 })], vec![]));
+    wait_for("the one that seeds forever shares", 30, || async {
+        matches!(n.state(&a.id).await?, TorrentState::LowPower | TorrentState::Seeding).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(n.state(&b.id).await, Some(TorrentState::Paused), "a raised goal leaves it stopped");
+}

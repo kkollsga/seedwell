@@ -145,11 +145,7 @@ impl Torrent {
                         let _ = reply.send(self.shutdown_info());
                         return None;
                     }
-                    Some(TorrentMsg::AddPeers(v)) => {
-                        for a in v {
-                            self.pool.add(a);
-                        }
-                    }
+                    Some(TorrentMsg::AddPeers(v)) => self.offer_peers(v),
                     Some(TorrentMsg::Cmd(TorrentCmd::SetFilePriorities(p))) => {
                         self.pending_prios = Some(p);
                     }
@@ -162,9 +158,7 @@ impl Torrent {
                     Some(TorrentMsg::Incoming(c)) => self.answer_early(c),
                     Some(TorrentMsg::TrackerPeers(v, incomplete)) => {
                         self.no_leechers = incomplete == Some(0);
-                        for a in v {
-                            self.pool.add(a);
-                        }
+                        self.offer_peers(v);
                     }
                     // Nothing else can come before the torrent is ready.
                     Some(_) => {}

@@ -60,7 +60,7 @@ pub struct MachineConfig {
     pub key: u32,
     /// Listening port.
     pub port: u16,
-    /// Peers requested on non-`stopped` announces (default 50).
+    /// Peers requested on non-`stopped` announces (default [`crate::DEFAULT_NUMWANT`]; 0 on `stopped`).
     pub numwant: u32,
     /// Our IPv4 address, announced as `ipv4=` only if explicitly configured.
     pub ipv4: Option<Ipv4Addr>,
@@ -122,7 +122,7 @@ impl MachineConfig {
             peer_id,
             key,
             port,
-            numwant: 50,
+            numwant: crate::DEFAULT_NUMWANT,
             ipv4: None,
             ipv6: None,
             crypto: Crypto::Off,

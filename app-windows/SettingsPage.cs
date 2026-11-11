@@ -1071,6 +1071,13 @@ sealed partial class SettingsPage
         return $"tab {model.Tab}, tabs [{string.Join(",", model.Tabs.Select(t => t.Tab))}], blocks [{string.Join(",", model.Blocks.Select(b => b.GetType().Name))}], rows {rows.Count()}, banner {(model.Banner is null ? "none" : "yes")}";
     }
 
+    /// <summary>QA: a save still waiting for its timer goes now (the commands then reach the core's lane in order).</summary>
+    internal void QaSaveNow()
+    {
+        if (saveSettings.IsRunning) SaveSettings();
+        if (saveSync.IsRunning) SaveSync();
+    }
+
     /// <summary>QA: what a control of row <paramref name="rowId"/> would send: on|off for a switch, an option id, field text (and unit), a button's title.</summary>
     internal string QaSet(string rowId, string[] value)
     {

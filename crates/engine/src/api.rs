@@ -1186,6 +1186,15 @@ pub struct PeerInfo {
     pub upload_only: bool,
     /// The peer announced it supports peer exchange.
     pub has_pex: bool,
+    /// Diagnostics: block requests the peer sent us on this connection.
+    pub requests_received: u32,
+    /// Diagnostics: blocks we queued to the peer in answer.
+    pub blocks_served: u32,
+    /// Diagnostics: its requests we declined (choked, a piece we lack, uploads held, the disk queue full,
+    /// dropped by a choke).
+    pub requests_rejected: u32,
+    /// Diagnostics: seconds since its last request (`None`: it never sent one).
+    pub last_request_secs: Option<u64>,
 }
 
 /// Everything about one torrent (the Get Info popover and `get_transfer`).
@@ -1827,9 +1836,12 @@ pub struct Diagnostics {
     pub incoming_refused: u64,
     /// Of `incoming_refused`: no room (connection cap, too many handshakes pending).
     pub refused_busy: u64,
-    /// Of `incoming_refused`: the handshake timed out or failed.
+    /// Of `incoming_refused`: the handshake was not a BitTorrent one, or the peer closed during it.
     pub refused_handshake: u64,
-    /// Of `incoming_refused`: the torrent is unknown or not running.
+    /// Of `incoming_refused`: no complete handshake arrived in time.
+    pub refused_timeout: u64,
+    /// Of `incoming_refused`: the torrent is unknown or not running (an encrypted handshake for an
+    /// info-hash we do not have included).
     pub refused_torrent: u64,
     /// Of `incoming_refused`: the torrent refused the peer (banned, checking, full).
     pub refused_peer: u64,

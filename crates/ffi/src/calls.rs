@@ -323,7 +323,9 @@ mod tests {
         });
         let mut f = pin!(f);
         let (took, p) = first_poll(f.as_mut());
-        assert!(p.is_pending() && took < Duration::from_millis(20), "{took:?}");
+        // A call run in place would take the job's 300 ms; the bound leaves room for a preempted test thread at utility
+        // priority (it once took over 20 ms in the timing pass, 2026-11-11).
+        assert!(p.is_pending() && took < Duration::from_millis(100), "{took:?}");
         assert_eq!(wait(f), 7);
     }
 

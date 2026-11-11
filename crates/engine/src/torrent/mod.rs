@@ -140,6 +140,8 @@ impl Switch {
 pub(crate) struct ShutdownInfo {
     pub resume: Option<ResumeRecord>,
     pub peers: Vec<SocketAddr>,
+    /// Addresses known to be seeds (at most [`MAX_COLD_SEEDS`]), for the Cold record (SPEC §5.1).
+    pub seeds: Vec<SocketAddr>,
 }
 
 /// Parts of `TorrentDetail` only the actor knows.
@@ -260,6 +262,8 @@ pub(crate) struct TorrentInit {
     pub fresh: bool,
     pub force_recheck: bool,
     pub peers: Vec<SocketAddr>,
+    /// Addresses the Cold record knew as seeds: not dialled while the torrent is upload-only.
+    pub known_seeds: Vec<SocketAddr>,
     pub first: Vec<TorrentMsg>,
     pub up_limit: Option<u64>,
     /// The shared caps of the torrent's favorite tracker, if any.
@@ -289,8 +293,10 @@ pub(crate) struct PeerPool {
     queue: VecDeque<SocketAddr>,
     known: HashSet<SocketAddr>,
     fails: HashMap<SocketAddr, (u8, Instant)>,
-    /// Addresses that were complete peers when we had nothing to download: not dialled while we
-    /// are upload-only (nothing to trade), usable again the moment we want pieces.
+    /// Addresses known to be seeds (complete peers that were of no use to us while we had nothing to
+    /// download): not dialled while we are upload-only (nothing to trade), usable again the moment we want
+    /// pieces. Not only candidates: a seed the torrent remembered across a demotion (SPEC §5.1) or that
+    /// reached us stays one when a tracker hands its address over again. Bounded like `known`.
     seeds: HashSet<SocketAddr>,
 }
 
@@ -298,6 +304,8 @@ pub(crate) struct PeerPool {
 const MAX_KNOWN_PEERS: usize = 512;
 /// Connection attempts per address before it is forgotten.
 const MAX_ATTEMPTS: u8 = 4;
+/// Known seeds a Cold torrent keeps (SPEC §5.1): 6 bytes each.
+pub(crate) const MAX_COLD_SEEDS: usize = 64;
 
 impl PeerPool {
     fn new() -> Self {
@@ -311,6 +319,23 @@ impl PeerPool {
     /// Add a candidate; returns whether it was new and acceptable. Kept in its canonical form
     /// ([`crate::net::canonical`]), the form peers and the in-use set use.
     pub(crate) fn add(&mut self, a: SocketAddr) -> bool {
+        self.insert(a, false)
+    }
+
+    /// Add candidates that just arrived (a tracker response, the DHT, a wake): returns how many are new and
+    /// not known seeds, the ones a seeding torrent dials at once. While upload-only they go to the front of
+    /// the queue, ahead of retries of addresses that failed before.
+    pub(crate) fn offer(&mut self, v: Vec<SocketAddr>, upload_only: bool) -> usize {
+        let mut fresh = 0;
+        for a in v {
+            if self.insert(a, upload_only) && !self.seeds.contains(&crate::net::canonical(a)) {
+                fresh += 1;
+            }
+        }
+        fresh
+    }
+
+    fn insert(&mut self, a: SocketAddr, front: bool) -> bool {
         let a = crate::net::canonical(a);
         let ip = a.ip();
         if a.port() == 0 || ip.is_multicast() || ip.is_unspecified() {
@@ -319,8 +344,26 @@ impl PeerPool {
         if self.known.len() >= MAX_KNOWN_PEERS || !self.known.insert(a) {
             return false;
         }
-        self.queue.push_back(a);
+        if front {
+            self.queue.push_front(a);
+        } else {
+            self.queue.push_back(a);
+        }
         true
+    }
+
+    /// Is a known address one that is not a remembered seed (something an upload-only torrent would dial)?
+    pub(crate) fn has_non_seed(&self) -> bool {
+        self.known.iter().any(|a| !self.seeds.contains(a))
+    }
+
+    /// Up to `max` remembered seeds for the Cold record, the ones that are also candidates first (a wake
+    /// hands those back from the peer cache).
+    pub(crate) fn seeds_to_keep(&self, max: usize) -> Vec<SocketAddr> {
+        let (mut v, rest): (Vec<SocketAddr>, Vec<SocketAddr>) = self.seeds.iter().partition(|a| self.known.contains(a));
+        v.extend(rest);
+        v.truncate(max);
+        v
     }
 
     /// An address whose dial failed for want of a network: back in the queue, no strike.
@@ -359,7 +402,10 @@ impl PeerPool {
     ) -> Option<SocketAddr> {
         for _ in 0..self.queue.len() {
             let a = self.queue.pop_front()?;
-            if !self.known.contains(&a) || banned.contains(&a.ip()) {
+            if !self.known.contains(&a) {
+                continue;
+            }
+            if banned.contains(&a.ip()) {
                 self.known.remove(&a);
                 self.seeds.remove(&a);
                 continue;
@@ -378,6 +424,7 @@ impl PeerPool {
     }
 
     /// Addresses remembered as seeds.
+    #[cfg(test)]
     pub(crate) fn seed_count(&self) -> usize {
         self.seeds.len()
     }
@@ -396,7 +443,8 @@ impl PeerPool {
 
     /// Remember that this address holds everything we have (no use to us while upload-only).
     pub(crate) fn mark_seed(&mut self, a: SocketAddr) {
-        if self.known.contains(&a) {
+        let a = crate::net::canonical(a);
+        if self.seeds.len() < MAX_KNOWN_PEERS {
             self.seeds.insert(a);
         }
     }
@@ -536,6 +584,11 @@ pub(crate) struct Torrent {
     /// Outgoing attempts a seeding torrent may still make now, and when it last earned one.
     pub seed_dials: u8,
     pub seed_dial_at: Instant,
+    /// New non-seed addresses (tracker, DHT, a wake) not yet answered with a boost of dials.
+    pub fresh_peers: usize,
+    /// The last `connect_more` stopped with candidates left (the allowance or a budget was spent): the actor
+    /// comes back soon to dial more, also with nobody connected.
+    pub dials_pending: bool,
     /// The last tracker response said nobody is downloading: an upload-only torrent dials no one.
     pub no_leechers: bool,
     /// When `slots` was last taken from the allocator.
@@ -646,8 +699,10 @@ impl Torrent {
             tier: init.tier,
             choker: Choker::new(seed),
             slots: 4,
-            seed_dials: 4,
+            seed_dials: events::SEED_DIAL_RESERVE,
             seed_dial_at: now,
+            fresh_peers: 0,
+            dials_pending: false,
             no_leechers: false,
             slots_at: now,
             last_rechoke: now,
@@ -688,6 +743,9 @@ impl Torrent {
         };
         for a in init.peers {
             t.pool.add(a);
+        }
+        for a in init.known_seeds {
+            t.pool.mark_seed(a);
         }
         t
     }
@@ -786,16 +844,12 @@ impl Torrent {
                 self.connect_more(Instant::now());
             }
             TorrentMsg::AddPeers(v) => {
-                for a in v {
-                    self.pool.add(a);
-                }
+                self.offer_peers(v);
                 self.connect_more(Instant::now());
             }
             TorrentMsg::TrackerPeers(v, incomplete) => {
                 self.no_leechers = incomplete == Some(0);
-                for a in v {
-                    self.pool.add(a);
-                }
+                self.offer_peers(v);
                 self.connect_more(Instant::now());
             }
             TorrentMsg::InfoBytes(r) => self.on_info_bytes(r),
@@ -895,6 +949,7 @@ impl Torrent {
         ShutdownInfo {
             resume: self.resume_record(None),
             peers: self.good_peers(),
+            seeds: self.pool.seeds_to_keep(MAX_COLD_SEEDS),
         }
     }
 
@@ -985,5 +1040,24 @@ mod pool_tests {
         assert_eq!(pool.next(now, &HashSet::new(), &HashSet::new(), true), None);
         pool.release_seeds();
         assert_eq!(pool.next(now, &HashSet::new(), &HashSet::new(), false), Some(v4));
+    }
+
+    /// A seed the Cold record remembered is not yet a candidate when the actor starts; once a tracker hands
+    /// its address back it must still be a seed: neither news (no boost of dials for it) nor dialled while
+    /// we only upload. New addresses come first, ahead of retries.
+    #[test]
+    fn a_remembered_seed_named_again_by_a_tracker_is_no_candidate_while_upload_only() {
+        let seed: SocketAddr = "203.0.113.7:6881".parse().unwrap();
+        let old: SocketAddr = "203.0.113.8:6881".parse().unwrap();
+        let leecher: SocketAddr = "203.0.113.9:6881".parse().unwrap();
+        let now = Instant::now();
+        let mut pool = PeerPool::new();
+        pool.mark_seed(seed);
+        assert!(pool.add(old));
+        assert_eq!(pool.offer(vec![seed, leecher, old], true), 1, "only the leecher is news");
+        assert_eq!(pool.next(now, &HashSet::new(), &HashSet::new(), true), Some(leecher));
+        assert_eq!(pool.next(now, &HashSet::new(), &HashSet::new(), true), Some(old));
+        assert_eq!(pool.next(now, &HashSet::new(), &HashSet::new(), true), None, "the seed is not dialled");
+        assert_eq!(pool.seeds_to_keep(super::MAX_COLD_SEEDS), vec![seed]);
     }
 }

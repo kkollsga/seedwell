@@ -34,6 +34,7 @@ mod recover;
 mod redownload;
 mod redundant;
 mod row_facts;
+mod seed_reach;
 mod seeding;
 mod settings;
 mod sharing;

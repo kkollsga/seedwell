@@ -1013,6 +1013,10 @@ async fn debug_methods_answer_at_read_only_and_never_leak_a_secret() {
     assert!(p.peers[0].addr.ends_with(".x:6881"), "{}", p.peers[0].addr);
     let plain: DebugPeersDto = serde_json::from_value(call(&mut c, "debug_peers", json!({"id": "aaaaaa"})).await.unwrap()).unwrap();
     assert_eq!(plain.peers[0].addr, "10.0.0.0:6881");
+    // What each peer asked of us reaches `debug peers` (a peer that never asked shows no age).
+    let x = &plain.peers[5];
+    assert_eq!((x.requests_received, x.blocks_served, x.requests_rejected, x.last_request_secs), (15, 10, 5, Some(5)));
+    assert_eq!(plain.peers[0].last_request_secs, None);
     let perf: DebugPerfDto = serde_json::from_value(call(&mut c, "debug_perf", json!({})).await.unwrap()).unwrap();
     assert_eq!(perf.torrent_count, 2);
     assert!(perf.process.pid > 0);
