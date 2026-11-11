@@ -178,6 +178,16 @@ function WaitFor([scriptblock]$test, [int]$ms, [string]$what) {
   Fail "timed out after $ms ms waiting for $what"
 }
 
+# A file's text for a check that polls it, or nothing while it is not there or busy: a read never ends a check, and
+# never stands in the core's way (it shares read, write and delete). Get-Content opens without sharing delete, so it can
+# meet the core replacing the file ("being used by another process", which ends the check in Windows PowerShell).
+function ReadText([string]$path) {
+  try {
+    $s = [IO.FileStream]::new($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]"ReadWrite, Delete")
+    try { [IO.StreamReader]::new($s).ReadToEnd() } finally { $s.Dispose() }
+  } catch { $null }
+}
+
 # A temporary state: its own folders, .torrent files left where they are, new torrents held ten minutes (no tracker is
 # asked), no network beyond its own port (no DHT, PEX, LSD, UPnP or NAT-PMP: nothing reaches the router or the
 # Internet), agents read-only (the checks read the core through the CLI).
@@ -3552,7 +3562,7 @@ $checks.ondemandchanges = {
   $pa = Start-App $a -QaControl
   $pb = $null
   # A folder's files and their text, for comparing (the folder's own .seedwell left out).
-  $tree = { param($root) (Get-ChildItem -Recurse -File $root -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notlike '*\.seedwell\*' } | Sort-Object FullName | ForEach-Object { "$($_.FullName.Substring($root.Length + 1).Replace('\', '/'))=$(Get-Content -Raw $_.FullName -ErrorAction SilentlyContinue)" }) -join ', ' }
+  $tree = { param($root) (Get-ChildItem -Recurse -File $root -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notlike '*\.seedwell\*' } | Sort-Object FullName | ForEach-Object { "$($_.FullName.Substring($root.Length + 1).Replace('\', '/'))=$(ReadText $_.FullName)" }) -join ', ' }
   $mine = { @(Log $b | Where-Object { $_ -match 'on-demand: .* (moved here|deleted here|changed here|added here)' }) }
   try {
     $pb = Start-App $b -QaControl
@@ -3623,7 +3633,7 @@ $checks.ondemandchanges = {
     $before = & $id 'edit.txt'
     $w = & $watch "$docs\edit.txt"
     & $word 'saved by replace'
-    WaitFor { (Get-Content -Raw "$docs\edit.txt" -ErrorAction SilentlyContinue) -eq 'saved by replace' } 15000 'the save on A' | Out-Null
+    WaitFor { (ReadText "$docs\edit.txt") -eq 'saved by replace' } 15000 'the save on A' | Out-Null
     if (& $seen $w) { Fail 'edit.txt went missing on A during the save' }
     WaitFor { (Qa $b @('ondemand', 'placeholder', "$bd\edit.txt")) -match 'placeholder True' } 10000 'edit.txt a placeholder again' | Out-Null
     if ((& $id 'edit.txt') -ne $before) { Fail "the save made a new item: $before, then $(& $id 'edit.txt')" }
@@ -3639,7 +3649,7 @@ $checks.ondemandchanges = {
     $w = & $watch "$docs\new.txt"
     Remove-Item "$bd\new.txt"
     'recreated' | Set-Content -NoNewline "$bd\new.txt"
-    WaitFor { (Get-Content -Raw "$docs\new.txt" -ErrorAction SilentlyContinue) -eq 'recreated' } 15000 'the recreated file on A' | Out-Null
+    WaitFor { (ReadText "$docs\new.txt") -eq 'recreated' } 15000 'the recreated file on A' | Out-Null
     if (& $seen $w) { Fail 'new.txt went missing on A' }
     if ((& $id 'new.txt') -ne $before) { Fail 'delete and create at once made a new item' }
     # Not a save: later, it is a new item, and A deleted the old one in between.
@@ -3648,7 +3658,7 @@ $checks.ondemandchanges = {
     WaitFor { -not (Test-Path "$docs\renamed.txt") } 15000 'the delete on A' | Out-Null
     Start-Sleep 1
     'again' | Set-Content -NoNewline "$bd\renamed.txt"
-    WaitFor { (Get-Content -Raw "$docs\renamed.txt" -ErrorAction SilentlyContinue) -eq 'again' } 15000 'the new file on A' | Out-Null
+    WaitFor { (ReadText "$docs\renamed.txt") -eq 'again' } 15000 'the new file on A' | Out-Null
     if ((& $id 'renamed.txt') -eq $before) { Fail 'a file made after the window kept the old item' }
     # An online-only file renamed to a name not synced: refused, nothing changes, and the core's notice says why.
     if ((Qa $b @('ondemand')) -notmatch 'farther\.txt:p') { Fail 'farther.txt is not online only' }
@@ -3699,7 +3709,7 @@ $checks.ondemandchanges = {
     if (@(& $issues).Count -ne 1) { Fail "the kept folder's issues after another start: $((& $issues | ForEach-Object { $_.reason }) -join ' || ')" }
     # A synced file in it takes it up again; the file not synced stays here only.
     'n' | Set-Content -NoNewline "$bd\kf\new.txt"
-    WaitFor { (Get-Content -Raw "$docs\kf\new.txt" -ErrorAction SilentlyContinue) -eq 'n' } 15000 'the file in the kept folder on A' | Out-Null
+    WaitFor { (ReadText "$docs\kf\new.txt") -eq 'n' } 15000 'the file in the kept folder on A' | Out-Null
     if (Test-Path "$docs\kf\~keep.tmp") { Fail 'the file not synced reached A' }
     WaitFor { (Qa $b @('ondemand', 'placeholder', "$bd\kf")) -match 'placeholder True' -and (Qa $b @('ondemand', 'placeholder', "$bd\kf\new.txt")) -match 'placeholder True' } 10000 'kf and new.txt as placeholders' | Out-Null
     if ((Qa $b @('ondemand', 'placeholder', "$bd\kf\~keep.tmp")) -notmatch 'placeholder False') { Fail '~keep.tmp became a placeholder' }
@@ -3781,7 +3791,7 @@ $checks.ondemandwrites = {
     Start-Sleep -Seconds 3
     foreach ($text in 'overwritten once', 'overwritten twice') {
       [IO.File]::WriteAllText($one, $text)
-      try { WaitFor { (Get-Content -Raw "$docs\one.txt" -ErrorAction SilentlyContinue) -eq $text } 20000 "'$text' on A" | Out-Null }
+      try { WaitFor { (ReadText "$docs\one.txt") -eq $text } 20000 "'$text' on A" | Out-Null }
       catch { Fail "the overwrite was lost: B has '$([IO.File]::ReadAllText($one))', A has '$(Get-Content -Raw "$docs\one.txt")', placeholder on B: $(Qa $b @('ondemand', 'placeholder', $one))" }
       WaitFor { (Qa $b @('ondemand', 'placeholder', $one)) -match 'placeholder True' } 20000 "one.txt a placeholder again after '$text'" | Out-Null
       Start-Sleep -Seconds 3
@@ -3798,7 +3808,7 @@ $checks.ondemandwrites = {
     $inplace.Write($bytes, 0, $bytes.Length); $inplace.Dispose()
     $pb = Start-App $b -QaControl
     foreach ($was in @{ f = 'one.txt'; t = 'overwritten away' }, @{ f = 'p40.txt'; t = 'in place 40' }) {
-      try { WaitFor { (Get-Content -Raw "$docs\$($was.f)" -ErrorAction SilentlyContinue) -eq $was.t } 30000 "'$($was.t)' on A" | Out-Null }
+      try { WaitFor { (ReadText "$docs\$($was.f)") -eq $was.t } 30000 "'$($was.t)' on A" | Out-Null }
       catch { Fail "the save made while the app was not running was lost: $($was.f) on B has '$([IO.File]::ReadAllText("$bd\$($was.f)"))', on A '$(Get-Content -Raw "$docs\$($was.f)")'" }
     }
     WaitFor { (Qa $b @('ondemand', 'placeholder', $one)) -match 'placeholder True' } 20000 'one.txt a placeholder again after the restart' | Out-Null
@@ -3809,7 +3819,7 @@ $checks.ondemandwrites = {
     $whole = 'written at the worst moment of an update'
     $during = Qa $b @('ondemand', 'write-during-update', 'one.txt', $whole) 40000
     if ($during -notmatch "holds `"$whole`"") { Fail "a write during an update was damaged: $during. B: $((Log $b | Where-Object { $_ -like '*on-demand: one*' }) -join ' / ')" }
-    try { WaitFor { (Get-Content -Raw "$docs\one.txt" -ErrorAction SilentlyContinue) -eq $whole } 20000 'the write during an update on A' | Out-Null }
+    try { WaitFor { (ReadText "$docs\one.txt") -eq $whole } 20000 'the write during an update on A' | Out-Null }
     catch { Fail "a write during an update did not arrive whole: B has '$([IO.File]::ReadAllText($one))', A has '$(Get-Content -Raw "$docs\one.txt")'" }
 
     # A read that fills the placeholder, and writes straight after it, on through the moment the feed says the file is
@@ -3828,11 +3838,11 @@ $checks.ondemandwrites = {
     }
     if ($refused.Count -gt 0) { Fail "$($refused.Count) writes refused: $(($refused | Select-Object -First 8) -join ' || ')" }
 
-    $missing = { @(1..$count | ForEach-Object { if ($_ -lt $count -and (Get-Content -Raw "$docs\p$_.txt" -ErrorAction SilentlyContinue) -ne "edited $_") { "p$_" }; if ((Get-Content -Raw "$docs\n$_.txt" -ErrorAction SilentlyContinue) -ne "new $_ write 12") { "n$_" } }) }
+    $missing = { @(1..$count | ForEach-Object { if ($_ -lt $count -and (ReadText "$docs\p$_.txt") -ne "edited $_") { "p$_" }; if ((ReadText "$docs\n$_.txt") -ne "new $_ write 12") { "n$_" } }) }
     try { WaitFor { (& $missing).Count -eq 0 } 60000 'every last write on A' | Out-Null }
     catch {
       $late = & $missing
-      $said = $late | Select-Object -First 3 | ForEach-Object { "$_ on B says '$(Get-Content -Raw "$bd\$_.txt")', placeholder $((Qa $b @('ondemand', 'placeholder', "$bd\$_.txt")) -match 'placeholder True'); on A '$(Get-Content -Raw "$docs\$_.txt" -ErrorAction SilentlyContinue)'" }
+      $said = $late | Select-Object -First 3 | ForEach-Object { "$_ on B says '$(Get-Content -Raw "$bd\$_.txt")', placeholder $((Qa $b @('ondemand', 'placeholder', "$bd\$_.txt")) -match 'placeholder True'); on A '$(ReadText "$docs\$_.txt")'" }
       Fail "not on A within 60 s: $($late -join ', '). $($said -join ' || ')"
     }  } finally {
     Stop-App $b $pb; Stop-App $a $pa
@@ -3870,10 +3880,10 @@ $checks.ondemandstale = {
     'from A' | Set-Content -NoNewline "$docs\one.txt"
     WaitFor { (Qa $b @('ondemand', 'wrote-when-stale')) -match 'wrote True' } 30000 'the write at the moment the file is let go of' | Out-Null
 
-    $holders = { foreach ($d in $bd, $docs) { Get-ChildItem -LiteralPath $d -File -ErrorAction SilentlyContinue | Where-Object { (Get-Content -Raw -LiteralPath $_.FullName -ErrorAction SilentlyContinue) -eq $write } | ForEach-Object { $_.FullName } } }
+    $holders = { foreach ($d in $bd, $docs) { Get-ChildItem -LiteralPath $d -File -ErrorAction SilentlyContinue | Where-Object { (ReadText $_.FullName) -eq $write } | ForEach-Object { $_.FullName } } }
     try { WaitFor { @(& $holders).Count -gt 0 } 20000 'the write in a file' | Out-Null }
     catch {
-      $there = foreach ($d in $bd, $docs) { Get-ChildItem -LiteralPath $d -File -ErrorAction SilentlyContinue | ForEach-Object { "$($_.FullName): '$(Get-Content -Raw -LiteralPath $_.FullName -ErrorAction SilentlyContinue)'" } }
+      $there = foreach ($d in $bd, $docs) { Get-ChildItem -LiteralPath $d -File -ErrorAction SilentlyContinue | ForEach-Object { "$($_.FullName): '$(ReadText $_.FullName)'" } }
       Fail "the write was lost: $($there -join ' || ')"
     }
     # Both devices end up holding it.

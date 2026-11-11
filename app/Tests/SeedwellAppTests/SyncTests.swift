@@ -204,8 +204,10 @@ import Testing
         let w = try #require(m.window)
         #expect(w.refreshMs != nil && w.readOnly?.on == false, "\(w)")
         func until(_ what: String, _ done: () -> Bool) async throws {
+            // 30 s, as the opening: on a loaded CI runner (191 tests at once on a few cores) every read waits its turn for a
+            // thread, and three rounds have taken longer than 10 s. A dialog that never reads again still fails here.
             let start = ContinuousClock.now
-            while !done(), ContinuousClock.now - start < .seconds(10) { try await Task.sleep(for: .milliseconds(10)) }
+            while !done(), ContinuousClock.now - start < .seconds(30) { try await Task.sleep(for: .milliseconds(10)) }
             #expect(done(), "\(what): \(String(describing: m.window))")
         }
         // Nothing changed: read again, nothing new shown.
